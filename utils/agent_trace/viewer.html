@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Trace Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:         #080c14;
+  --surface:    #0f1520;
+  --surface2:   #151d2e;
+  --surface3:   #1a2540;
+  --border:     rgba(56,189,248,0.1);
+  --border-hi:  rgba(56,189,248,0.25);
+  --text:       #e2e8f0;
+  --text-dim:   #94a3b8;
+  --muted:      #64748b;
+  --accent:     #38bdf8;
+  --accent-dim: rgba(56,189,248,0.15);
+  --success:    #34d399;
+  --error:      #f87171;
+  --warning:    #fbbf24;
+  --purple:     #c084fc;
+  --cyan:       #22d3ee;
+  --pink:       #f472b6;
+  --orange:     #fb923c;
+  --green:      #4ade80;
+  --teal:       #2dd4bf;
+  --glow-error: 0 0 12px rgba(248,113,113,0.2);
+}
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  grid-template-columns: 300px 1fr;
+}
+
+header {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+  position: relative;
+  z-index: 1;
+}
+header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.3;
+}
+header h1 {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--accent);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.header-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+.header-controls input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 12px;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  width: 180px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.header-controls input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 5px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  transition: all 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+#sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  position: relative;
+  z-index: 1;
+}
+#sidebar::-webkit-scrollbar { width: 4px; }
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+.run-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+}
+.run-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.run-item:hover { background: var(--surface2); }
+.run-item:hover::before { background: var(--muted); }
+.run-item.active { background: var(--surface2); }
+.run-item.active::before { background: var(--accent); box-shadow: 0 0 8px rgba(56,189,248,0.4); }
+.run-item .run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 3px;
+}
+.run-item .run-agent {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+  letter-spacing: 0.3px;
+}
+.run-item .run-id {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+.run-item .run-meta {
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+}
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+.badge-success { background: rgba(52,211,153,0.12); color: var(--success); border: 1px solid rgba(52,211,153,0.2); }
+.badge-error   { background: rgba(248,113,113,0.12); color: var(--error); border: 1px solid rgba(248,113,113,0.2); }
+.badge-running { background: rgba(251,191,36,0.12); color: var(--warning); border: 1px solid rgba(251,191,36,0.2); }
+
+#content {
+  overflow-y: auto;
+  padding: 28px 32px;
+  position: relative;
+  z-index: 1;
+}
+#content::-webkit-scrollbar { width: 5px; }
+#content::-webkit-scrollbar-track { background: transparent; }
+#content::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 3px; }
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 13px;
+  gap: 12px;
+}
+
+.run-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.run-header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  width: 100px;
+  height: 1px;
+  background: var(--accent);
+  opacity: 0.4;
+}
+.run-header h2 {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+.run-header .meta-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.meta-row span { display: flex; align-items: center; gap: 5px; }
+
+.io-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.io-box-title {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 8px;
+  opacity: 0.7;
+}
+
+.stats-bar {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+.stats-bar .stat-val { color: var(--accent); font-weight: 600; }
+
+.chain-tree {
+  position: relative;
+}
+
+.chain-node {
+  position: relative;
+  margin-bottom: 2px;
+}
+.chain-node-inner {
+  position: relative;
+  margin-left: 24px;
+}
+.chain-node-inner::before {
+  content: '';
+  position: absolute;
+  left: -24px;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+}
+.chain-node-inner::after {
+  content: '';
+  position: absolute;
+  left: -24px;
+  top: 15px;
+  width: 18px;
+  height: 1px;
+  background: var(--border-hi);
+}
+.chain-children {
+  margin-left: 24px;
+  position: relative;
+}
+.chain-children::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 16px;
+  width: 1px;
+  background: var(--border-hi);
+}
+.chain-node:last-child > .chain-children::before {
+  bottom: 16px;
+}
+.chain-node:last-child > .chain-node-inner::before {
+  top: 0;
+  height: 15px;
+  background: var(--border-hi);
+  width: 1px;
+}
+.chain-node:not(:last-child) > .chain-node-inner::before {
+  top: 0;
+  bottom: 0;
+  background: var(--border-hi);
+  width: 1px;
+}
+
+.chain-node.root-node > .chain-node-inner {
+  margin-left: 0;
+}
+.chain-node.root-node > .chain-node-inner::before,
+.chain-node.root-node > .chain-node-inner::after {
+  display: none;
+}
+.chain-node.root-node > .chain-children {
+  margin-left: 0;
+}
+.chain-node.root-node > .chain-children::before {
+  display: none;
+}
+
+.step-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  border-left: 3px solid var(--border);
+  transition: border-color 0.15s;
+}
+.step-card:hover { border-color: var(--border-hi); }
+.step-card.type-llm        { border-left-color: var(--purple); }
+.step-card.type-tool       { border-left-color: var(--warning); }
+.step-card.type-chain      { border-left-color: var(--accent); }
+.step-card.type-retriever  { border-left-color: var(--cyan); }
+.step-card.type-agent      { border-left-color: var(--green); }
+.step-card.type-tools      { border-left-color: var(--orange); }
+.step-card.type-planner    { border-left-color: var(--teal); }
+.step-card.type-executor   { border-left-color: var(--pink); }
+.step-card.type-replanner  { border-left-color: var(--purple); }
+.step-card.type-classifier { border-left-color: var(--accent); }
+.step-card.type-graph      { border-left-color: var(--success); }
+.step-card.type-undefined  { border-left-color: var(--muted); }
+.step-card.status-error    { border-left-color: var(--error) !important; box-shadow: var(--glow-error); }
+.step-card.type-llm:hover  { box-shadow: 0 0 10px rgba(192,132,252,0.06); }
+.step-card.type-tool:hover { box-shadow: 0 0 10px rgba(251,191,36,0.06); }
+
+.step-head {
+  padding: 6px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.1s;
+  user-select: none;
+}
+.step-head:hover { background: var(--surface2); }
+.step-type-icon { font-size: 12px; width: 16px; text-align: center; flex-shrink: 0; }
+.step-name {
+  font-weight: 500;
+  font-size: 11.5px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.step-label {
+  font-size: 9px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 1px 6px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+  font-weight: 500;
+}
+.step-dur {
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.step-chevron {
+  color: var(--muted);
+  font-size: 9px;
+  transition: transform 0.2s cubic-bezier(0.4,0,0.2,1);
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+.step-card.open .step-chevron { transform: rotate(90deg); opacity: 1; }
+
+.step-body {
+  display: none;
+  border-top: 1px solid var(--border);
+  padding: 12px 14px;
+  font-size: 11.5px;
+  background: var(--surface2);
+}
+.step-card.open .step-body { display: block; }
+
+.msg-list { display: flex; flex-direction: column; gap: 4px; }
+.msg {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.msg-role {
+  padding: 2px 10px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.msg-role-system    { background: rgba(192,132,252,0.1); color: var(--purple); }
+.msg-role-human     { background: rgba(56,189,248,0.1);  color: var(--accent); }
+.msg-role-user      { background: rgba(56,189,248,0.1);  color: var(--accent); }
+.msg-role-ai        { background: rgba(52,211,153,0.1);   color: var(--success); }
+.msg-role-assistant { background: rgba(52,211,153,0.1);   color: var(--success); }
+.msg-role-tool      { background: rgba(251,191,36,0.1);   color: var(--warning); }
+.msg-content {
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  max-height: 260px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.msg-tool-calls {
+  padding: 5px 10px;
+  background: var(--bg);
+  font-size: 10px;
+  color: var(--cyan);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border);
+}
+
+.token-info {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  gap: 16px;
+}
+
+.error-box {
+  background: rgba(248,113,113,0.06);
+  border: 1px solid rgba(248,113,113,0.2);
+  border-radius: 3px;
+  padding: 8px 12px;
+  color: var(--error);
+  font-size: 11px;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.drop-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(8,12,20,0.92);
+  z-index: 999;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--accent);
+  font-family: 'Chakra Petch', sans-serif;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  border: 2px dashed var(--accent);
+  margin: 24px;
+  border-radius: 8px;
+}
+.drop-overlay.visible { display: flex; }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.chain-node { animation: slideIn 0.12s ease forwards; }
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.badge-running { animation: pulseGlow 2s ease-in-out infinite; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Agent Trace</h1>
+  <div class="header-controls">
+    <input type="text" id="searchInput" placeholder="搜索 runs ...">
+    <label class="btn" style="cursor:pointer">
+      Load JSON
+      <input type="file" id="fileInput" accept=".json" hidden>
+    </label>
+    <button class="btn" id="clearBtn">Clear</button>
+  </div>
+</header>
+
+<aside id="sidebar">
+  <div id="runList"></div>
+</aside>
+
+<section id="content">
+  <div class="placeholder" id="placeholder">
+    拖拽 JSON 文件到此处，或点击 Load JSON 加载
+  </div>
+  <div id="traceView" style="display:none"></div>
+</section>
+
+<div class="drop-overlay" id="dropOverlay">释放文件以加载</div>
+
+<script>
+const TYPE_ICONS = {
+  llm: '🤖', tool: '🔧', chain: '🔗', retriever: '📄',
+  agent: '🤖', tools: '🔧', planner: '📋', executor: '⚡',
+  replanner: '🔄', classifier: '🏷️', graph: '🌳',
+  unified_executor: '🚀', undefined: '❓',
+};
+
+const S = {
+  runs: [],
+  selectedId: null,
+  apiBase: null,
+};
+
+if (window.location.protocol !== 'file:') {
+  S.apiBase = window.location.origin;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (S.apiBase) loadFromAPI();
+  setupDnD();
+  setupSearch();
+  document.getElementById('fileInput').addEventListener('change', onFilePick);
+  document.getElementById('clearBtn').addEventListener('click', () => {
+    S.runs = [];
+    S.selectedId = null;
+    render();
+  });
+});
+
+async function loadFromAPI() {
+  try {
+    const res = await fetch(`${S.apiBase}/api/runs`);
+    S.runs = await res.json();
+    render();
+  } catch (e) {
+    console.error('API load failed:', e);
+  }
+}
+
+async function loadRunDetailAPI(runId) {
+  try {
+    const [runRes, stepsRes] = await Promise.all([
+      fetch(`${S.apiBase}/api/runs/${runId}`),
+      fetch(`${S.apiBase}/api/runs/${runId}/steps`),
+    ]);
+    const run = await runRes.json();
+    const steps = await stepsRes.json();
+    run.steps = steps;
+    return run;
+  } catch (e) {
+    console.error('API detail failed:', e);
+    return null;
+  }
+}
+
+function loadFromJSON(data) {
+  S.runs = data.runs || [data.run];
+  render();
+}
+
+function onFilePick(e) {
+  const file = e.target.files[0];
+  if (file) readFile(file);
+  e.target.value = '';
+}
+
+function readFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      loadFromJSON(data);
+    } catch (e) {
+      alert('JSON 解析失败: ' + e.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function setupDnD() {
+  const overlay = document.getElementById('dropOverlay');
+  let dragCount = 0;
+  document.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragCount++;
+    overlay.classList.add('visible');
+  });
+  document.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragCount--;
+    if (dragCount <= 0) { overlay.classList.remove('visible'); dragCount = 0; }
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragCount = 0;
+    overlay.classList.remove('visible');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.json')) readFile(file);
+  });
+}
+
+function setupSearch() {
+  const input = document.getElementById('searchInput');
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => render(), 200);
+  });
+}
+
+function getFilteredRuns() {
+  const q = (document.getElementById('searchInput').value || '').toLowerCase();
+  if (!q) return S.runs;
+  return S.runs.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+}
+
+function render() {
+  renderRunList();
+  renderTraceView();
+}
+
+function renderRunList() {
+  const el = document.getElementById('runList');
+  const runs = getFilteredRuns();
+  if (!runs.length) {
+    el.innerHTML = '<div style="padding:24px;color:var(--muted);text-align:center;font-size:11px">NO DATA</div>';
+    return;
+  }
+  el.innerHTML = runs.map(r => `
+    <div class="run-item ${r.id === S.selectedId ? 'active' : ''}"
+         onclick="selectRun('${r.id}')">
+      <div class="run-head">
+        <span class="run-agent">${esc(r.agent_name || '?')}</span>
+        <span class="badge badge-${r.status}">${r.status}</span>
+      </div>
+      <div class="run-id">${(r.id||'').slice(0,12)}...</div>
+      <div class="run-meta">
+        <span>${fmtDur(r.duration_ms)}</span>
+        <span>${fmtTime(r.created_at)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function selectRun(id) {
+  S.selectedId = id;
+  renderRunList();
+  let run = S.runs.find(r => r.id === id);
+  if (S.apiBase && (!run.steps || !run.steps.length)) {
+    const detail = await loadRunDetailAPI(id);
+    if (detail) {
+      const idx = S.runs.findIndex(r => r.id === id);
+      if (idx >= 0) S.runs[idx] = detail;
+      run = detail;
+    }
+  }
+  renderTraceView();
+}
+
+function getStepLabel(step) {
+  if (step.extra) {
+    try {
+      const extra = typeof step.extra === 'string' ? JSON.parse(step.extra) : step.extra;
+      if (extra.label) return extra.label;
+    } catch(e) {}
+  }
+  return null;
+}
+
+function buildTree(steps) {
+  const byId = {};
+  const roots = [];
+
+  for (const s of steps) {
+    const rid = s.event_run_id;
+    byId[rid] = { step: s, children: [] };
+  }
+
+  for (const s of steps) {
+    const rid = s.event_run_id;
+    const prid = s.parent_run_id;
+    if (prid && byId[prid]) {
+      byId[prid].children.push(byId[rid]);
+    } else {
+      roots.push(byId[rid]);
+    }
+  }
+
+  for (const node of Object.values(byId)) {
+    node.children.sort((a, b) => {
+      const ta = a.step.started_at || '';
+      const tb = b.step.started_at || '';
+      return ta.localeCompare(tb);
+    });
+  }
+
+  return roots;
+}
+
+let _stepIdx = 0;
+
+function renderTree(nodes) {
+  let html = '';
+  for (const node of nodes) {
+    const idx = _stepIdx++;
+    const s = node.step;
+    const label = getStepLabel(s);
+    const typeClass = `type-${s.step_type}`;
+    const errClass = s.status === 'error' ? 'status-error' : '';
+    const icon = TYPE_ICONS[s.step_type] || '·';
+    const hasBody = s.input || s.output || s.error || (s.messages && s.messages.length) || s.extra;
+    const isRoot = !s.parent_run_id;
+    const hasChildren = node.children.length > 0;
+
+    html += `<div class="chain-node ${isRoot ? 'root-node' : ''}">`;
+    html += `<div class="chain-node-inner">`;
+    html += `
+      <div class="step-card ${typeClass} ${errClass}" id="step-${idx}">
+        <div class="step-head" onclick="toggleStep(${idx})">
+          <span class="step-type-icon">${icon}</span>
+          <span class="step-name">${esc(s.step_name || '?')}</span>
+          ${label ? `<span class="step-label">${esc(label)}</span>` : ''}
+          <span class="badge badge-${s.status}" style="margin-left:auto;margin-right:8px">${s.status}</span>
+          <span class="step-dur">${fmtDur(s.duration_ms)}</span>
+          ${hasBody ? '<span class="step-chevron">▶</span>' : ''}
+        </div>
+        ${hasBody ? `<div class="step-body">${renderStepBody(s)}</div>` : ''}
+      </div>
+    `;
+    html += `</div>`;
+
+    if (hasChildren) {
+      html += `<div class="chain-children">`;
+      html += renderTree(node.children);
+      html += `</div>`;
+    }
+
+    html += `</div>`;
+  }
+  return html;
+}
+
+function renderTraceView() {
+  const placeholder = document.getElementById('placeholder');
+  const view = document.getElementById('traceView');
+
+  if (!S.selectedId) {
+    placeholder.style.display = 'flex';
+    view.style.display = 'none';
+    return;
+  }
+
+  const run = S.runs.find(r => r.id === S.selectedId);
+  if (!run) {
+    placeholder.style.display = 'flex';
+    view.style.display = 'none';
+    return;
+  }
+
+  placeholder.style.display = 'none';
+  view.style.display = 'block';
+
+  const steps = run.steps || [];
+
+  let html = `
+    <div class="run-header">
+      <h2>${esc(run.agent_name || 'Unknown')}</h2>
+      <div class="meta-row">
+        <span class="badge badge-${run.status}">${run.status}</span>
+        <span>ID: ${(run.id||'').slice(0,16)}</span>
+        <span>耗时: ${fmtDur(run.duration_ms)}</span>
+        <span>时间: ${fmtTime(run.created_at)}</span>
+      </div>
+    </div>
+  `;
+
+  if (run.error) {
+    html += `<div class="error-box">${esc(run.error)}</div>`;
+  }
+
+  if (run.input) {
+    html += `
+      <div class="io-box">
+        <div class="io-box-title">Input</div>
+        ${esc(run.input)}
+      </div>
+    `;
+  }
+
+  if (steps.length) {
+    const typeCounts = {};
+    let totalTokens = 0;
+    steps.forEach(s => {
+      typeCounts[s.step_type] = (typeCounts[s.step_type] || 0) + 1;
+      if (s.extra) {
+        try {
+          const extra = typeof s.extra === 'string' ? JSON.parse(s.extra) : s.extra;
+          if (extra.token_usage) {
+            totalTokens += (extra.token_usage.prompt_tokens || 0) + (extra.token_usage.completion_tokens || 0);
+          }
+        } catch(e) {}
+      }
+    });
+
+    html += `<div class="stats-bar">`;
+    html += `<span>Steps: <span class="stat-val">${steps.length}</span></span>`;
+    const typeSummary = Object.entries(typeCounts).map(([t,c]) => `${TYPE_ICONS[t]||'?'}${t}:${c}`).join('  ');
+    html += `<span>${typeSummary}</span>`;
+    if (totalTokens) {
+      html += `<span>Tokens: <span class="stat-val">${totalTokens.toLocaleString()}</span></span>`;
+    }
+    html += `</div>`;
+
+    _stepIdx = 0;
+    const tree = buildTree(steps);
+    html += `<div class="chain-tree">${renderTree(tree)}</div>`;
+  }
+
+  if (run.output) {
+    html += `
+      <div class="io-box" style="margin-top:16px">
+        <div class="io-box-title">Output</div>
+        ${esc(run.output)}
+      </div>
+    `;
+  }
+
+  view.innerHTML = html;
+}
+
+function renderStepBody(s) {
+  let html = '';
+
+  if (s.input) {
+    html += `
+      <div class="io-box" style="margin-bottom:8px">
+        <div class="io-box-title">Input</div>
+        ${esc(s.input)}
+      </div>
+    `;
+  }
+
+  const msgs = s.messages || [];
+  if (msgs.length) {
+    html += '<div class="msg-list">';
+    msgs.forEach(m => {
+      const role = m.role || 'unknown';
+      html += `
+        <div class="msg">
+          <div class="msg-role msg-role-${role}">${role}</div>
+          <div class="msg-content">${esc(m.content || '')}</div>
+          ${m.tool_calls ? `<div class="msg-tool-calls">${esc(m.tool_calls)}</div>` : ''}
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+
+  if (s.extra) {
+    try {
+      const extra = typeof s.extra === 'string' ? JSON.parse(s.extra) : s.extra;
+      const usage = extra.token_usage;
+      if (usage && (usage.total_tokens || usage.prompt_tokens)) {
+        html += `<div class="token-info">
+          ${usage.prompt_tokens != null ? `<span>↑ ${usage.prompt_tokens}</span>` : ''}
+          ${usage.completion_tokens != null ? `<span>↓ ${usage.completion_tokens}</span>` : ''}
+          ${usage.total_tokens != null ? `<span>∑ ${usage.total_tokens} tokens</span>` : ''}
+        </div>`;
+      }
+    } catch(e) {}
+  }
+
+  if (s.output) {
+    html += `
+      <div class="io-box" style="margin-top:8px">
+        <div class="io-box-title">Output</div>
+        ${esc(s.output)}
+      </div>
+    `;
+  }
+
+  if (s.error) {
+    html += `<div class="error-box">${esc(s.error)}</div>`;
+  }
+
+  return html;
+}
+
+function toggleStep(i) {
+  const card = document.getElementById(`step-${i}`);
+  if (card) card.classList.toggle('open');
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function fmtDur(ms) {
+  if (ms == null) return '...';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString();
+  } catch { return iso.slice(0, 19); }
+}
+</script>
+</body>
+</html>

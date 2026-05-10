@@ -1,0 +1,55 @@
+"""选股雷达 - 分类缓存管理"""
+from utils.cache.market import is_market_closed, _get_next_trading_open_time
+from utils.cache.policies import (
+    _CACHE_EXPIRE_POLICIES, _get_expire_hours,
+    _get_general_cache_expire_hours,
+    _get_rating_cache_expire_hours,
+    _get_board_cache_expire_hours,
+    _get_news_cache_expire_hours,
+    _get_financial_cache_expire_hours,
+    _get_board_list_cache_expire_hours,
+    _get_history_cache_expire_hours,
+    _get_valuation_cache_expire_hours,
+    _get_valuation_history_cache_expire_hours,
+    _get_industry_valuation_cache_expire_hours,
+    _get_fund_flow_cache_expire_hours,
+    _get_margin_cache_expire_hours,
+    _get_block_trade_cache_expire_hours,
+    _get_sector_rotation_cache_expire_hours,
+    _get_risk_metrics_cache_expire_hours,
+)
+from utils.cache.core import (
+    get_db, init_cache_tables, _is_expired,
+    _get, _set, _delete,
+    _df_to_cache, _cache_to_df, _get_df, _set_df,
+)
+from utils.cache.api import (
+    get_history_cache, set_history_cache,
+    get_board_cache, set_board_cache,
+    get_news_cache, set_news_cache,
+    get_rating_cache, set_rating_cache,
+    get_financial_cache, set_financial_cache,
+    get_board_list_cache, set_board_list_cache,
+    get_realtime_cache, set_realtime_cache,
+    get_valuation_cache, set_valuation_cache,
+    get_valuation_history_cache, set_valuation_history_cache,
+    get_industry_valuation_cache, set_industry_valuation_cache,
+    get_fund_flow_cache, set_fund_flow_cache,
+    get_margin_cache, set_margin_cache,
+    get_block_trade_cache, set_block_trade_cache,
+    get_sector_rotation_cache, set_sector_rotation_cache,
+    get_risk_metrics_cache, set_risk_metrics_cache,
+)
+from utils.cache.cleaners import (
+    CacheCleaner, CacheCleanerRegistry,
+    UtilsCacheCleaner, DialogCleaner, LogsCleaner,
+    clean_expired_cache, async_clean_expired_cache,
+)
+
+# 注册清理器
+CacheCleanerRegistry.register(UtilsCacheCleaner())
+CacheCleanerRegistry.register(DialogCleaner())
+CacheCleanerRegistry.register(LogsCleaner())
+
+# 初始化
+init_cache_tables()

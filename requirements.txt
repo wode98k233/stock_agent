@@ -1,0 +1,17 @@
+akshare>=1.11.0
+baostock>=0.8.8
+efinance>=0.5.8
+tushare>=1.4.0
+langchain>=0.2.0
+langchain-classic>=0.1.0
+langgraph>=0.2.0
+langchain-openai>=0.1.0
+openai>=1.10.0
+TA-Lib>=0.4.24
+pandas>=2.2.0
+numpy>=1.26.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pyinstaller>=6.0.0
+pytest>=7.0.0
+pytest-asyncio>=0.18.0
