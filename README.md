@@ -33,6 +33,30 @@
 | Web 工作台 | FastAPI + 前端面板，支持对话、配置、回测、决策仪表盘 |
 | 通知推送 | 钉钉 / 飞书 / 企业微信 / Telegram / 邮件 / Webhook 等 12 种渠道 |
 
+## 界面预览
+
+**Web 工作台 —— 对话分析**
+
+用自然语言提问，Agent 自动调度数据源与技能完成分析，右侧实时展示执行链：
+
+| 对话首页 | 分析执行过程 |
+| --- | --- |
+| ![对话首页](assets/web-home.png) | ![分析执行过程](assets/web-analysis.png) |
+
+**市场日报与决策建议** —— 自动生成当日市场总结、板块强度与持仓建议：
+
+![市场日报与决策建议](assets/web-market-brief.png)
+
+**更多能力面板**
+
+| 回测引擎 | Skill 管理 |
+| --- | --- |
+| ![回测引擎](assets/web-backtest.png) | ![Skill 管理](assets/web-skill-manager.png) |
+
+| 报告模板管理 | 回答溯源 | 工具在线测试 |
+| --- | --- | --- |
+| ![报告模板管理](assets/web-template-manager.png) | ![回答溯源](assets/web-trace.png) | ![工具在线测试](assets/web-tool-test.png) |
+
 ## 快速开始
 
 ### 环境要求
