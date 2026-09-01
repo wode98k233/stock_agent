@@ -1,5 +1,6 @@
 """腾讯财经直连数据源（纯HTTP，独立于东财）"""
 import logging
+import os
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -11,7 +12,9 @@ logger = logging.getLogger("radar.fetcher")
 
 class QQFinanceDataSource(DataSource):
     name: str = "qq_finance"
-    priority: int = 65
+    label: str = "腾讯财经"
+    description: str = "腾讯实时行情，仅 A 股"
+    priority: int = int(os.getenv("QQ_PRIORITY", "50"))
 
     _HEADERS = {
         'Referer': 'https://stockapp.finance.qq.com',

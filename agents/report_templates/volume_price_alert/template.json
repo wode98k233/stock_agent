@@ -1,0 +1,156 @@
+{
+  "id": "volume_price_alert",
+  "schema_version": "2.0",
+  "report_family": "volume_price_alert",
+  "asset_type": "instrument",
+  "intent_type": "timing",
+  "dashboard_type": "stock",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "量价异动",
+  "version": "1.0",
+  "role": "你是一名 A 股量价异动分析师。你的任务是识别异常量价信号（放量突破、缩量回调、天量见天价、异常换手等），判断信号性质（主力建仓/出货/洗盘/试盘），给出短线操作条件。所有判断必须有具体量价数据支撑。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow",
+    "technical_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "position_sizing",
+    "trade_discipline",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "volume_snapshot",
+      "description": "量能数据——成交量、量比、换手率及近期变化",
+      "fields": [
+        "今日成交量",
+        "5日均量",
+        "量比",
+        "换手率",
+        "成交额",
+        "量能趋势"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "price_snapshot",
+      "description": "价格数据——涨跌幅、振幅、关键价位",
+      "fields": [
+        "最新价",
+        "涨跌幅",
+        "振幅",
+        "最高价",
+        "最低价",
+        "支撑位",
+        "压力位"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "technical_context",
+      "description": "技术指标背景",
+      "fields": [
+        "MA5",
+        "MA10",
+        "MA20",
+        "MACD",
+        "RSI",
+        "布林带"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "capital_context",
+      "description": "资金动向辅助判断",
+      "fields": [
+        "主力净流入",
+        "超大单",
+        "大单",
+        "散户净流入"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "volume_snapshot",
+        "price_snapshot"
+      ],
+      "rule": "放量上涨+站上关键均线=突破确认信号；放量上涨+远离均线=短线追高风险大。缩量回调至支撑位+量比<0.8=洗盘结束信号。天量（量比>5）+长上影线=主力出货预警。"
+    },
+    {
+      "dimensions": [
+        "volume_snapshot",
+        "capital_context"
+      ],
+      "rule": "放量+主力净流入=真突破概率高；放量+主力净流出+散户净流入=诱多风险。换手率>20%+主力净流出=游资接力出货。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "量价异动必须给出信号类型定义（放量突破/缩量回调/天量见顶/异常换手），不能只说'放量了'。",
+    "必须判断信号性质——主力建仓/出货/洗盘/试盘，必须有量价+资金数据支撑。",
+    "操作建议必须包含：确认条件、止损条件、目标位。",
+    "天量信号（量比>5或换手率>20%）必须作为高风险提示。",
+    "短线交易建议必须包含竞价、放量、封板、炸板、止损纪律；新手不适合的高风险动作必须明确禁止。",
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取个股量价数据和技术指标"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取可能解释异动的新闻或公告"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选市场量价异动股"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "量价异动分析顺序：先识别异动性质（放量方向/量比水平）→ 结合位置判断（高低位）→ 新闻/公告验证原因 → 输出信号性质判断（真突破/诱多/出货）和短线操作条件。",
+    "rules": [
+      "异动识别：量比>2=异常放量，量比<0.5=极度缩量；涨幅>7%或跌幅>5%且量能放大1.5倍以上=显著异动。",
+      "位置判读：低位放量上涨=资金进场（关注，可能是启动信号）；高位放量滞涨或冲高回落=出货嫌疑（警惕）；低位放量下跌=恐慌出清（观察企稳）；高位放量长阴=趋势反转风险（离场）。",
+      "信号验证：异动必须找新闻/公告/事件原因——有明确催化（业绩/政策/订单）=有效信号；无消息面支撑的异动=资金博弈（短线性质，快进快出）。",
+      "真假突破：放量突破关键压力位且收盘站稳=真突破（可跟随）；放量突破但长上影线/次日回落=假突破（规避）。",
+      "操作条件：每个信号必须给 性质判断+触发条件+失效条件；止损纪律：放量跌破介入点或关键支撑=无条件离场。"
+    ]
+  }
+}

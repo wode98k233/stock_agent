@@ -1,0 +1,152 @@
+{
+  "id": "sector_landscape",
+  "schema_version": "2.0",
+  "report_family": "sector_landscape",
+  "asset_type": "sector",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "sector",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "行业全景轮动",
+  "version": "1.0",
+  "role": "你是一名 A 股行业轮动分析师。你的任务是横向比较各行业当前所处的景气周期位置、估值水平和资金流向，识别景气上行行业和景气下行行业，给出行业配置建议。所有判断必须有数据支撑，不能凭印象判断行业好坏。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "candidate_ranking",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_xuangu",
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "sector_performance",
+      "description": "各行业近期涨跌幅和成交额",
+      "fields": [
+        "行业涨跌幅",
+        "近5日涨跌幅",
+        "近20日涨跌幅",
+        "成交额",
+        "成交额变化"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "sector_valuation",
+      "description": "各行业估值水平和历史分位",
+      "fields": [
+        "行业PE",
+        "行业PB",
+        "PE历史分位",
+        "PB历史分位"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "sector_capital",
+      "description": "各行业资金流向",
+      "fields": [
+        "主力净流入",
+        "近5日主力净流入",
+        "北向资金",
+        "融资余额变化"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "sector_fundamentals",
+      "description": "各行业景气度指标",
+      "fields": [
+        "行业营收增速",
+        "行业净利润增速",
+        "产能利用率",
+        "库存水平",
+        "政策方向"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "news_search"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "sector_performance",
+        "sector_valuation"
+      ],
+      "rule": "近期涨幅大但估值历史分位>80%=过热风险，不建议追高。近期涨幅小但估值历史分位<30%+资金净流入=左侧布局机会。"
+    },
+    {
+      "dimensions": [
+        "sector_capital",
+        "sector_fundamentals"
+      ],
+      "rule": "资金持续流入+景气度上行=配置主线确认。资金流出+景气度下行=规避。资金流入但景气度下行=短期博弈，非趋势性机会。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "行业比较至少覆盖5个以上主要行业。",
+    "必须同时给出景气上行和景气下行的行业，不能只推荐好的。",
+    "配置建议必须区分短期轮动机会和中长期主线。",
+    "估值分位必须标注数据时间范围（如'近5年分位'）。",
+    "必须完整输出全部板块：核心结论/关键证据/行业排序/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_xuangu",
+      "purpose": "获取各行业板块涨跌幅和代表股"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取各行业估值和资金流向"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取行业政策和景气度动态"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "行业全景轮动分析顺序：先横向比较各行业景气周期位置 → 估值-景气匹配度 → 资金轮动方向 → 输出行业配置建议（超配/标配/低配）。",
+    "rules": [
+      "景气周期定位：用行业景气指标（价格、销量、库存、政策）判断行业处于复苏/繁荣/衰退/萧条周期；政策扶持+景气回升=上行期，政策退坡+景气下行=下行期。",
+      "估值-景气匹配：景气上行+估值分位<60%=戴维斯双击候选（超配）；景气下行+估值分位>70%=戴维斯双杀风险（回避）；景气上行+估值已高（分位>80%）=预期透支（标配，等回调）。",
+      "资金轮动：主力资金连续净流入+北向增持的行业=资金主攻方向；资金从高景气高位行业流向低位行业=轮动信号。",
+      "配置输出：每个行业必须给出 超配/标配/低配 结论+理由+关注龙头；行业对比必须同口径（同一时间段、同一指标维度）。",
+      "数据缺失时明确标注，禁止用新闻描述替代结构化行业数据。"
+    ]
+  }
+}

@@ -53,7 +53,7 @@ def generate_questions(count: int) -> list[dict]:
     from utils.llm_factory import get_llm, llm_json_with_retry
     from utils.logger import get_logger
 
-    logger, _, _ = get_logger("generate_questions")
+    logger, _, _, _ = get_logger("generate_questions")
     llm = get_llm()
 
     messages = [("user", PROMPT_TEMPLATE.format(count=count))]

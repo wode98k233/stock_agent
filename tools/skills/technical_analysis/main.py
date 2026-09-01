@@ -5,6 +5,15 @@
 from tools.skill_builder import SkillBuilder, skill_tool
 
 
+def _history_fallback(symbol: str, reason: str) -> dict:
+    return {
+        'symbol': symbol,
+        'error': f'{symbol} 历史K线不可用: {reason}',
+        'fallback': f'改用 mx_data_query 查询 "{symbol} MA MACD RSI KDJ 收盘价 成交量"，不要反复调用 technical_analysis',
+        'retry': False,
+    }
+
+
 class TechnicalAnalysisSkill(SkillBuilder):
     """技术分析技能"""
 
@@ -22,8 +31,21 @@ class TechnicalAnalysisSkill(SkillBuilder):
     @skill_tool
     def calc_technical_indicators(self, symbol: str) -> dict:
         """计算全部技术指标(MACD/MA/RSI/BB/KDJ/OBV/ATR/CCI/WR/DMI/PSY/VR等)。输入股票代码。包含趋势字段（RSI趋势、MACD柱趋势、金叉/死叉天数等）。"""
-        df = self._get_stock_history(symbol, 120, self.logger)
-        ind = self._calc_indicators(df)
+        try:
+            df = self._get_stock_history(symbol, 120, self.logger)
+        except Exception as e:
+            return _history_fallback(symbol, str(e))
+
+        required = {'close', 'high', 'low', 'volume'}
+        if df.empty or not required.issubset(set(df.columns)):
+            missing = sorted(required.difference(set(df.columns)))
+            reason = '数据为空' if df.empty else f'缺少字段 {missing}'
+            return _history_fallback(symbol, reason)
+
+        try:
+            ind = self._calc_indicators(df)
+        except Exception as e:
+            return _history_fallback(symbol, f'指标计算失败: {e}')
         ind['code'] = symbol
         return ind
 

@@ -1,0 +1,46 @@
+{
+  "meta": {
+    "name": "双均线金叉",
+    "description": "短期均线上穿长期均线买入，下穿卖出。经典趋势跟踪策略，适合震荡市中捕捉中短线机会。",
+    "tags": ["趋势", "均线", "入门"],
+    "source": "template",
+    "strategy_id": "dual_ma_crossover",
+    "category": "trend"
+  },
+  "params": {
+    "fast_period": { "value": 5, "min": 2, "max": 60, "step": 1, "label": "快线周期", "type": "int" },
+    "slow_period": { "value": 20, "min": 5, "max": 200, "step": 1, "label": "慢线周期", "type": "int" }
+  },
+  "conditions": {
+    "buy": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "ma", "args": ["close", "{fast_period}"] },
+          "op": "cross_above",
+          "right": { "func": "ma", "args": ["close", "{slow_period}"] }
+        }
+      ]
+    },
+    "sell": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "ma", "args": ["close", "{fast_period}"] },
+          "op": "cross_below",
+          "right": { "func": "ma", "args": ["close", "{slow_period}"] }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "fixed", "value": 0.05 },
+    "take_profit": { "type": "fixed", "value": 0.15 }
+  },
+  "chart_indicators": [
+    { "type": "MA", "period": "{fast_period}" },
+    { "type": "MA", "period": "{slow_period}" }
+  ]
+}

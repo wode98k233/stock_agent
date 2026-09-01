@@ -1,0 +1,179 @@
+/* ── 资金流向面板 ── */
+
+.flow-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 900;
+}
+.flow-overlay.open { display: block; }
+
+.flow-modal {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(1100px, 96vw);
+  max-height: min(90vh, 820px);
+  background: var(--bg-primary, #fff);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  z-index: 901;
+  overflow: hidden;
+  flex-direction: column;
+}
+.flow-modal.open { display: flex; }
+
+/* ── 头部 ── */
+.flow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  flex-shrink: 0;
+}
+.flow-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+}
+.flow-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.flow-header-actions button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+  line-height: 1;
+}
+.flow-header-actions button:hover {
+  background: var(--bg-hover, #f3f4f6);
+  color: var(--text-primary, #1f2937);
+}
+
+/* ── Tab ── */
+.flow-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  flex-shrink: 0;
+}
+.flow-tab {
+  padding: 4px 12px;
+  font-size: 13px;
+  border-radius: 14px;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  background: transparent;
+  border: none;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.flow-tab:hover { background: var(--bg-hover, #f3f4f6); }
+.flow-tab.active {
+  background: var(--accent-bg, #eff6ff);
+  color: var(--accent, #3b82f6);
+  font-weight: 500;
+}
+
+/* ── 内容区 ── */
+.flow-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 18px 14px;
+}
+.flow-loading,
+.flow-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 14px;
+}
+
+/* ── 热力图容器 ── */
+.flow-chart {
+  width: 100%;
+  height: 450px;
+}
+
+/* ── 板块资金流表格 ── */
+.flow-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.flow-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 500;
+  color: var(--text-muted, #6b7280);
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  white-space: nowrap;
+}
+.flow-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  white-space: nowrap;
+}
+.flow-table tr:hover { background: var(--bg-hover, #f9fafb); }
+.flow-table .positive { color: #ef4444; }
+.flow-table .negative { color: #22c55e; }
+
+/* ── 个股资金流详情 ── */
+.flow-stock-search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.flow-stock-search input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary, #1f2937);
+}
+.flow-stock-search button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.flow-stock-search button:hover { opacity: 0.9; }
+
+.flow-stock-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.flow-stock-card {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary, #f3f4f6);
+}
+.flow-stock-card .label {
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+  margin-bottom: 4px;
+}
+.flow-stock-card .value {
+  font-size: 16px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}

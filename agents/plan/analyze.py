@@ -11,7 +11,6 @@ from config import Config
 from agents.utils import (
     _is_abnormal_result,
     _error_fingerprint,
-    _text_similarity,
     _keyword_overlap,
 )
 
@@ -24,11 +23,8 @@ def error_fingerprint(e: Exception) -> str:
     return _error_fingerprint(e)
 
 
-def text_similarity(a: str, b: str) -> float:
-    return _text_similarity(a, b)
-
-
 keyword_overlap = _keyword_overlap
+
 
 
 def has_useful_results(state: Dict[str, Any]) -> bool:

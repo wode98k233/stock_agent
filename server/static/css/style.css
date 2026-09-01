@@ -1,0 +1,287 @@
+/* ── Agent 群模式：悬浮对话面板 ── */
+
+/* 触发按钮 — 与 msg-action-bar 按钮风格一致 */
+.msg-group-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: #b0b8c4;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.12s ease;
+}
+.msg-group-btn:hover {
+  color: var(--brand);
+}
+.msg-group-btn .icon-group-chat {
+  transition: opacity 0.18s ease;
+}
+
+/* 悬浮面板遮罩 */
+.group-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 999;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.group-overlay.visible {
+  opacity: 1;
+}
+
+/* 悬浮对话框 — 大尺寸，像打开另一个对话 */
+.group-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.96);
+  width: min(1100px, 94vw);
+  height: min(88vh, 900px);
+  background: #fff;
+  border: 1px solid var(--border-main, #e2e6ec);
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.25);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  overflow: hidden;
+}
+.group-panel.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* 面板头部 — 复用主对话 topbar 风格 */
+.group-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-main, #e2e6ec);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+}
+.group-panel-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.group-panel-title .group-title-icon {
+  font-size: 20px;
+}
+.group-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--muted, #667085);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.group-panel-close:hover {
+  background: var(--bg, #f6f7f9);
+  color: var(--text);
+}
+
+/* 面板内容 — 消息列表 */
+.group-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px;
+  background: var(--bg, #f6f7f9);
+}
+
+/* 消息行 — 复用主对话 .message 布局 */
+.group-msg {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  max-width: 100%;
+  margin-bottom: 20px;
+}
+.group-msg.right {
+  margin-left: auto;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  max-width: 72%;
+}
+.group-msg.right .group-avatar { order: 2; }
+
+/* 头像 — 复用主对话 .avatar 风格 */
+.group-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  flex-shrink: 0;
+}
+.group-msg.right .group-avatar {
+  background: linear-gradient(135deg, #176b5b 0%, #0d4f43 100%);
+  box-shadow: 0 2px 6px rgba(23, 107, 91, 0.2);
+}
+.group-msg.left .group-avatar {
+  background: var(--accent, #2f6f9f);
+}
+
+/* 消息内容列 */
+.group-msg-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 消息头部（名称 + 类型标签） */
+.group-bubble-header {
+  font-size: 12px;
+  color: var(--muted, #667085);
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.group-msg.right .group-bubble-header {
+  justify-content: flex-end;
+}
+.group-bubble-name {
+  font-weight: 600;
+  color: var(--text-secondary, #6b7280);
+}
+.group-bubble-type {
+  font-size: 11px;
+  color: var(--muted, #667085);
+  background: var(--bg, #f6f7f9);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #e5e7eb);
+}
+.group-msg.right .group-bubble-type {
+  background: rgba(23, 107, 91, 0.08);
+  border-color: rgba(23, 107, 91, 0.15);
+  color: var(--brand, #176b5b);
+}
+
+/* 气泡 — 复用主对话 .bubble 样式 */
+.group-msg .bubble {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-sm);
+  font-size: 14px;
+}
+.group-msg.right .bubble {
+  background: #eef4f8;
+  border-color: #d4e2f0;
+  border-radius: 12px 18px 12px 12px;
+}
+.group-msg.left .bubble {
+  border-radius: 18px 12px 12px 12px;
+}
+
+/* 操作栏（复制文本 / 复制图片） */
+.group-action-bar {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.group-msg:hover .group-action-bar {
+  opacity: 1;
+}
+.group-copy-btn,
+.group-copy-image-btn,
+.group-export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  border: none;
+  background: var(--panel, #f3f4f6);
+  color: var(--text-secondary, #888);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.group-copy-btn:hover,
+.group-copy-image-btn:hover,
+.group-export-btn:hover {
+  background: var(--hover-bg, #e5e7eb);
+  color: var(--text);
+}
+.group-copy-btn .icon-check,
+.group-copy-image-btn .icon-check,
+.group-export-btn .icon-check {
+  display: none;
+}
+.group-copy-btn.copied .icon-copy,
+.group-copy-image-btn.copied .icon-image,
+.group-export-btn.copied .icon-download {
+  display: none;
+}
+.group-copy-btn.copied .icon-check,
+.group-copy-image-btn.copied .icon-check,
+.group-export-btn.copied .icon-check {
+  display: inline;
+  color: var(--brand, #176b5b);
+}
+.group-copy-btn.failed .icon-copy,
+.group-copy-image-btn.failed .icon-image,
+.group-export-btn.failed .icon-download {
+  display: none;
+}
+.group-copy-btn.failed .icon-check,
+.group-copy-image-btn.failed .icon-check,
+.group-export-btn.failed .icon-check {
+  display: inline;
+  color: var(--error, #ef4444);
+}
+
+/* 请求徽章 */
+.group-request-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  background: var(--warning-bg, #fffbeb);
+  color: var(--warn, #9a6700);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 8px;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+/* 空状态 */
+.group-empty {
+  text-align: center;
+  color: var(--muted, #667085);
+  padding: 60px 20px;
+  font-size: 14px;
+}
+.group-error {
+  text-align: center;
+  color: var(--error, #ef4444);
+  padding: 20px;
+  font-size: 13px;
+}

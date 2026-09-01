@@ -146,7 +146,8 @@ def classify_scenario(user_input: str) -> Tuple[Optional[Scenario], dict]:
     market_patterns = [
         r'(?:大盘|市场|A股|股市).*(?:怎么样|情况|涨跌|今日|今天)',
         r'(?:今日|今天).*(?:大盘|市场|A股|股市)',
-        r'(?:早报|晚报|盘前|盘后|复盘)',
+        r'(?:早报|晚报|盘前|盘后|复盘|早盘|午盘|尾盘)',
+        r'(?:早盘|午盘|尾盘).*(?:总结|简报|行情|分析)',
         r'(?:市场|大盘).*(?:整体|总览|概览|简报)',
         r'今天.*(?:板块|热点).*(?:在涨|涨了|跌了)',
         r'哪些板块.*(?:在涨|涨了|上涨)',
@@ -265,6 +266,7 @@ def classify_with_llm(user_input: str, llm, logger_obj) -> Optional[Scenario]:
             [("user", prompt)],
             logger_obj,
             label="classify-intent",
+            skip_cache_prefix=True,
         )
         if result:
             scenario_name = result.get("scenario")

@@ -39,10 +39,13 @@ def agent_context(skip_if_no_api_key):
     from utils.logger import get_logger
     from utils.memory import MemoryManager
     from utils.session_stats import SessionStats
+    from agents import register_all
+
+    register_all()
 
     skill_register = SkillRegister()
     skill_register.auto_discover()
-    logger, uuid, ctx = get_logger("e2e-test")
+    logger, uuid, ctx, _ = get_logger("e2e-test")
     memory = MemoryManager(logger)
     session_stats = SessionStats()
     registry = SkillRegistry(logger, memory, skill_register)
@@ -126,7 +129,7 @@ def trace_capture(tmp_path):
     recorder.close()
 
 
-def assert_trace_recorded(db_path: str, expected_agent: str, expected_status: str = "completed"):
+def assert_trace_recorded(db_path: str, expected_agent: str, expected_status: str = "success"):
     """
     验证 trace 数据库中存在指定记录
 
@@ -145,7 +148,7 @@ def assert_trace_recorded(db_path: str, expected_agent: str, expected_status: st
             pytest.skip("trace 数据库中没有 runs 表")
 
         row = conn.execute(
-            "SELECT * FROM runs WHERE agent_name=? ORDER BY started_at DESC LIMIT 1",
+            "SELECT * FROM runs WHERE agent_name=? ORDER BY created_at DESC LIMIT 1",
             (expected_agent,)
         ).fetchone()
 
@@ -185,7 +188,7 @@ def assert_trace_has_steps(db_path: str, expected_agent: str, min_steps: int = 2
 
         # 获取最近一次 run 的 ID
         row = conn.execute(
-            "SELECT id FROM runs WHERE agent_name=? ORDER BY started_at DESC LIMIT 1",
+            "SELECT id FROM runs WHERE agent_name=? ORDER BY created_at DESC LIMIT 1",
             (expected_agent,)
         ).fetchone()
 

@@ -5,6 +5,15 @@
 from tools.skill_builder import SkillBuilder, skill_tool
 
 
+def _history_fallback(symbol: str, reason: str) -> dict:
+    return {
+        'symbol': symbol,
+        'error': f'{symbol} 历史K线不可用: {reason}',
+        'fallback': f'改用 mx_data_query 查询 "{symbol} 近120日收盘价 波动率 最大回撤"，不要反复调用 risk_metrics',
+        'retry': False,
+    }
+
+
 class RiskMetricsSkill(SkillBuilder):
     """风险指标分析技能"""
 
@@ -38,9 +47,15 @@ class RiskMetricsSkill(SkillBuilder):
         cached = get_risk_metrics_cache(cache_key)
         if cached is not None:
             return cached
-        df = self._get_stock_history(symbol, days, self.logger)
+        try:
+            df = self._get_stock_history(symbol, days, self.logger)
+        except Exception as e:
+            return _history_fallback(symbol, str(e))
+
         if df.empty or len(df) < 10:
-            return {'error': f'{symbol} 历史数据不足'}
+            return _history_fallback(symbol, f'历史数据不足，只有 {len(df)} 个交易日')
+        if 'close' not in df.columns:
+            return _history_fallback(symbol, f'缺少字段 close, columns={list(df.columns)}')
 
         benchmark_df = None
         try:

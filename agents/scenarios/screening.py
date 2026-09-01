@@ -17,6 +17,33 @@ from output.formatter import render_screening_result
 
 logger = logging.getLogger("radar.scenario")
 
+# ── 提示词（从 agents/prompts.py 迁入）────────────────────────
+SCREENING_PARSE_PROMPT = """从用户输入中提取选股条件。返回JSON：
+{{
+  "board_name": "板块名（如有，没有则为空字符串）",
+  "conditions": [
+    {{"field": "pe", "op": "<", "value": 20}},
+    {{"field": "pct_chg", "op": ">", "value": 3}},
+    {{"field": "macd_signal", "op": "==", "value": "golden_cross"}}
+  ]
+}}
+
+字段映射：
+- 市盈率/PE → field="pe"
+- 市净率/PB → field="pb"
+- 涨幅/涨跌幅 → field="pct_chg"
+- 换手率 → field="turnover_rate"
+- 价格/股价 → field="price"
+- 市值/总市值 → field="total_mv"
+- MACD金叉 → field="macd_signal", op="==", value="golden_cross"
+- MACD死叉 → field="macd_signal", op="==", value="death_cross"
+- RSI → field="rsi_14", op="<" 或 ">"
+- KDJ金叉 → field="kdj_signal", op="==", value="golden_cross"
+- 主力资金净流入 → field="main_fund_flow", op=">", value="0"
+
+用户输入：{user_input}
+"""
+
 
 async def handle_screening(
     user_input: str,
@@ -24,7 +51,7 @@ async def handle_screening(
     context: dict,
     data_timestamp: str,
     budget=None,
-) -> Optional[str]:
+):
     """处理条件选股场景"""
 
     # 1. 解析筛选条件
@@ -36,18 +63,20 @@ async def handle_screening(
         return None  # 无法解析条件，降级到Agent
 
     # 2. 获取候选股票
+    from agents.scenarios.common import ScenarioResult
     candidates = _get_candidates(board_name, context)
     if not candidates:
         condition_text = "、".join(
             c.get("field", str(c)) if isinstance(c, dict) else str(c)
             for c in conditions
         ) if conditions else "未知条件"
-        return render_screening_result(
+        text = render_screening_result(
             board_name=board_name or "全市场",
             conditions=condition_text,
             stocks=[],
             data_timestamp=data_timestamp,
         )
+        return ScenarioResult(text=text, data={"conditions": conditions, "board_name": board_name})
 
     # 3. 获取实时行情
     from agents.scenarios.common import get_realtime_quotes
@@ -75,17 +104,17 @@ async def handle_screening(
         c.get("field", str(c)) if isinstance(c, dict) else str(c)
         for c in conditions
     ) if conditions else "默认筛选"
-    return render_screening_result(
+    text = render_screening_result(
         board_name=board_name or "全市场",
         conditions=condition_text,
         stocks=filtered,
         data_timestamp=data_timestamp,
     )
+    return ScenarioResult(text=text, data={"conditions": conditions, "board_name": board_name, "filtered": filtered})
 
 
 async def _parse_conditions(user_input: str, budget) -> dict:
     """用LLM解析用户的筛选条件，输出结构化JSON"""
-    from agents.prompts import SCREENING_PARSE_PROMPT
     from agents.scenarios.common import BaseScenarioHandler
 
     prompt = SCREENING_PARSE_PROMPT.format(user_input=user_input)

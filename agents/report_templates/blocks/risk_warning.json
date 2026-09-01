@@ -1,0 +1,9 @@
+{
+  "id": "risk_warning",
+  "title": "风险提示",
+  "required": true,
+  "max_words": 320,
+  "prompt": "用风险矩阵表按严重程度排序风险。第一条必须是当前最需要担心的风险。每条风险要包含触发条件、影响路径、可观察信号、应对动作和数据或事件来源；缺数据时明确标注。最后补充合规声明。",
+  "data_slots": ["trend", "pe_percentile", "news_sentiment"],
+  "core_slots": ["trend"]
+}

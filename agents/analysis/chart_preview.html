@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Chart Fragments Preview</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  body { background:#f1f5f9; margin:0; padding:20px; font-family: sans-serif; }
+  .card { background:#fff; border-radius:10px; padding:16px 20px; margin-bottom:16px;
+          box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  .card-title { font-weight:700; color:#1e293b; margin-bottom:10px; }
+  .card-meta { font-size:11px; color:#94a3b8; margin-left:10px; font-weight:400; }
+  .chart { width:100%; height:320px; }
+</style></head><body>
+<div class="card"><div class="card-title">贵州茅台 均线<span class="card-meta">time_series · 600519 · 2026-08-10 11:44:17</span></div><div class="chart" id="chart-ab1ab659-10f3-4806-a21b-8e2640dbff31"></div></div><div class="card"><div class="card-title">贵州茅台 RSI<span class="card-meta">indicator · 600519 · 2026-08-10 11:44:17</span></div><div class="chart" id="chart-696ed114-937d-4de1-b59b-a7739ca5c900"></div></div><div class="card"><div class="card-title">贵州茅台 MACD<span class="card-meta">indicator · 600519 · 2026-08-10 11:44:17</span></div><div class="chart" id="chart-2bfe5068-612d-4222-afea-9ae06886ed10"></div></div>
+<script>
+  const fragments = [{"id": "ab1ab659-10f3-4806-a21b-8e2640dbff31", "data": {"xAxis": [{"data": ["2026-08-07", "2026-08-06", "2026-08-05", "2026-08-04", "2026-08-03"]}], "series": [{"name": "MA10", "type": "line", "data": [1325.0, 1324.0, 1323.0, 1322.0, 1320.0]}, {"name": "MA60", "type": "line", "data": [1255.0, 1255.0, 1255.0, 1255.0, 1255.0]}, {"name": "MA5", "type": "line", "data": [1322.0, 1331.0, 1341.0, 1344.0, 1342.0]}, {"name": "MA20", "type": "line", "data": [1299.0, 1293.0, 1287.0, 1282.0, 1275.0]}]}}, {"id": "696ed114-937d-4de1-b59b-a7739ca5c900", "data": {"xAxis": [{"data": ["2026-08-07", "2026-08-06", "2026-08-05", "2026-08-04", "2026-08-03"]}], "series": [{"name": "RSI", "type": "line", "data": [46.01, 45.57, 44.37, 54.81, 75.49]}], "markLine": [{"yAxis": 70, "label": "超买"}, {"yAxis": 30, "label": "超卖"}]}}, {"id": "2bfe5068-612d-4222-afea-9ae06886ed10", "data": {"xAxis": [{"data": ["2026-08-07", "2026-08-06", "2026-08-05", "2026-08-04", "2026-08-03"]}], "series": [{"name": "MACD", "type": "line", "data": [-0.9909, 2.852, 8.263, 16.03, 22.03]}, {"name": "DIFF", "type": "line", "data": [20.64, 22.69, 25.04, 27.88, 28.88]}, {"name": "DEA", "type": "line", "data": [21.14, 21.26, 20.9, 19.87, 17.87]}], "markLine": [{"yAxis": 0, "label": "零轴"}]}}];
+  fragments.forEach(((<built-in function id>, '{"xAxis": [{"data": ["2026-08-07", "2026-08-06", "2026-08-05", "2026-08-04", "2026-08-03"]}], "series": [{"name": "MACD", "type": "line", "data": [-0.9909, 2.852, 8.263, 16.03, 22.03]}, {"name": "DIFF", "type": "line", "data": [20.64, 22.69, 25.04, 27.88, 28.88]}, {"name": "DEA", "type": "line", "data": [21.14, 21.26, 20.9, 19.87, 17.87]}], "markLine": [{"yAxis": 0, "label": "零轴"}]}')) => {
+    const el = document.getElementById('chart-' + id);
+    const chart = echarts.init(el);
+    const option = {
+      animation: false,
+      grid: { left: 60, right: 30, top: 30, bottom: 40 },
+      xAxis: Object.assign({ type: 'category' }, data.xAxis && data.xAxis[0] || { data: [] }),
+      yAxis: { type: 'value', scale: true },
+      tooltip: { trigger: 'axis' },
+      series: data.series || [],
+    };
+    if (data.markLine) option.series = option.series.map(s => Object.assign({}, s, { markLine: { data: data.markLine } }));
+    chart.setOption(option);
+    window.addEventListener('resize', () => chart.resize());
+  });
+</script></body></html>

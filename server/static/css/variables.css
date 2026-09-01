@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --sidebar-bg: #f0f2f5;
+  --detail-bg: #f8fafc;
+  --line: #dfe4ea;
+  --line-strong: #cbd3dc;
+  --border-main: #e2e6ec;
+  --border: #e5e7eb;
+  --border-light: #f0f0f0;
+  --text: #1c2430;
+  --text-secondary: #6b7280;
+  --muted: #667085;
+  --brand: #176b5b;
+  --brand-strong: #0d4f43;
+  --brand-hover: #145a4c;
+  --brand-light: #e8f4f1;
+  --brand-bg: #e8f5e9;
+  --brand-bg-light: #f0faf2;
+  --brand-glow: rgba(23, 107, 91, 0.12);
+  --accent: #2f6f9f;
+  --warn: #9a6700;
+  --warning: #f59e0b;
+  --warning-bg: #fffbeb;
+  --error: #b42318;
+  --danger: #ef4444;
+  --danger-bg: #fef2f2;
+  --success: #067647;
+  --success-bg: #ecfdf5;
+  --up: #e74c3c;
+  --down: #176b5b;
+  --code-bg: #1e293b;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.04);
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  --transition-fast: 0.12s ease;
+  --transition-normal: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button, select, textarea { font: inherit; }
+button { cursor: pointer; }

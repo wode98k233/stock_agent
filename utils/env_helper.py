@@ -1,69 +1,192 @@
-"""
-环境变量文件管理
-检查并创建 .env 文件
+"""环境变量辅助工具
+
+解决打包后 .env 路径问题：
+- 开发模式：直接读取项目根目录的 .env
+- 打包模式：读取 PyInstaller 解压目录的 .env
+
+支持从模板生成 .env 文件。
 """
 import os
-from dotenv import load_dotenv
+import re
+import sys
+from pathlib import Path
+from typing import Dict, Optional, Set
+from dotenv import load_dotenv, dotenv_values
 
-from utils.app_paths import get_app_dir
+from utils.app_paths import get_resource_root, get_app_dir
 
 
-def get_env_example_path() -> str:
-    """获取 .env.example 文件路径"""
-    return os.path.join(get_app_dir(), '.env.example')
+def _is_frozen() -> bool:
+    """是否为 PyInstaller 打包环境"""
+    return getattr(sys, 'frozen', False)
 
 
-def ensure_env_file():
-    """确保 .env 文件存在，不存在则从 .env.example 复制"""
-    env_file = os.path.join(get_app_dir(), '.env')
-    env_example = get_env_example_path()
+def get_env_path() -> Path:
+    """获取 .env 文件路径（用户可写，打包态在 exe 同级目录）"""
+    root = Path(get_app_dir())
+    return root / '.env'
 
-    if not os.path.exists(env_file):
-        if os.path.exists(env_example):
-            with open(env_example, 'r', encoding='utf-8') as f:
-                content = f.read()
-            with open(env_file, 'w', encoding='utf-8') as f:
-                f.write(content)
-            print("\n!!! 已创建 .env 文件，请编辑填入配置 !!!\n")
+
+def get_template_path() -> Path:
+    """获取 .env.example 模板文件路径"""
+    root = Path(get_resource_root())
+    return root / '.env.example'
+
+
+def load_env() -> dict:
+    """加载 .env 并返回所有键值对
+
+    Returns:
+        dict: 环境变量字典，键全大写
+    """
+    env_path = get_env_path()
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+        return dotenv_values(env_path)
+    return {}
+
+
+def get_env(key: str, default: str = "") -> str:
+    """获取环境变量值（优先 .env，其次系统环境变量）"""
+    # 先检查系统环境变量（已被 load_dotenv 注入）
+    value = os.getenv(key)
+    if value is not None:
+        return value
+
+    # 再检查 .env 文件
+    env_path = get_env_path()
+    if env_path.exists():
+        values = dotenv_values(env_path)
+        return values.get(key, default)
+
+    return default
+
+
+def get_env_diff() -> dict:
+    """检测 .env 与当前进程环境变量的差异
+
+    Returns:
+        dict: {key: (file_value, process_value)} 的差异字典
+    """
+    env_path = get_env_path()
+    if not env_path.exists():
+        return {}
+
+    file_values = dotenv_values(env_path)
+    diff = {}
+    for key, file_val in file_values.items():
+        process_val = os.getenv(key)
+        if process_val != file_val:
+            diff[key] = (file_val, process_val)
+    return diff
+
+
+def _parse_env_keys(file_path: Path) -> Set[str]:
+    """从 env 文件中解析所有键名"""
+    keys = set()
+    if not file_path.exists():
+        return keys
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            # 跳过注释和空行
+            if not line or line.startswith('#'):
+                continue
+            # 解析 KEY=VALUE 格式
+            match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
+            if match:
+                keys.add(match.group(1))
+
+    return keys
+
+
+def generate_env_from_template(
+    template_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+    keep_existing: bool = True,
+) -> Dict[str, str]:
+    """从模板生成 .env 文件
+
+    Args:
+        template_path: 模板文件路径，默认为 .env.example
+        output_path: 输出文件路径，默认为 .env
+        keep_existing: 是否保留现有 .env 中的用户配置
+
+    Returns:
+        dict: 新增的配置项 {key: default_value}
+    """
+    template_path = template_path or get_template_path()
+    output_path = output_path or get_env_path()
+
+    if not template_path.exists():
+        raise FileNotFoundError(f"模板文件不存在: {template_path}")
+
+    # 读取模板内容
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template_lines = f.readlines()
+
+    # 解析模板中的键
+    template_keys = _parse_env_keys(template_path)
+
+    # 读取现有 .env（如果存在且需要保留）
+    existing_values: Dict[str, str] = {}
+    if keep_existing and output_path.exists():
+        existing_values = dotenv_values(output_path)
+
+    # 生成新内容
+    new_lines = []
+    added_keys: Dict[str, str] = {}
+
+    for line in template_lines:
+        stripped = line.strip()
+
+        # 注释和空行直接保留
+        if not stripped or stripped.startswith('#'):
+            new_lines.append(line)
+            continue
+
+        # 解析 KEY=VALUE
+        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)', stripped)
+        if match:
+            key = match.group(1)
+            default_value = match.group(2).strip()
+
+            # 如果现有 .env 中有该键，使用现有值
+            if key in existing_values:
+                user_value = existing_values[key]
+                new_lines.append(f"{key}={user_value}\n")
+            else:
+                # 使用模板默认值
+                new_lines.append(line)
+                if default_value and not default_value.startswith('your_'):
+                    added_keys[key] = default_value
         else:
-            with open(env_file, 'w', encoding='utf-8') as f:
-                f.write("""# 选股雷达配置
-OPENAI_API_KEY=your_api_key_here
-OPENAI_API_BASE=https://api.openai.com/v1
-OPENAI_MODEL_NAME=gpt-4o
+            new_lines.append(line)
 
-# 东方财富妙想Skills 配置
-MX_APIKEY=your_mx_apikey_here
-TUSHARE_TOKEN=your_tushare_token_here
+    # 写入输出文件
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.writelines(new_lines)
 
-# ========== Plan & Solve 模式 ==========
-# 规划步数上限
-PLAN_MAX_STEPS=5
-# Executor单步重试次数
-PLAN_EXECUTOR_MAX_RETRIES=3
-# Executor内部ReAct工具调用上限（LangGraph recursion_limit，每个 LLM + 工具调用各算 1 步）
-PLAN_EXECUTOR_TOOL_CALLS=15
+    return added_keys
 
-# ========== ReAct 模式 ==========
-# 工具调用上限（LangGraph recursion_limit，每个 LLM + 工具调用各算 1 步）
-REACT_TOOL_CALLS=25
 
-# ========== 通用 Agent 配置 ==========
-# 批量分析股票时，每次处理的数量
-BATCH_SIZE=5
-# 记忆压缩的最大Token数
-MEMORY_MAX_TOKENS=8000
+def sync_env_with_template(
+    template_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+) -> Dict[str, str]:
+    """同步 .env 与模板（添加新配置项，保留现有值）
 
-# ========== 缓存配置 ==========
-# 缓存过期时间
-CACHE_EXPIRE_HOURS=24
+    Args:
+        template_path: 模板文件路径，默认为 .env.example
+        output_path: 输出文件路径，默认为 .env
 
-# ========== 日志/调试 ==========
-LOG_LEVEL=INFO
-# 在 DEBUG 级别下，每个 step 执行前需要手动确认
-DEBUG_STEP_CONFIRM=false
-""")
-            print("\n!!! 已创建 .env 文件，请编辑填入 API Key !!!\n")
-        load_dotenv(env_file)
-    else:
-        load_dotenv(env_file)
+    Returns:
+        dict: 新增的配置项 {key: default_value}
+    """
+    return generate_env_from_template(
+        template_path=template_path,
+        output_path=output_path,
+        keep_existing=True,
+    )

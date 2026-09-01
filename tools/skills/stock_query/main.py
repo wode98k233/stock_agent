@@ -77,6 +77,39 @@ class StockQuerySkill(SkillBuilder):
         df = self._get_concept_list(self.logger)
         return df.head(50).to_dict('records')
 
+    @skill_tool
+    def search_stock_news(self, query: str, max_results: int = 5) -> list:
+        """通过搜索引擎搜索股票相关新闻和资讯。输入搜索关键词如"贵州茅台 最新消息"或"中际旭创 业绩"。
+        比 get_stock_news 更全面，支持多搜索引擎聚合（MX/SerpAPI/Tavily）。"""
+        import asyncio
+        from tools.search import SearchAggregator, MXSearchProvider, SerpAPISearchProvider, TavilySearchProvider
+        from config import Config
+
+        providers = [MXSearchProvider()]
+        if getattr(Config, 'SERPAPI_API_KEYS', ''):
+            keys = [k.strip() for k in Config.SERPAPI_API_KEYS.split(",") if k.strip()]
+            if keys:
+                providers.append(SerpAPISearchProvider(keys))
+        if getattr(Config, 'TAVILY_API_KEYS', ''):
+            keys = [k.strip() for k in Config.TAVILY_API_KEYS.split(",") if k.strip()]
+            if keys:
+                providers.append(TavilySearchProvider(keys))
+
+        aggregator = SearchAggregator(providers)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, aggregator.search(query, max_results))
+                    return future.result(timeout=30)
+            else:
+                return loop.run_until_complete(aggregator.search(query, max_results))
+        except Exception as e:
+            self.logger.warning(f"搜索引擎查询失败: {e}")
+            return []
+
 
 def build_tools(logger, memory_mgr):
     """构建工具列表（兼容接口）"""

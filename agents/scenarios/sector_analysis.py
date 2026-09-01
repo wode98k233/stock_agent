@@ -18,6 +18,36 @@ from output.time_util import format_news_time
 
 logger = logging.getLogger("radar.scenario")
 
+# ── 提示词（从 agents/prompts.py 迁入）────────────────────────
+SECTOR_ANALYSIS_PROMPT = """你是专业的股票分析师。分析{sector_name}板块近期表现的驱动因素。
+
+## 用户问题
+{user_input}
+
+## 板块行情
+今日涨幅: {pct_chg:.2f}%
+成交额: {amount}
+5日涨幅: {pct_chg_5d:.2f}%
+
+## 龙头股表现
+{top_stocks_json}
+
+## 相关新闻
+{news_json}
+
+请分析该板块上涨/下跌的驱动因素，从以下三个维度：
+1. 消息面（政策、行业事件、供需变化等）
+2. 资金面（主力动向、板块轮动等）
+3. 技术面（趋势、量价关系等）
+
+最后给出判断：这波行情是否可持续？能否追涨？
+
+要求：
+- 每个维度2-3句话
+- 引用具体的新闻和数据
+- 给出明确的判断，不要含糊
+- 控制在300字以内"""
+
 
 async def handle_sector_analysis(
     user_input: str,
@@ -25,11 +55,11 @@ async def handle_sector_analysis(
     context: dict,
     data_timestamp: str,
     budget=None,
-) -> Optional[str]:
+) -> Optional["ScenarioResult"]:
     """处理板块热点分析场景"""
 
     # 1. 识别板块
-    from agents.scenarios.common import resolve_sector
+    from agents.scenarios.common import resolve_sector, ScenarioResult
     sector_name = resolve_sector(context, user_input)
     if not sector_name:
         return None
@@ -56,12 +86,21 @@ async def handle_sector_analysis(
     )
 
     # 7. 格式化输出
-    return render_sector_analysis(
-        sector_name=sector_name,
-        sector_quote=sector_quote,
-        top_stocks=top_stocks,
-        driver_analysis=driver_analysis,
-        data_timestamp=data_timestamp,
+    return ScenarioResult(
+        text=render_sector_analysis(
+            sector_name=sector_name,
+            sector_quote=sector_quote,
+            top_stocks=top_stocks,
+            driver_analysis=driver_analysis,
+            data_timestamp=data_timestamp,
+        ),
+        data={
+            "sector_name": sector_name,
+            "sector_quote": sector_quote,
+            "top_stocks": top_stocks,
+            "news": news,
+            "driver_analysis": driver_analysis,
+        },
     )
 
 
@@ -190,7 +229,6 @@ async def _analyze_drivers(
     budget=None,
 ) -> str:
     """LLM分析板块驱动因素"""
-    from agents.prompts import SECTOR_ANALYSIS_PROMPT
     from agents.scenarios.common import BaseScenarioHandler
 
     news_brief = []

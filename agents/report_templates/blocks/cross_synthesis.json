@@ -1,0 +1,10 @@
+{
+  "id": "cross_synthesis",
+  "title": "综合研判",
+  "required": true,
+  "max_words": 400,
+  "prompt": "必须完成以下交叉验证：1) 列出各维度信号方向（技术面/消息面/估值面/资金面各是什么方向）；2) 识别矛盾点（如技术面看多但消息面利空）；3) 对每个矛盾点，必须判断哪个维度占优，给出判断依据（如'短期消息面风险占优，因为ETF溢价40%是极端信号'）；4) 基于交叉验证结论给出操作条件，格式必须包含三要素：①方向（看多/看空/观望）②价位区间（具体支撑位/压力位）③确认信号（如'缩量回调+MACD未死叉'、'放量突破+站上MA20'）。禁止只给价位不给确认条件。",
+  "data_slots": ["trend", "macd_signal", "rsi_status", "news_sentiment", "pe_percentile"],
+  "core_slots": ["trend"],
+  "cross_check": true
+}

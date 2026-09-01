@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "name": "布林带突破",
+    "description": "收盘价突破布林带上轨买入（强势突破），跌破下轨卖出（弱势破位）。适合趋势市场，波动市可能频繁假突破。",
+    "tags": ["波动", "布林带", "入门"],
+    "source": "template",
+    "strategy_id": "boll_breakout",
+    "category": "volatility"
+  },
+  "params": {
+    "period": { "value": 20, "min": 10, "max": 50, "step": 1, "label": "周期", "type": "int" },
+    "std_dev": { "value": 2.0, "min": 1.0, "max": 3.0, "step": 0.1, "label": "标准差倍数", "type": "float" }
+  },
+  "conditions": {
+    "buy": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "data": "close" },
+          "op": ">",
+          "right": { "func": "boll", "args": ["close", "{period}", "{std_dev}"], "field": "upper" }
+        }
+      ]
+    },
+    "sell": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "data": "close" },
+          "op": "<",
+          "right": { "func": "boll", "args": ["close", "{period}", "{std_dev}"], "field": "lower" }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "fixed", "value": 0.05 },
+    "take_profit": { "type": "fixed", "value": 0.10 }
+  },
+  "chart_indicators": [
+    { "type": "BOLL", "period": "{period}", "std": "{std_dev}" }
+  ]
+}

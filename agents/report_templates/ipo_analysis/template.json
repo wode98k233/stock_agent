@@ -1,0 +1,151 @@
+{
+  "id": "ipo_analysis",
+  "schema_version": "2.0",
+  "report_family": "ipo_analysis",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "stock",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "新股/次新分析",
+  "version": "1.0",
+  "role": "你是一名 A 股新股研究分析师。你的任务是分析新股发行定价是否合理、上市后估值对比同行业、次新股的投资价值。所有判断必须有发行数据和行业对比数据支撑。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "position_sizing",
+    "trade_discipline",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "ipo_basics",
+      "description": "新股发行基本信息",
+      "fields": [
+        "发行价",
+        "发行市盈率",
+        "发行数量",
+        "网上中签率",
+        "募资总额",
+        "发行日期"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "ipo_company",
+      "description": "发行人基本面",
+      "fields": [
+        "主营业务",
+        "营收",
+        "净利润",
+        "营收增速",
+        "净利润增速",
+        "ROE",
+        "毛利率"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "peer_comparison",
+      "description": "同行业可比公司估值对比",
+      "fields": [
+        "行业平均PE",
+        "行业平均PB",
+        "可比公司估值",
+        "行业增速"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "secondary_market",
+      "description": "上市后表现（适用于次新股）",
+      "fields": [
+        "上市后涨跌幅",
+        "开板价",
+        "开板后走势",
+        "换手率趋势",
+        "机构持仓"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "ipo_basics",
+        "peer_comparison"
+      ],
+      "rule": "发行PE低于行业平均PE=折价发行，打新收益确定性高。发行PE高于行业平均50%以上=高估风险，需评估成长性是否匹配。"
+    },
+    {
+      "dimensions": [
+        "ipo_company",
+        "peer_comparison"
+      ],
+      "rule": "发行人增速高于行业平均+发行PE不高于行业平均=优质标的。发行人增速低于行业平均+发行PE高于行业平均=高估，谨慎参与。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "必须同时给出发行估值和行业平均估值的对比。",
+    "必须区分打新（一级市场）和次新股投资（二级市场）的不同分析逻辑。",
+    "发行PE高于行业平均50%以上必须作为高风险提示。",
+    "次新股分析必须关注开板后换手率趋势和机构持仓变化。",
+    "短线交易建议必须包含竞价、放量、封板、炸板、止损纪律；新手不适合的高风险动作必须明确禁止。",
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取新股发行信息、招股书要点和市场评价"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取发行人财务数据和同行业估值"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选同行业可比上市公司"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "新股分析顺序：先看发行定价（发行价/市盈率 vs 行业均值）→ 评估发行估值是否合理 → 对比同行业可比公司 → 判断申购价值（打新）和上市后投资价值（次新）→ 输出风险约束。",
+    "rules": [
+      "定价合理性：发行市盈率 vs 同行业平均市盈率——发行 PE < 行业均值 30% 以上=定价偏低（打新价值高）；发行 PE > 行业均值=定价偏高（破发风险）。",
+      "财务质量：营收/利润增速、毛利率、现金流、负债率与同行业对比；亏损或增速为负的公司高风险标注。",
+      "稀缺性判断：行业地位（细分龙头/稀缺标的）、题材热度（当前市场风格是否契合）——稀缺+热点=上市首日溢价概率大；传统行业+估值高=破发风险。",
+      "打新与次新区分：申购决策看发行估值；上市后投资看次新走势（首日涨幅、换手、筹码消化）——首日爆炒的次新短线禁追，等回调。",
+      "风险约束：新股波动极大，必须提示 破发风险/流动性风险/解禁压力；不推荐重仓参与，打新逻辑与投资逻辑分开。"
+    ]
+  }
+}

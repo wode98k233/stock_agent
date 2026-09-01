@@ -13,11 +13,27 @@ import logging
 from typing import Optional
 
 from agents.scenarios.common import (
+    ScenarioResult,
     fetch_stock_bundle,
     format_market_cap,
     format_pct,
     resolve_stocks,
 )
+
+# ── 提示词（从 agents/prompts.py 迁入）────────────────────────
+COMPARISON_PROMPT = """你是专业的股票分析师。对比分析以下股票。
+
+## 用户问题
+{user_input}
+
+{stock_sections}
+
+请给出对比结论（200字以内），包含：
+1. 各自的优势
+2. 适合什么样的投资者
+3. 明确推荐排名
+
+要求给出明确推荐，不要含糊。"""
 
 
 logger = logging.getLogger("radar.scenario")
@@ -29,7 +45,7 @@ async def handle_comparison(
     context: dict,
     data_timestamp: str,
     budget=None,
-) -> Optional[str]:
+) -> Optional["ScenarioResult"]:
     """处理对比分析场景"""
 
     # 1. 解析所有股票（最多5只）
@@ -63,7 +79,21 @@ async def handle_comparison(
     conclusion = await _compare_analysis(enriched_input, valid, budget)
 
     # 6. 格式化输出
-    return _format_output(valid, metrics, conclusion, data_timestamp)
+    return ScenarioResult(
+        text=_format_output(valid, metrics, conclusion, data_timestamp),
+        data={
+            "valid": [
+                {
+                    "stock": {"code": s["code"], "name": s["name"]},
+                    "realtime": b.get("realtime", {}),
+                    "tech": t,
+                }
+                for s, b, t in valid
+            ],
+            "metrics": metrics,
+            "conclusion": conclusion,
+        },
+    )
 
 
 def _build_metrics(valid: list) -> list:
@@ -103,7 +133,6 @@ def _build_metrics(valid: list) -> list:
 
 async def _compare_analysis(user_input: str, valid: list, budget=None) -> str:
     """LLM对比分析"""
-    from agents.prompts import COMPARISON_PROMPT
     from agents.scenarios.common import BaseScenarioHandler
 
     sections = []

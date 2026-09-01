@@ -21,16 +21,26 @@ logger = logging.getLogger("radar.skill_builder")
 _skill_tool_mark = "__is_skill_tool__"
 
 
+_USAGE_ERRORS = (ValueError, TypeError, KeyError, AttributeError,
+                  FileNotFoundError, PermissionError)
+_NETWORK_ERRORS = (ConnectionError, TimeoutError)
+
+
+def _is_usage_error(e: Exception) -> bool:
+    """判断是否为使用方式错误（重试无意义）"""
+    return isinstance(e, _USAGE_ERRORS) and not isinstance(e, _NETWORK_ERRORS)
+
+
 def skill_tool(func: Callable) -> Callable:
     """
     技能工具装饰器，统一处理异常和序列化
-    
+
     功能：
     1. 标记函数为技能工具
     2. 自动捕获异常并返回标准错误格式
     3. 自动序列化返回结果为 JSON
     4. 自动记录工具调用日志
-    
+
     示例：
         @skill_tool
         def get_stock_realtime(self, symbol: str) -> dict:
@@ -41,27 +51,35 @@ def skill_tool(func: Callable) -> Callable:
     def wrapper(self, *args, **kwargs) -> str:
         try:
             result = func(self, *args, **kwargs)
-            
+
             # 记录成功日志
             if hasattr(self, 'logger') and self.logger is not None:
                 self.logger.debug(f"工具 {func.__name__} 执行成功")
-            
+
             # 序列化结果 - 如果已经是字符串则直接返回
             if isinstance(result, str):
                 return result
             if isinstance(result, (dict, list)):
                 return json.dumps(result, ensure_ascii=False, default=str)
             return str(result) if result is not None else ""
-            
+
         except Exception as e:
             # 记录错误日志
             error_msg = f"工具 {func.__name__} 执行失败: {str(e)}"
             if hasattr(self, 'logger') and self.logger is not None:
                 self.logger.error(error_msg, exc_info=True)
-            
-            # 返回标准错误格式（兼容现有错误格式）
-            return f"错误: {str(e)}"
-    
+
+            # 结构化错误信息：工具名 + 参数 + 失败原因
+            params_str = json.dumps(
+                {"args": args[1:], "kwargs": kwargs},
+                ensure_ascii=False, default=str
+            )[:200]
+            error_reason = str(e) or type(e).__name__
+            msg = f"工具 {func.__name__} 失败(参数: {params_str}): {error_reason}"
+            if _is_usage_error(e):
+                msg += "。使用方式错误，请勿重试"
+            return msg
+
     # 保留原始函数的文档字符串
     wrapper.__doc__ = func.__doc__
     # 标记这是一个技能工具

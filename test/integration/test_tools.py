@@ -5,18 +5,30 @@
 """
 import sys
 import os
-import traceback
+import json
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.other_skills.eastmoney.skills import *
-import json
-from utils.logger import get_logger
-from utils.memory import MemoryManager
-from tools.skills import SkillRegistry
-from utils.logger import ensure_radar
+
+pytestmark = pytest.mark.integration
 
 
-def test_stock_query_tools(registry: SkillRegistry):
+@pytest.fixture(scope="module")
+def registry():
+    """创建 SkillRegistry 实例"""
+    from utils.logger import get_logger
+    from utils.memory import MemoryManager
+    from tools.skills import SkillRegistry
+    from tools.skill_register import SkillRegister
+
+    logger, _, _, _ = get_logger("test_tools")
+    memory = MemoryManager(logger)
+    sr = SkillRegister()
+    sr.auto_discover()
+    return SkillRegistry(logger, memory, sr)
+
+
+def test_stock_query_tools(registry):
     """测试 stock_query 技能的工具"""
     print("\n" + "=" * 60)
     print("测试 stock_query 工具")
@@ -202,7 +214,7 @@ def test_aggregation_tools(registry):
     print("\n其他 aggregation 工具需要 LLM，暂时跳过")
 
 
-def test_data_source_consistency(registry: SkillRegistry):
+def test_data_source_consistency(registry):
     """测试数据源返回格式一致性"""
     print("\n" + "=" * 60)
     print("测试数据源返回格式一致性")
@@ -246,7 +258,7 @@ def main():
     print("═" * 60)
     
     # 创建 logger 和 memory
-    logger, _, ctx = get_logger("test_tools")
+    logger, _, ctx, _ = get_logger("test_tools")
     memory = MemoryManager(logger)
     
     # 创建技能注册表

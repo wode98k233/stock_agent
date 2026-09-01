@@ -2,7 +2,26 @@
 选股雷达 - 板块轮动分析技能
 支持: 板块行情排名、板块历史K线、板块资金流向
 """
+import concurrent.futures
+import os
+
 from tools.skill_builder import SkillBuilder, skill_tool
+
+
+SECTOR_ROTATION_TIMEOUT_SECONDS = int(os.getenv("SECTOR_ROTATION_TIMEOUT_SECONDS", "15"))
+
+
+def _run_with_timeout(func, timeout_seconds: int, *args, **kwargs):
+    """在线程中运行慢数据源调用，超时后立即把控制权还给工具层。"""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except concurrent.futures.TimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"超过 {timeout_seconds} 秒") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 class SectorRotationSkill(SkillBuilder):
@@ -39,7 +58,14 @@ class SectorRotationSkill(SkillBuilder):
         cached = get_sector_rotation_cache(cache_key)
         if cached is not None:
             return cached
-        df = self._get_board_industry_spot(sector_type)
+        try:
+            df = _run_with_timeout(
+                self._get_board_industry_spot,
+                SECTOR_ROTATION_TIMEOUT_SECONDS,
+                sector_type,
+            )
+        except TimeoutError as e:
+            return {'error': f'板块实时行情查询超时: {e}', 'retry': False}
         if df.empty:
             return []
         result = df.head(30).to_dict('records')
@@ -57,7 +83,17 @@ class SectorRotationSkill(SkillBuilder):
             return cached
         end = datetime.now().strftime('%Y%m%d')
         start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
-        df = self._get_board_industry_hist(symbol, "daily", start, end)
+        try:
+            df = _run_with_timeout(
+                self._get_board_industry_hist,
+                SECTOR_ROTATION_TIMEOUT_SECONDS,
+                symbol,
+                "daily",
+                start,
+                end,
+            )
+        except TimeoutError as e:
+            return {'error': f'板块历史K线查询超时: {symbol}, {e}', 'retry': False}
         if df.empty:
             return {'error': f'未获取到板块 {symbol} 的历史数据'}
         tail = df.tail(days)
@@ -77,7 +113,15 @@ class SectorRotationSkill(SkillBuilder):
         cached = get_sector_rotation_cache(cache_key)
         if cached is not None:
             return cached
-        df = self._get_sector_fund_flow_rank(indicator, sector_type)
+        try:
+            df = _run_with_timeout(
+                self._get_sector_fund_flow_rank,
+                SECTOR_ROTATION_TIMEOUT_SECONDS,
+                indicator,
+                sector_type,
+            )
+        except TimeoutError as e:
+            return {'error': f'板块资金流向查询超时: {indicator}/{sector_type}, {e}', 'retry': False}
         if df.empty:
             return []
         result = df.head(20).to_dict('records')

@@ -1,0 +1,9 @@
+{
+  "id": "fundamental_dimension",
+  "title": "估值与基本面",
+  "required": false,
+  "max_words": 300,
+  "prompt": "必须引用具体估值数值：PE(TTM)、PB 及其历史分位（标注时间范围如近3年/近5年），结合净利润增速判断 PEG 是否合理。必须区分绝对估值高低和相对估值——低分位不等于低估，需排除估值陷阱（业绩下滑导致的被动低估值）。如有同业对比数据，必须横向比较 PE/PB/ROE/增速差异并说明原因。财务指标必须引用营收增速、毛利率、ROE 趋势，不能只写'基本面良好'。缺少估值数据时标注数据缺失。",
+  "data_slots": ["pe_percentile"],
+  "core_slots": ["pe_percentile"]
+}

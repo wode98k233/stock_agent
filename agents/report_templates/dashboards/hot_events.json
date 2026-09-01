@@ -1,0 +1,30 @@
+{
+  "id": "hot_events",
+  "display_name": "热点事件仪表盘",
+  "description": "热点事件分析：生命周期阶段、情绪热度、资金行为、关联标的",
+  "scenario_tag": "热点事件仪表盘",
+  "checklist_dimensions": ["事件影响力", "情绪热度", "资金行为", "关联标的"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "action_items", "renderer": "action_items", "fields": ["action_items"]},
+    {"id": "event_impact", "renderer": "event_card", "fields": ["event_impact"]},
+    {"id": "lifecycle_stage", "renderer": "stage_bar", "fields": ["lifecycle_stage"]},
+    {"id": "sentiment_heat", "renderer": "heat_gauge", "fields": ["sentiment_heat"]},
+    {"id": "capital_behavior", "renderer": "text_block", "fields": ["capital_behavior"]},
+    {"id": "hot_stocks", "renderer": "candidate_table", "fields": ["hot_stocks"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "event_impact", "type": "str", "description": "事件核心影响分析：什么事件、影响哪些板块/个股、影响路径（≤80字）", "example": "华为发布新芯片，利好半导体设备/材料/EDA三大环节，短期催化国产替代主线"},
+    {"name": "lifecycle_stage", "type": "str", "description": "热点生命周期阶段：爆发期（刚发生，市场热议）、分化期（龙头继续但跟风回落）、退潮期（热度消退，资金撤退）", "example": "爆发期"},
+    {"name": "sentiment_heat", "type": "int", "description": "市场情绪热度 0-100，综合媒体报道量、社交媒体讨论度、资金追逐程度", "example": "85"},
+    {"name": "capital_behavior", "type": "str", "description": "资金行为判断：主力借利好出货/游资接力炒作/机构中长线建仓/散户跟风（≤50字）", "example": "游资主导炒作，机构尚未大规模介入，需警惕高位接力风险"},
+    {"name": "hot_stocks", "type": "list", "description": "热点关联标的列表：按关联强度排序，说明与事件的关联原因", "example": "[{\"rank\":1,\"name\":\"中芯国际\",\"ticker\":\"688981\",\"reason\":\"华为芯片代工\",\"strength\":\"涨停\"},{\"rank\":2,\"name\":\"北方华创\",\"ticker\":\"002371\",\"reason\":\"半导体设备龙头\",\"strength\":\"+6.5%\"}]"},
+    {"name": "portfolio_action", "type": "str", "description": "热点场景操作建议（以风险提示为主，如\"快进快出\"、\"等待二次回调\"）", "example": "短线可轻仓参与龙头，切勿追高跟风股"},
+    {"name": "action_items", "type": "list", "description": "具体行动项（每项≤30字，2-4项）", "example": "[\"关注龙头股次日竞价表现\",\"若高开低走则回避\",\"等待分化后精选龙头\"]"}
+  ]
+}

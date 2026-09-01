@@ -1,0 +1,9 @@
+{
+  "id": "beginner_translation",
+  "title": "小白版翻译",
+  "required": false,
+  "max_words": 120,
+  "prompt": "用一句到两句话把结论翻译成非专业用户能执行的语言，避免堆术语。",
+  "data_slots": ["verdict"],
+  "core_slots": ["verdict"]
+}

@@ -24,3 +24,7 @@ class PlanExecute(TypedDict):
     step_results: Annotated[List[dict], operator.add]
     # 第三轮新增：Observer 决策记录
     observer_log: Annotated[List[dict], operator.add]
+    # 模板系统字段
+    template_id: Optional[str]
+    selected_skills: list
+    tool_calls: Annotated[list, operator.add]

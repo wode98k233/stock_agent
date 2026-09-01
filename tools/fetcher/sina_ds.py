@@ -29,7 +29,9 @@ def _safe_int(v, default=0):
 
 class SinaDirectDataSource(DataSource):
     name: str = "sina_direct"
-    priority: int = 95
+    label: str = "新浪财经"
+    description: str = "新浪实时行情，仅 A 股"
+    priority: int = int(os.getenv("SINA_PRIORITY", "100"))
 
     _HEADERS = {
         'Referer': 'https://finance.sina.com.cn',

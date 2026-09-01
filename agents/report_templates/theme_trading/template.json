@@ -1,0 +1,147 @@
+{
+  "id": "theme_trading",
+  "schema_version": "2.0",
+  "report_family": "theme_trading",
+  "asset_type": "sector",
+  "intent_type": "timing",
+  "dashboard_type": "sector",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "题材炒作分析",
+  "version": "1.0",
+  "role": "你是一名 A 股短线题材交易分析师。你的任务是判断当前题材的级别、炒作阶段、龙头辨识和跟风标的筛选。所有判断必须有量价数据支撑，不得凭感觉判断。题材级别和炒作阶段的判断必须给出具体依据。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "candidate_ranking",
+    "position_sizing",
+    "trade_discipline",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "theme_context",
+      "description": "题材背景、驱动事件和政策支撑",
+      "fields": [
+        "题材名称",
+        "驱动事件",
+        "政策级别",
+        "持续性判断",
+        "历史类似题材"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "leader_identification",
+      "description": "龙头股识别——连板高度、辨识度、资金认可度",
+      "fields": [
+        "连板数",
+        "封板资金",
+        "换手率",
+        "成交额",
+        "辨识度",
+        "所属细分"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "stock_screening"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "theme_stocks",
+      "description": "题材概念股列表及走势",
+      "fields": [
+        "涨跌幅",
+        "成交额",
+        "换手率",
+        "量比",
+        "连板数",
+        "市值"
+      ],
+      "tool_capabilities": [
+        "stock_screening"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "capital_flow",
+      "description": "题材资金流向和游资动向",
+      "fields": [
+        "主力净流入",
+        "超大单",
+        "龙虎榜",
+        "游资席位"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "theme_context",
+        "leader_identification"
+      ],
+      "rule": "题材级别决定龙头高度上限：国家级政策题材龙头可看5板以上，行业级题材一般3板封顶，纯游资炒作题材2板即为极限。若龙头连板数已超历史同类题材上限，退潮概率极高。"
+    },
+    {
+      "dimensions": [
+        "leader_identification",
+        "capital_flow"
+      ],
+      "rule": "龙头封板资金持续缩减+换手率飙升=开板预警；跟风股大面积涨停但龙头滞涨=高潮末期信号。"
+    }
+  ],
+  "qa_rules": [
+    "必须区分题材级别（国家级/行业级/游资炒作），不同级别对应不同操作策略。",
+    "龙头辨识必须有量化依据（连板数、封板资金、辨识度），不能只说'是龙头'。",
+    "必须给出炒作阶段判断（启动期/加速期/高潮期/退潮期）及判断依据。",
+    "跟风股筛选必须标注风险：跟风股止损条件为龙头开板或板块跌幅>3%。",
+    "退潮预警信号必须具体：如'龙头开板+板块成交额萎缩30%以上'。",
+    "必须完整输出全部板块：核心结论/关键证据/候选标的排序/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取题材驱动事件、政策支撑和市场解读"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选题材概念股，按涨幅和连板排序"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取龙头和跟风股的量价数据"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding",
+    "trading_discipline"
+  ]
+}

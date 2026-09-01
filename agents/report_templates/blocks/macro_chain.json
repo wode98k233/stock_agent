@@ -1,0 +1,9 @@
+{
+  "id": "macro_chain",
+  "title": "传导链分析",
+  "required": true,
+  "max_words": 420,
+  "prompt": "按「事件/数据 → 利率/汇率/商品/风险偏好 → A股风格/板块」说明传导链。必须区分直接影响和二阶影响。",
+  "data_slots": ["news_sentiment"],
+  "core_slots": []
+}

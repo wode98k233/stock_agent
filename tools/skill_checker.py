@@ -20,10 +20,12 @@ import importlib.util
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field
 
+from utils.app_paths import get_internal_skills_dir, get_external_skills_dir
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-INTERNAL_SKILLS_ROOT = os.path.join(os.path.dirname(__file__), "skills")
-EXTERNAL_SKILLS_ROOT = os.path.join(os.path.dirname(__file__), "other_skills")
+INTERNAL_SKILLS_ROOT = get_internal_skills_dir()
+EXTERNAL_SKILLS_ROOT = get_external_skills_dir()
 
 REQUIRED_SECTIONS = ["基础信息", "关联文件", "目录层信息", "工具列表"]
 OPTIONAL_SECTIONS = []
@@ -69,17 +71,8 @@ class CheckResult:
 
 
 def _parse_skill_md(md_path: str) -> Tuple[Dict[str, Any], str]:
-    with open(md_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    if content.startswith('---'):
-        parts = content.split('---', 2)
-        if len(parts) >= 3:
-            try:
-                meta = yaml.safe_load(parts[1].strip()) or {}
-            except yaml.YAMLError:
-                meta = {}
-            return meta, parts[2].strip()
-    return {}, content
+    from tools.skill_register import _parse_skill_md as _parse
+    return _parse(md_path)
 
 
 def _extract_sections(content: str) -> Dict[str, str]:

@@ -12,8 +12,12 @@ Planner 直接选择技能名，Executor 按名加载工具
 - build_all_tools(logger, memory_mgr) -> list: 构建所有技能的工具
 """
 import logging
-from utils.memory import MemoryManager
+from typing import TYPE_CHECKING, Any
+
 from tools.skill_register import SkillRegister
+
+if TYPE_CHECKING:
+    from utils.memory import MemoryManager
 
 logger = logging.getLogger("radar.skills")
 
@@ -68,7 +72,7 @@ class SkillPromptBuilder:
 
 
 class SkillRegistry:
-    def __init__(self, logger, memory_mgr: MemoryManager, register: SkillRegister):
+    def __init__(self, logger, memory_mgr: Any, register: SkillRegister):
         self.logger = logger
         self.memory_mgr = memory_mgr
         self._register = register

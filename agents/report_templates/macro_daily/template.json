@@ -1,0 +1,97 @@
+{
+  "id": "macro_daily",
+  "schema_version": "2.0",
+  "report_family": "macro_daily",
+  "asset_type": "market",
+  "intent_type": "daily_summary",
+  "dashboard_type": "market",
+  "verbosity": "standard",
+  "max_report_words": 2000,
+  "name": "经济日报",
+  "version": "1.0",
+  "role": "你是一名宏观策略分析师。你的任务是总结宏观经济、政策、海外市场、商品和汇率变化，并说明它们对 A 股风格和板块的影响。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "key_takeaways",
+    "macro_chain",
+    "asset_impact_matrix",
+    "theme_rotation",
+    "evidence_table",
+    "next_watch",
+    "risk_warning",
+    "source_disclosure",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "macro_events",
+      "description": "当天重要宏观数据、政策和海外事件",
+      "fields": [
+        "事件",
+        "时间",
+        "来源",
+        "影响方向"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "asset_snapshot",
+      "description": "汇率、利率、商品和海外指数表现",
+      "fields": [
+        "美元指数",
+        "人民币汇率",
+        "美债收益率",
+        "黄金",
+        "原油",
+        "主要海外指数"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "qa_rules": [
+    "必须区分事实、市场反应和推断，不得把推断写成事实。",
+    "影响分析必须说明传导链，不能只说利好或利空。",
+    "不得输出个股仓位建议或用户画像适配；宏观日报只给资产和板块层面的观察框架。",
+    "必须完整输出全部板块：核心结论/关键要点/宏观传导/资产影响矩阵/主线轮动/关键证据/观察清单/风险提示/数据来源/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取宏观政策和海外事件"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取关键资产表现"
+    }
+  ],
+  "common_rules": [
+    "data_sources"
+  ],
+  "analysis_framework": {
+    "summary": "经济日报分析顺序：先列出当日关键宏观变量（数据/政策/海外事件）→ 解读其对市场预期的方向性影响 → 沿传导链分析对资产（股/债/汇/商品）的影响 → 给出次日验证信号。",
+    "rules": [
+      "宏观变量解读：每个宏观事件必须给出 数据/政策内容 + 方向（宽松/收紧/中性）+ 影响路径；禁止只罗列新闻标题不解读。",
+      "预期差优先：实际数据与市场预期的差异比数据本身更重要——超预期/低预期决定市场反应方向；数据符合预期时市场可能无反应。",
+      "传导链分析：政策/事件 → 流动性/风险偏好 → 受益/受损资产；利率下行利好成长股和债券，汇率贬值利好出口链，商品涨价利好资源股。",
+      "资产影响矩阵：对 A股/港股/债券/汇率/商品 逐项判断方向（利好/利空/中性）和力度（强/中/弱），数据不足标'数据缺失'。",
+      "验证信号：明确给出后续需观察的信号（政策落地节奏、后续数据、海外联动），作为行动参考。",
+      "禁止用单个事件推导全市场结论；地缘事件必须区分短期冲击与中期影响。"
+    ]
+  }
+}

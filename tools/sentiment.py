@@ -7,6 +7,7 @@
 """
 import json
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from utils.llm_factory import get_llm, tracked_invoke, llm_json_with_retry
 from utils.memory import MemoryManager
@@ -126,24 +127,17 @@ def analyze_sentiment(news_list: list, memory_mgr: MemoryManager = None, logger=
         ("user", f"请分析以下新闻:\n\n{news_text}")
     ]
 
-    # 临时关闭记忆（新闻分析不需要记录到对话历史）
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="sentiment")
         if result and 'total_score' in result:
             logger.info(f"情感分析完成 | 总分: {result['total_score']} | 结论: {result.get('conclusion', '?')}")
             return result
-        # 降级
         return {
             'news_analysis': [],
             'total_score': 0,
             'conclusion': '中性',
             'summary': '情感分析解析失败' if result else '情感分析无返回'
         }
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()
 
 
 def merge_sentiment(results: list) -> dict:

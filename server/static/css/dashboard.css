@@ -1,0 +1,707 @@
+/* ── 仪表盘卡片（原型精确还原） ── */
+.dashboard-card {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.08), 0 4px 10px rgba(0,0,0,0.04);
+  overflow: hidden;
+  margin-top: 14px;
+  animation: dashCardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  font-size: 14px;
+  line-height: 1.6;
+  color: #1c2430;
+}
+.dashboard-card,
+.dashboard-card *,
+.dashboard-card *::before,
+.dashboard-card *::after {
+  box-sizing: border-box;
+}
+.dashboard-card h2 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1c2430;
+  border-bottom: none;
+  padding-bottom: 0;
+  margin: 0;
+}
+.dashboard-card p {
+  margin: 0;
+}
+.dashboard-card > * {
+  font-size: inherit;
+}
+@keyframes dashCardIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Header ── */
+.dash-header {
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dash-header-icon {
+  width: 36px; height: 36px;
+  background: #e8f4f1;
+  border-radius: 8px;
+  display: grid; place-items: center;
+  font-size: 18px; flex-shrink: 0;
+}
+.dash-header h2 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1c2430;
+  margin: 0; flex: 1;
+}
+.dash-stock-tag {
+  margin-left: auto;
+  font-size: 12px;
+  color: #64748b;
+  background: #f8fafb;
+  padding: 3px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+/* ── Signal Row (原型: 3列圆角卡片) ── */
+.dash-signal-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  padding: 20px 24px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.dash-signal-box {
+  text-align: center;
+  padding: 16px 8px;
+  border-radius: 8px;
+  position: relative;
+}
+.dash-signal-box.decision {
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border: 1px solid #fde68a;
+}
+.dash-signal-box.decision.buy {
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+  border-color: #a7f3d0;
+}
+.dash-signal-box.decision.sell {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: #fecaca;
+}
+.dash-sig-label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.dash-sig-value {
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.1;
+}
+.dash-sig-sub {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 4px;
+}
+.dash-confidence-bar {
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.dash-confidence-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.dash-confidence-fill.hold { background: linear-gradient(90deg, #fbbf24, #d97706); }
+.dash-confidence-fill.buy { background: linear-gradient(90deg, #34d399, #059669); }
+.dash-confidence-fill.sell { background: linear-gradient(90deg, #f87171, #dc2626); }
+
+/* ── Core Verdict ── */
+.dash-verdict-row {
+  padding: 16px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.dash-verdict-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dash-verdict-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1c2430;
+  line-height: 1.5;
+}
+
+/* ── Section ── */
+.dash-section {
+  padding: 16px 24px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.dash-section:last-child { border-bottom: none; }
+.dash-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #64748b;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dash-section-icon { font-size: 15px; }
+
+/* ── Stage Progress (原型: 蓄势---[进度条+滑块]---退潮) ── */
+.dash-stage-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.dash-stage-end {
+  font-size: 12px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+.dash-stage-end-right { text-align: right; }
+.dash-stage-track {
+  flex: 1;
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  position: relative;
+  overflow: visible;
+}
+.dash-stage-fill {
+  position: absolute;
+  left: 0; top: 0;
+  height: 100%;
+  border-radius: 4px;
+}
+.dash-stage-fill.hold { background: linear-gradient(90deg, #94a3b8, #d97706); }
+.dash-stage-fill.buy { background: linear-gradient(90deg, #94a3b8, #059669); }
+.dash-stage-fill.sell { background: linear-gradient(90deg, #94a3b8, #dc2626); }
+.dash-stage-dot {
+  position: absolute;
+  top: -4px;
+  width: 12px; height: 16px;
+  border-radius: 6px;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  transform: translateX(-50%);
+}
+.dash-stage-dot.hold { background: #d97706; }
+.dash-stage-dot.buy { background: #059669; }
+.dash-stage-dot.sell { background: #dc2626; }
+.dash-stage-indicator {
+  text-align: center;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.dash-stage-arrow {
+  font-size: 13px;
+  font-weight: 900;
+}
+.dash-stage-indicator.buy .dash-stage-arrow { color: #059669; }
+.dash-stage-indicator.hold .dash-stage-arrow { color: #d97706; }
+.dash-stage-indicator.sell .dash-stage-arrow { color: #dc2626; }
+.dash-stage-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c2430;
+}
+
+/* ── Heat Gauge (热点事件情绪热度) ── */
+.dash-heat-gauge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-heat-bar {
+  flex: 1;
+  height: 12px;
+  background: #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.dash-heat-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.dash-heat-score {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1c2430;
+  min-width: 52px;
+  text-align: right;
+}
+
+/* ── Leader Identification (原型: 纵向卡片列表) ── */
+.dash-leader-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-leader-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  transition: all 0.2s;
+}
+.dash-leader-card:hover { box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04); }
+.dash-leader-card.leader { background: #ecfdf5; border-color: #a7f3d0; }
+.dash-leader-card.follower { background: #f8fafb; border-color: #e2e8f0; }
+.dash-leader-card.laggard { background: #fffbeb; border-color: #fde68a; }
+.dash-leader-role {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.dash-leader-role.leader { background: #059669; color: #fff; }
+.dash-leader-role.follower { background: #64748b; color: #fff; }
+.dash-leader-role.laggard { background: #d97706; color: #fff; }
+.dash-leader-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c2430;
+  flex-shrink: 0;
+}
+.dash-leader-detail {
+  font-size: 12px;
+  color: #64748b;
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+/* ── Dimension Checklist (原型: 纵向列表) ── */
+.dash-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  transition: all 0.2s;
+}
+.dash-check-item:hover { box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04); }
+.dash-check-item.positive { background: #ecfdf5; border-color: #a7f3d0; }
+.dash-check-item.warning { background: #fffbeb; border-color: #fde68a; }
+.dash-check-item.negative { background: #fef2f2; border-color: #fecaca; }
+.dash-check-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dash-check-detail { flex: 1; }
+.dash-check-dim {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c2430;
+}
+.dash-check-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+/* ── Risk Priority (原型: 左边框+徽章) ── */
+.dash-risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-risk-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border-left: 3px solid;
+}
+.dash-risk-item.high { border-left-color: #dc2626; background: #fef2f2; }
+.dash-risk-item.medium { border-left-color: #d97706; background: #fffbeb; }
+.dash-risk-item.low { border-left-color: #059669; background: #ecfdf5; }
+.dash-risk-level {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dash-risk-level.high { background: #dc2626; color: #fff; }
+.dash-risk-level.medium { background: #d97706; color: #fff; }
+.dash-risk-level.low { background: #059669; color: #fff; }
+.dash-risk-content { flex: 1; }
+.dash-risk-title { font-size: 13px; font-weight: 600; color: #1c2430; }
+.dash-risk-action { font-size: 12px; color: #64748b; margin-top: 2px; }
+
+/* ── Next Watch Chips (原型: brand色系pill) ── */
+.dash-watch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dash-watch-chip {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: #e8f4f1;
+  color: #0f4a3d;
+  font-weight: 500;
+  border: 1px solid #c8ddd6;
+}
+
+/* ── Market Dashboard: Sector Rotation Tabs ── */
+.dash-sector-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dash-sector-tab {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: #f8fafb;
+  color: #64748b;
+  font-weight: 500;
+  border: 1px solid #e2e8f0;
+}
+.dash-sector-tab.up { background: #ecfdf5; color: #059669; border-color: #a7f3d0; }
+.dash-sector-tab.down { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+
+/* ── Market Dashboard: Up/Down Count ── */
+.dash-updown-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  text-align: center;
+}
+.dash-updown-col {
+  padding: 12px 8px;
+  border-radius: 8px;
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+}
+.dash-updown-col.up { background: #ecfdf5; border-color: #a7f3d0; }
+.dash-updown-col.down { background: #fef2f2; border-color: #fecaca; }
+.dash-updown-col.flat { background: #f8fafb; border-color: #e2e8f0; }
+.dash-updown-num {
+  font-size: 24px;
+  font-weight: 900;
+  color: #1c2430;
+}
+.dash-updown-col.up .dash-updown-num { color: #059669; }
+.dash-updown-col.down .dash-updown-num { color: #dc2626; }
+.dash-updown-label {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* ── Stock Dashboard: Price Levels ── */
+.dash-price-levels {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.dash-price-level {
+  text-align: center;
+  padding: 10px 4px;
+  border-radius: 8px;
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+}
+.dash-price-label {
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.dash-price-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1c2430;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+/* ── Stock Dashboard: Split Advice (原型: 2列网格大卡片) ── */
+.dash-split-advice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.dash-advice-card {
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+}
+.dash-advice-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dash-advice-text {
+  font-size: 13px;
+  color: #1c2430;
+  line-height: 1.6;
+}
+
+/* ── Footer ── */
+.dash-footer {
+  padding: 12px 24px;
+  background: #f8fafb;
+  border-top: 1px solid #e2e8f0;
+  font-size: 11px;
+  color: #64748b;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.dash-disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Index Data ── */
+.dash-index-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+.dash-index-item {
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.dash-index-item.up { background: #ecfdf5; border-color: #a7f3d0; }
+.dash-index-item.down { background: #fef2f2; border-color: #fecaca; }
+.dash-index-name { font-size: 12px; color: #64748b; margin-bottom: 4px; }
+.dash-index-pct { font-size: 16px; font-weight: 700; }
+.dash-index-item.up .dash-index-pct { color: #059669; }
+.dash-index-item.down .dash-index-pct { color: #dc2626; }
+
+/* ── Volume Summary ── */
+.dash-volume-text {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+  padding: 4px 0;
+}
+
+/* ── Sector Strength ── */
+.dash-sector-strength-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-sector-strength-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dash-strength-label {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.dash-strength-label.up { background: #ecfdf5; color: #059669; }
+.dash-strength-label.down { background: #fef2f2; color: #dc2626; }
+.dash-sector-tag {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafb;
+  color: #475569;
+}
+.dash-sector-tag.up { background: #ecfdf5; color: #059669; border-color: #a7f3d0; }
+.dash-sector-tag.down { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+
+/* ── Candidate Stocks ── */
+.dash-candidate-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-candidate-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  transition: box-shadow 0.2s;
+}
+.dash-candidate-row:hover { box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04); }
+.dash-candidate-rank {
+  width: 28px;
+  height: 28px;
+  background: #176b5b;
+  color: #fff;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.dash-candidate-info { flex: 1; min-width: 0; }
+.dash-candidate-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c2430;
+}
+.dash-candidate-ticker {
+  font-size: 11px;
+  color: #64748b;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  margin-left: 4px;
+}
+.dash-candidate-reason {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.dash-candidate-tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.dash-ctag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafb;
+  color: #475569;
+}
+.dash-ctag.strength { background: #ecfdf5; color: #059669; border-color: #a7f3d0; }
+.dash-ctag.weakness { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+.dash-ctag.suit { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
+.dash-action-text {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .dash-signal-row { grid-template-columns: 1fr; gap: 8px; }
+  .dash-header { padding: 16px 16px 12px; }
+  .dash-section { padding: 14px 16px; }
+  .dash-verdict-row { padding: 14px 16px; }
+  .dash-footer { padding: 10px 16px; }
+  .dash-leader-detail { max-width: 140px; font-size: 11px; }
+  .dash-split-advice { grid-template-columns: 1fr; }
+  .dash-price-levels { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ── 关键要点 / 行动项 / 仓位指引 / 证伪信号 ── */
+.dash-key-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dash-key-point {
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.6;
+  padding-left: 14px;
+  position: relative;
+}
+.dash-key-point::before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  color: #059669;
+}
+.dash-action-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-action-item {
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.6;
+  padding: 8px 12px;
+  background: #f0fdf4;
+  border-left: 3px solid #059669;
+  border-radius: 6px;
+}
+.dash-position-text {
+  font-size: 13px;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dash-position-badge {
+  font-weight: 700;
+  color: #92400e;
+  background: #fef3c7;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.dash-position-reason { color: #475569; }
+.dash-falsification {
+  font-size: 13px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px dashed #fca5a5;
+  padding: 10px 14px;
+  border-radius: 8px;
+  line-height: 1.6;
+}

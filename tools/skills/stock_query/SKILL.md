@@ -19,6 +19,7 @@ category: 数据查询
 ## 目录层信息
 - 关键参数：板块名称（可选）、股票代码（必填）、时间范围（可选）
 - 核心目标：获取指定板块或个股的基础数据、行情数据、历史K线、机构评级或财务指标
+- 市场支持：主要支持 A股/沪深市场；港股、美股、ADR 个股优先使用 mx_data_query 获取行情、财务和估值数据。
 
 ## 工具列表
 ### 工具1：get_board_stocks
@@ -62,21 +63,50 @@ category: 数据查询
 - 调用入口：main.py.build_tools 中的 get_concept_list
 - 参数约束：无参数
 
+### 工具8：search_stock_news
+- 功能：通过搜索引擎聚合搜索股票相关新闻和资讯，支持多源（MX/SerpAPI/Tavily）
+- 调用入口：main.py.build_tools 中的 search_stock_news
+- 参数约束：
+  - query: str（必填）- 搜索关键词，如"贵州茅台 最新消息"、"中际旭创 业绩"
+  - max_results: int（可选，默认5）- 最大返回条数
+- 与 mx_search_news 的区别：search_stock_news 支持多搜索引擎聚合，配了 SerpAPI/Tavily Key 自动启用，没配时退化为纯 MX 搜索
+
 ## 使用指南
 
-### 典型调用流程
-1. **板块选股流程**：先调用 get_industry_list 或 get_concept_list 获取板块列表 → 从返回结果中找到正确的板块名称 → 调用 get_board_stocks 获取成分股 → 逐个调用 get_stock_realtime 查看行情
-2. **个股深度分析**：get_stock_realtime(看当前行情) → get_stock_history(看历史趋势) → get_stock_financial(看基本面) → get_stock_rating(看机构观点)
-3. **基本面筛选**：get_industry_list/get_concept_list(获取板块列表) → get_board_stocks(获取股票池) → 批量调用 get_stock_financial → 根据财务指标筛选
+### 适用场景
+- 查询 A 股个股实时行情、历史K线、财务摘要、机构评级。
+- 查询行业或概念板块列表，并进一步获取板块成分股。
+- 给 technical_analysis、valuation、aggregation 等技能准备基础数据。
 
-### 工具间依赖关系
-- **重要**：查询板块成分股前，必须先调用 get_industry_list 或 get_concept_list 获取正确的板块名称！"电池"、"新能源"等模糊词可能查不到，需要使用准确的板块名称如"锂电池"、"动力电池"等
-- get_industry_list / get_concept_list 返回的板块名称，是 get_board_stocks 的输入参数
-- get_board_stocks 返回的股票代码列表，是后续 get_stock_realtime/get_stock_history/get_stock_rating/get_stock_financial 的 symbol 参数来源
-- get_stock_realtime 获取的是实时快照数据，不含历史趋势
-- get_stock_history 返回最近N天的K线数据，默认60天，技术分析通常需要更多天数
+### 不适用场景
+- 港股、美股、ADR 优先用 mx_data_query，不要先调用本技能。
+- 不用于自然语言条件选股；这类用 mx_xuangu_filter。
 
-### 注意事项
-- 股票代码格式为6位数字字符串，如"600519"、"000001"，不含市场前缀
-- get_board_stocks 一次最多返回50只成分股，如果板块较大需注意后续批量查询的效率
-- get_stock_rating 和 get_stock_financial 都是单只股票查询，批量分析时需逐个调用
+### 搜索工具选择
+- `search_stock_news`：通用搜索引擎聚合搜索，适合获取最新新闻、市场资讯、行业动态等广泛信息。
+- `mx_search_news`：东方财富妙想搜索，适合获取结构化的金融资讯（新闻、研报、公告），结果按权威度分级。
+- 优先用 `search_stock_news` 做广泛搜索，用 `mx_search_news` 做金融垂直搜索。
+
+### 必填参数
+- 个股工具：`symbol` 必填，使用 6 位股票代码，不加市场前缀。
+- 板块成分股：`board_name` 必填，必须是准确板块名。
+- 历史K线：`days` 可选，默认 60。
+
+### 典型调用
+1. 板块股票池：`get_industry_list()` 或 `get_concept_list()` → `get_board_stocks("锂电池")`
+2. 个股基础画像：`get_stock_realtime("600519")` → `get_stock_history("600519", 60)` → `get_stock_financial("600519")`
+3. 评级查询：`get_stock_rating("600519")`
+
+### 输出形态
+- 实时行情和财务/评级返回 dict/JSON。
+- 历史K线返回 dict/JSON，包含 `total_days` 和最近 K 线摘要。
+- 板块和列表工具返回列表JSON，通常最多展示前 50 条。
+
+### 失败 fallback
+- 板块名查不到时，先用 get_industry_list/get_concept_list 找标准名称，再调用 get_board_stocks。
+- 个股历史K线失败时，优先换 mx_data_query 查询行情或历史价格表格。
+- 港股、美股、ADR 数据失败时直接切 mx_data_query。
+
+### 不要重试条件
+- 股票代码不是 A 股 6 位代码时不要反复调用本技能。
+- 明确提示未找到股票、未找到板块、历史K线缺字段时，不要重复同样参数；先修正代码/板块名或改用 MX。

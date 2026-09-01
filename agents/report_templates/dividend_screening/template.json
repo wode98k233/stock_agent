@@ -1,0 +1,99 @@
+{
+  "id": "dividend_screening",
+  "schema_version": "2.0",
+  "report_family": "dividend_screening",
+  "asset_type": "screening",
+  "intent_type": "screening",
+  "dashboard_type": "screening",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "红利选股",
+  "version": "1.0",
+  "role": "你是一名红利策略研究员。你的任务是筛选高股息候选股，并从分红稳定性、现金流、估值、行业周期和下行风险做排序。",
+  "required_skills": [
+    "mx_data",
+    "mx_xuangu",
+    "mx_search"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "candidate_ranking",
+    "evidence_table",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_xuangu",
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "dividend_candidates",
+      "description": "红利候选股列表",
+      "fields": [
+        "股息率",
+        "连续分红年数",
+        "分红率",
+        "PE",
+        "PB",
+        "ROE",
+        "现金流"
+      ],
+      "tool_capabilities": [
+        "stock_screening"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "dividend_quality",
+      "description": "分红可持续性和估值安全边际",
+      "fields": [
+        "经营现金流",
+        "净利润",
+        "负债率",
+        "行业属性",
+        "估值分位"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "红利股不能只按股息率排序，必须检查分红可持续性。",
+    "必须列出排除理由，尤其是高股息但基本面恶化的标的。",
+    "必须完整输出全部板块：核心结论/候选排序/关键证据/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选高股息候选股"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "补充候选股财务质量和估值"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "红利选股分析顺序：先按股息率门槛筛候选 → 验证分红可持续性（现金流/利润/负债）→ 排除高股息陷阱 → 结合估值和成长性排序 → 输出候选池和排除理由。",
+    "rules": [
+      "股息率门槛：候选股息率≥4%（或用户指定），优先连续3年以上稳定分红的公司；首次分红/一次性大额分红不计入。",
+      "可持续性验证：分红/净利润≤70%（分红率合理）、经营现金流/净利润>0.8（利润有现金支撑）、负债率<60%（偿债无压力）；不满足的标高风险警示。",
+      "高股息陷阱排除：利润下滑但仍维持高分红（透支未来）、行业景气下行导致盈利恶化、大股东减持+高分红（套现嫌疑）——排除或降级。",
+      "综合排序：股息率+分红稳定性+基本面（ROE/增速）+估值（PB分位）综合排序；纯高股息但基本面恶化=降级。",
+      "输出要求：候选股必须给 代码/名称/股息率/分红年份/股息率来源/主要风险；筛选结果只是观察池，禁止给买卖指令。"
+    ]
+  }
+}

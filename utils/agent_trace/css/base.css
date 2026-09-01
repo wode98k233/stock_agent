@@ -1,0 +1,110 @@
+/* ── base ── */
+:root {
+  --bg:         #080c14;
+  --surface:    #0f1520;
+  --surface2:   #151d2e;
+  --surface3:   #1a2540;
+  --border:     rgba(56,189,248,0.08);
+  --border-hi:  rgba(56,189,248,0.2);
+  --text:       #e2e8f0;
+  --text-dim:   #94a3b8;
+  --muted:      #64748b;
+  --accent:     #38bdf8;
+  --accent-dim: rgba(56,189,248,0.12);
+  --success:    #34d399;
+  --error:      #f87171;
+  --warning:    #fbbf24;
+  --purple:     #c084fc;
+  --cyan:       #22d3ee;
+  --pink:       #f472b6;
+  --orange:     #fb923c;
+  --green:      #4ade80;
+  --teal:       #2dd4bf;
+  --red-dim:    rgba(248,113,113,0.08);
+  --yellow-dim: rgba(251,191,36,0.08);
+  --green-dim:  rgba(52,211,153,0.08);
+  --purple-dim: rgba(192,132,252,0.08);
+  --cyan-dim:   rgba(34,211,238,0.08);
+  --font-mono:  "Cascadia Code", "Fira Code", "Consolas", monospace;
+  --font-sans:  "Segoe UI", system-ui, -apple-system, sans-serif;
+  --radius:     6px;
+}
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 44px 1fr;
+  grid-template-columns: 260px 1fr;
+}
+
+header {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+}
+header h1 {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.header-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+}
+.header-controls input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  width: 160px;
+  transition: border-color 0.2s;
+}
+.header-controls input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.badge-success { background: var(--green-dim); color: var(--success); }
+.badge-error   { background: var(--red-dim); color: var(--error); }
+.badge-running { background: var(--yellow-dim); color: var(--warning); }

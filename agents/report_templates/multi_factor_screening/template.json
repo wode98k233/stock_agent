@@ -1,0 +1,172 @@
+{
+  "id": "multi_factor_screening",
+  "schema_version": "2.0",
+  "report_family": "multi_factor_screening",
+  "asset_type": "screening",
+  "intent_type": "screening",
+  "dashboard_type": "screening",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "多因子选股",
+  "version": "1.0",
+  "role": "你是一名量化选股分析师。你的任务是从成长、盈利质量、估值、动量、资金五个因子维度筛选股票，给出综合评分和排序。每个因子必须有明确的筛选标准和数据支撑，不得凭主观偏好选股。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "candidate_ranking",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_xuangu",
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "growth_factor",
+      "description": "成长因子——营收和利润增速",
+      "fields": [
+        "营收增速",
+        "净利润增速",
+        "扣非净利润增速",
+        "连续增长季度数"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "quality_factor",
+      "description": "盈利质量因子",
+      "fields": [
+        "ROE",
+        "毛利率",
+        "净利率",
+        "经营现金流/净利润",
+        "负债率"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "value_factor",
+      "description": "估值因子",
+      "fields": [
+        "PE",
+        "PB",
+        "PE历史分位",
+        "PB历史分位",
+        "PEG"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "momentum_factor",
+      "description": "动量因子",
+      "fields": [
+        "近5日涨跌幅",
+        "近20日涨跌幅",
+        "近60日涨跌幅",
+        "相对强弱"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "capital_factor",
+      "description": "资金因子",
+      "fields": [
+        "主力净流入",
+        "近5日主力净流入",
+        "北向资金",
+        "融资余额变化"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "growth_factor",
+        "value_factor"
+      ],
+      "rule": "高成长+低估值（PEG<1）=最优象限。高成长+高估值（PEG>2）=需要更高增速证明。低成长+低估值=价值陷阱风险。"
+    },
+    {
+      "dimensions": [
+        "quality_factor",
+        "growth_factor"
+      ],
+      "rule": "高增速但现金流差=增速质量存疑。ROE持续下降但营收增长=靠加杠杆增长，不可持续。"
+    },
+    {
+      "dimensions": [
+        "momentum_factor",
+        "capital_factor"
+      ],
+      "rule": "动量强+资金持续流入=趋势确认。动量强但资金流出=顶部风险。动量弱但资金流入=底部建仓信号。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "必须给出每个因子的具体筛选标准（如'营收增速>20%'），不能只说'成长性好'。",
+    "综合评分必须说明各因子权重分配逻辑。",
+    "必须列出被排除的股票及排除理由。",
+    "PEG>2的高估值标的必须单独标注风险。",
+    "现金流/净利润<0.5的标的必须在盈利质量因子中扣分。",
+    "必须完整输出全部板块：核心结论/关键证据/候选排序/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_xuangu",
+      "purpose": "多条件筛选候选股"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取候选股详细多因子数据"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "排除有重大风险的候选股"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "多因子选股分析顺序：先按筛选条件生成候选池 → 用成长/盈利质量/估值/动量/资金五维因子逐项打分 → 综合排序 → 排除风险标的 → 输出候选排序和依据。",
+    "rules": [
+      "因子打分：成长（营收/利润增速）、盈利质量（ROE/毛利率/现金流）、估值（PE/PB分位）、动量（阶段涨幅/量价）、资金（主力/北向流向）五维，每维0-100分。",
+      "综合排序：权重按用户偏好调整（无明确偏好默认均衡）；总分=各维加权，排序必须给出每只股票的分项得分，禁止只给排名不给依据。",
+      "风险排除：有ST/退市风险、财务造假嫌疑、审计非标意见、重大诉讼的候选股直接排除并说明理由。",
+      "数据缺失处理：某因子数据缺失时该维按50分中性处理并标注，禁止用估值猜测填充；缺失因子过多的股票降低排序。",
+      "输出要求：候选股必须给 代码/名称/总分/分项得分/入选理由/主要短板；禁止给出买卖指令，筛选结果只是观察池。"
+    ]
+  }
+}

@@ -1,5 +1,4 @@
-"""
-预算控制器 - 防止 Token 和调用次数失控
+"""预算控制器 - 防止 Token 和调用次数失控
 """
 import time
 import logging
@@ -24,6 +23,38 @@ class BudgetExceeded(Exception):
         super().__init__(f"Budget exceeded: {reason} ({current}/{limit})")
 
 
+class BudgetExemptWindow:
+    """预算豁免窗口 — 用户确认超限后，短期内跳过 budget check"""
+
+    def __init__(self, calls_limit=3, time_limit=60):
+        self.remaining_calls = calls_limit
+        self.start_time = time.time()
+        self.time_limit = time_limit
+
+    def is_active(self) -> bool:
+        if self.remaining_calls <= 0:
+            return False
+        if time.time() - self.start_time > self.time_limit:
+            return False
+        return True
+
+    def consume(self):
+        self.remaining_calls -= 1
+
+    def to_dict(self) -> dict:
+        return {
+            "remaining_calls": self.remaining_calls,
+            "start_time": self.start_time,
+            "time_limit": self.time_limit,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BudgetExemptWindow":
+        w = cls(calls_limit=d["remaining_calls"], time_limit=d["time_limit"])
+        w.start_time = d["start_time"]
+        return w
+
+
 class BudgetController:
     """
     预算控制器，在 executor 和 replanner 中定期检查，超预算就强制输出当前已有的结果。
@@ -39,12 +70,14 @@ class BudgetController:
         self._llm_calls = 0
         self._start_time = time.time()
         self._enabled = True
+        self.exempt_window: Optional[BudgetExemptWindow] = None
 
     def reset(self):
         """重置计数器（每个新查询开始时调用）"""
         self._tokens_used = 0
         self._llm_calls = 0
         self._start_time = time.time()
+        self.exempt_window = None
 
     def disable(self):
         """禁用预算检查（用于测试）"""
@@ -71,6 +104,14 @@ class BudgetController:
     def get_elapsed(self) -> float:
         return time.time() - self._start_time
 
+    def set_exempt_window(self, window: BudgetExemptWindow):
+        """设置预算豁免窗口"""
+        self.exempt_window = window
+
+    def clear_exempt_window(self):
+        """清除预算豁免窗口"""
+        self.exempt_window = None
+
     def check(self, logger: Optional[logging.Logger] = None) -> bool:
         """
         检查预算是否超限。
@@ -79,6 +120,13 @@ class BudgetController:
         如果超限，抛出 BudgetExceeded 异常。
         """
         if not self._enabled:
+            return True
+
+        # 豁免窗口检查
+        if self.exempt_window and self.exempt_window.is_active():
+            self.exempt_window.consume()
+            if logger:
+                logger.info("B", f"豁免窗口内，跳过 budget check（剩余 {self.exempt_window.remaining_calls} 次）")
             return True
 
         if self._tokens_used > self.limits.max_tokens_per_query:

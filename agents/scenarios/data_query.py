@@ -21,8 +21,10 @@ from agents.scenarios.common import (
 logger = logging.getLogger("radar.scenario")
 
 
-async def handle_data_query(user_input, enriched_input, context, data_timestamp, budget=None) -> Optional[str]:
+async def handle_data_query(user_input, enriched_input, context, data_timestamp, budget=None):
     """处理简单数据查询"""
+    from agents.scenarios.common import ScenarioResult
+
     stock_code, stock_name = resolve_stock(context)
     if not stock_code:
         return None
@@ -35,7 +37,8 @@ async def handle_data_query(user_input, enriched_input, context, data_timestamp,
     if not data:
         return None
 
-    return _format_answer(stock_name, stock_code, data, query_type, data_timestamp)
+    text = _format_answer(stock_name, stock_code, data, query_type, data_timestamp)
+    return ScenarioResult(text=text, data={"realtime": data, "stock_code": stock_code, "stock_name": stock_name})
 
 
 def _parse_query_type(user_input: str) -> str:

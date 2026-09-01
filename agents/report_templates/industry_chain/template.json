@@ -1,0 +1,167 @@
+{
+  "id": "industry_chain",
+  "schema_version": "2.0",
+  "report_family": "industry_chain",
+  "asset_type": "sector",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "sector",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "产业链分析",
+  "version": "1.0",
+  "role": "你是一名 A 股产业链研究分析师。你的任务是沿产业链拆解上中下游各环节，识别利润最厚的环节和最强势的公司，分析产业链利润分配格局和未来趋势。所有判断必须有财务数据和行业数据支撑。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "candidate_ranking",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "chain_structure",
+      "description": "产业链上中下游结构和核心环节",
+      "fields": [
+        "上游环节",
+        "中游环节",
+        "下游环节",
+        "各环节代表公司",
+        "利润分配格局"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "upstream_data",
+      "description": "上游环节代表公司数据",
+      "fields": [
+        "营收",
+        "净利润增速",
+        "毛利率",
+        "ROE",
+        "产能利用率",
+        "原材料价格"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "midstream_data",
+      "description": "中游环节代表公司数据",
+      "fields": [
+        "营收",
+        "净利润增速",
+        "毛利率",
+        "ROE",
+        "产能扩张",
+        "开工率"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "downstream_data",
+      "description": "下游环节代表公司数据",
+      "fields": [
+        "营收",
+        "净利润增速",
+        "毛利率",
+        "ROE",
+        "需求景气度",
+        "库存水平"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "chain_dynamics",
+      "description": "产业链供需变化和利润迁移趋势",
+      "fields": [
+        "供需缺口",
+        "价格传导",
+        "库存周期",
+        "产能周期",
+        "政策影响"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "upstream_data",
+        "downstream_data"
+      ],
+      "rule": "若上游涨价但下游无法传导，中游利润被压缩是确定性风险。判断依据：中游毛利率是否连续两个季度下降。"
+    },
+    {
+      "dimensions": [
+        "chain_dynamics",
+        "chain_structure"
+      ],
+      "rule": "产业链利润迁移方向决定配置优先级：供不应求环节利润扩张，供给过剩环节利润收缩。必须给出利润迁移方向和依据。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "产业链至少拆解为上中下游三个环节，每个环节至少1家代表公司。",
+    "必须分析利润分配格局——哪个环节利润最厚、为什么。",
+    "必须给出产业链利润迁移趋势判断和依据。",
+    "选股建议必须说明为什么选这个环节而不是其他环节。",
+    "必须完整输出全部板块：核心结论/关键证据/代表公司排序/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取产业链结构、供需格局和行业动态"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "按产业链环节筛选代表公司"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取各环节代表公司的财务和估值数据"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "产业链分析顺序：先画产业链图谱（上中下游环节）→ 识别各环节的利润分配格局 → 判断当前景气向上游/中游/下游哪个环节集中 → 给出强势环节和配置建议。",
+    "rules": [
+      "环节拆解：上游（资源/原材料）→ 中游（制造/加工）→ 下游（应用/品牌），每个环节给出代表公司和供需逻辑，禁止只列公司不分析环节逻辑。",
+      "利润分配：用毛利率/净利率/产能利用率横向对比各环节盈利水平——利润向紧缺环节集中（量价齐升），向过剩环节流失（价跌）。",
+      "景气传导：上游涨价→中游成本压力（挤压毛利）；下游需求爆发→上游量增（量价齐升）；判断当前处于传导的哪一段。",
+      "强势环节：综合 供需格局+盈利趋势+估值分位 选出 1-2 个强势环节，给出配置逻辑（为什么是这个环节而不是其他）。",
+      "配置建议：环节层面给方向（超配/标配/低配），个股层面只列代表公司不给买卖点；数据缺失必须标注。"
+    ]
+  }
+}

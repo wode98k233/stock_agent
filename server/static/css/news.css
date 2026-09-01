@@ -1,0 +1,189 @@
+/* ── 热点新闻面板 ── */
+
+.news-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 900;
+}
+.news-overlay.open { display: block; }
+
+.news-modal {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, 92vw);
+  max-height: min(80vh, 700px);
+  background: var(--bg-primary, #fff);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  z-index: 901;
+  overflow: hidden;
+  flex-direction: column;
+}
+.news-modal.open { display: flex; }
+
+/* ── 头部 ── */
+.news-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  flex-shrink: 0;
+}
+.news-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+}
+.news-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.news-header-actions button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+  line-height: 1;
+}
+.news-header-actions button:hover {
+  background: var(--bg-hover, #f3f4f6);
+  color: var(--text-primary, #1f2937);
+}
+#newsRefreshBtn {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+/* ── 分类 Tab ── */
+.news-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.news-tabs.hidden { display: none; }
+.news-tab {
+  padding: 4px 12px;
+  font-size: 13px;
+  border-radius: 14px;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+  background: transparent;
+  border: none;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.news-tab:hover {
+  background: var(--bg-hover, #f3f4f6);
+}
+.news-tab.active {
+  background: var(--accent-bg, #eff6ff);
+  color: var(--accent, #3b82f6);
+  font-weight: 500;
+}
+
+/* ── 新闻列表 ── */
+.news-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 18px 14px;
+}
+.news-loading,
+.news-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 14px;
+}
+
+/* ── 新闻卡片 ── */
+.news-card {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  transition: background 0.12s;
+  border-radius: 6px;
+  cursor: default;
+}
+.news-card:last-child { border-bottom: none; }
+.news-card:hover {
+  background: var(--bg-hover, #f9fafb);
+}
+.news-card-rank {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  background: var(--bg-secondary, #f3f4f6);
+  margin-top: 2px;
+}
+.news-card:nth-child(1) .news-card-rank { background: #fef2f2; color: #ef4444; }
+.news-card:nth-child(2) .news-card-rank { background: #fff7ed; color: #f97316; }
+.news-card:nth-child(3) .news-card-rank { background: #fefce8; color: #eab308; }
+
+.news-card-body { flex: 1; min-width: 0; }
+.news-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.news-card-title a {
+  color: var(--text-primary, #1f2937);
+  text-decoration: none;
+}
+.news-card-title a:hover {
+  color: var(--accent, #3b82f6);
+  text-decoration: underline;
+}
+.news-card-summary {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  line-height: 1.6;
+  margin-top: 4px;
+  max-height: 3.2em;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+  cursor: pointer;
+}
+.news-card:hover .news-card-summary {
+  max-height: 500px;
+}
+.news-card-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+}
+.news-card-source {
+  font-weight: 500;
+}
+.news-card-link {
+  color: var(--accent, #3b82f6);
+  text-decoration: none;
+  font-size: 11px;
+}
+.news-card-link:hover {
+  text-decoration: underline;
+}

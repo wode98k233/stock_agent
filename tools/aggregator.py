@@ -5,6 +5,7 @@
 """
 import json
 import logging
+from contextlib import nullcontext
 from utils.llm_factory import get_llm, llm_json_with_retry
 
 
@@ -207,9 +208,7 @@ def llm_filter_stocks(indicators_list: list, user_condition: str, memory_mgr=Non
         ("user", f"筛选条件: {user_condition}\n\n股票数据:\n{json.dumps(slim, ensure_ascii=False)}")
     ]
 
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="filter")
         if result and 'selected' in result:
             selected_codes = {s['code'] for s in result['selected']}
@@ -222,9 +221,6 @@ def llm_filter_stocks(indicators_list: list, user_condition: str, memory_mgr=Non
                     filtered.append(ind_copy)
             return filtered
         return []
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()
 
 
 # ── LLM 智能排序 ───────────────────────────────────────────
@@ -256,16 +252,11 @@ def llm_rank_stocks(stock_data_list: list, sort_intent: str, top_n: int = 10, me
         ("user", f"排序意图: {sort_intent}\n取前{top_n}只\n\n股票数据:\n{json.dumps(normalized, ensure_ascii=False, default=str)}")
     ]
 
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="rank")
         if result and 'ranked' in result:
             return result['ranked'][:top_n]
         return []
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()
 
 
 # ── LLM 多维度分析报告 ─────────────────────────────────────
@@ -356,16 +347,11 @@ def _build_macro_report(data: dict, memory_mgr=None, logger=None) -> dict:
         ("system", MACRO_SYSTEM),
         ("user", f"请根据以下宏观数据生成分析报告:\n\n{json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
     ]
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="macro-report")
         if result:
             return result
         return {"report_type": "macro", "title": "宏观分析", "summary": "报告生成失败", "key_findings": []}
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()
 
 
 def llm_build_report(stock_data: dict, memory_mgr=None, logger=None) -> dict:
@@ -380,17 +366,12 @@ def llm_build_report(stock_data: dict, memory_mgr=None, logger=None) -> dict:
         ("user", f"请为以下股票生成分析报告:\n\n{json.dumps(stock_data, ensure_ascii=False, default=str)}")
     ]
 
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="report")
         if result:
             return result
         return {'code': stock_data.get('code', ''), 'name': stock_data.get('name', ''),
                 'recommendation': {'verdict': '中性', 'reason': '报告生成失败'}}
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()
 
 
 # ── LLM 技术指标解读 ───────────────────────────────────────
@@ -417,13 +398,8 @@ def llm_tech_interpret(indicators: dict, memory_mgr=None, logger=None) -> dict:
         ("user", f"请解读以下技术指标:\n\n{json.dumps(indicators, ensure_ascii=False, default=str)}")
     ]
 
-    if memory_mgr:
-        memory_mgr.disable()
-    try:
+    with memory_mgr.temp_disable() if memory_mgr else nullcontext():
         result = llm_json_with_retry(llm, messages, logger, label="tech_interpret")
         if result:
             return result
         return {'trend': '数据不足', 'signals': [], 'summary': '无法解读', 'action': '观望'}
-    finally:
-        if memory_mgr:
-            memory_mgr.enable()

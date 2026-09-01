@@ -1,0 +1,9 @@
+{
+  "id": "asset_impact_matrix",
+  "title": "资产影响矩阵",
+  "required": true,
+  "max_words": 650,
+  "prompt": "用 Markdown 表格拆解事件或宏观变量对不同资产和板块的影响。表格至少包含「资产/板块、直接影响、二阶影响、受益/受损方向、持续性、证伪信号、数据缺口」。必须区分短期交易反应和中长期基本面影响。",
+  "data_slots": ["trend", "news_sentiment"],
+  "core_slots": []
+}

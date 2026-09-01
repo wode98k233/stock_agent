@@ -1,0 +1,9 @@
+{
+  "id": "evidence_conflict",
+  "title": "证据冲突分析",
+  "required": false,
+  "max_words": 350,
+  "prompt": "列出多来源证据之间的冲突点。每个冲突必须写明：来源A说什么、来源B说什么、冲突原因、哪个更可信及判断依据。优先级框架：结构化数据>研报观点>新闻描述>市场传言。缺少冲突时可简写'各维度信号一致'。",
+  "data_slots": ["trend", "news_sentiment", "pe_percentile", "macd_signal"],
+  "core_slots": ["trend"]
+}

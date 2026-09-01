@@ -52,22 +52,6 @@ def _error_fingerprint(e: Exception) -> str:
         return f"{error_type}:{error_msg[:50]}"
 
 
-def _text_similarity(a: str, b: str) -> float:
-    if not a or not b:
-        return 0.0
-    if a == b:
-        return 1.0
-    a_set = set(a)
-    b_set = set(b)
-    if not a_set or not b_set:
-        return 0.0
-    intersection = len(a_set & b_set)
-    union = len(a_set | b_set)
-    jaccard = (intersection / union) if union > 0 else 0.0
-    len_ratio = (min(len(a), len(b)) / max(len(a), len(b))) if max(len(a), len(b)) > 0 else 0.0
-    return jaccard * (0.7 + 0.3 * len_ratio)
-
-
 def _extract_keywords(text: str) -> set:
     """从文本中提取关键词（中文字符 + 英文单词 + 数字）"""
     import re
@@ -81,7 +65,7 @@ def _extract_keywords(text: str) -> set:
 def _keyword_overlap(a: str, b: str) -> float:
     """
     基于关键词集合计算两段文本的重叠率
-    比 _text_similarity 更能识别语义重复
+    基于关键词集合的重叠率，语义区分能力强于字符级相似度
     """
     if not a or not b:
         return 0.0
@@ -113,7 +97,7 @@ async def _generate_step_summary(step_result: str, step_purpose: str, llm, logge
     ]
 
     try:
-        result = llm_json_with_retry(llm, messages, logger, label="step-summary")
+        result = llm_json_with_retry(llm, messages, logger, label="step-summary", skip_cache_prefix=True)
         if result:
             return result
     except Exception as e:

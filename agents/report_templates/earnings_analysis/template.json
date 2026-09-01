@@ -1,0 +1,160 @@
+{
+  "id": "earnings_analysis",
+  "schema_version": "2.0",
+  "report_family": "earnings_analysis",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "stock",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "业绩分析",
+  "version": "1.0",
+  "role": "你是一名 A 股业绩分析研究员。你的任务是围绕最新财报数据，拆解营收/利润增速、盈利能力趋势、现金流质量和估值匹配度，给出业绩是否超预期的判断和后续操作条件。所有结论必须有具体财务数据支撑，没有数据就标注数据缺失。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "earnings_snapshot",
+      "description": "最新财报核心数据",
+      "fields": [
+        "营业收入",
+        "营收同比增速",
+        "净利润",
+        "净利润同比增速",
+        "扣非净利润",
+        "每股收益"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "profitability_trend",
+      "description": "盈利质量指标及趋势",
+      "fields": [
+        "毛利率",
+        "净利率",
+        "ROE",
+        "ROE同比变化",
+        "经营现金流",
+        "现金流/净利润比"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "valuation_match",
+      "description": "当前估值与业绩增速匹配度",
+      "fields": [
+        "PE",
+        "PE历史分位",
+        "PEG",
+        "PB",
+        "市值"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "analyst_consensus",
+      "description": "研报一致预期和评级变化",
+      "fields": [
+        "研报评级",
+        "目标价",
+        "一致预期EPS",
+        "业绩预告/快报"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "peer_comparison",
+      "description": "同行业可比公司业绩对比",
+      "fields": [
+        "同业营收增速",
+        "同业净利润增速",
+        "同业PE",
+        "同业ROE"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "earnings_snapshot",
+        "valuation_match"
+      ],
+      "rule": "若净利润增速>30%但PE历史分位>80%，必须判断高增速能否持续消化高估值。判断依据：PEG是否<1、未来两年增速预期是否匹配。"
+    },
+    {
+      "dimensions": [
+        "profitability_trend",
+        "earnings_snapshot"
+      ],
+      "rule": "若营收增长但经营现金流持续为负或远低于净利润，必须标注盈利质量风险。现金流/净利润<0.5视为重大预警。"
+    },
+    {
+      "dimensions": [
+        "analyst_consensus",
+        "earnings_snapshot"
+      ],
+      "rule": "若实际业绩超/低于一致预期，必须量化超/低预期幅度，并分析原因是一次性因素还是趋势性变化。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "营收和净利润必须同时给出绝对值和增速，缺一不可。",
+    "必须区分扣非前后净利润，一次性收益必须单独说明。",
+    "现金流质量是必评项，经营现金流/净利润<0.5必须作为风险提示。",
+    "业绩超/低于预期必须量化幅度，不能只说'超预期'。",
+    "同行业对比至少覆盖2家可比公司。",
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取个股最新财报数据、盈利能力指标和估值"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取业绩预告、快报、研报评级和分析师观点"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选同行业可比公司用于横向对比"
+    }
+  ]
+}

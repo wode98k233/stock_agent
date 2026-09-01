@@ -1,0 +1,136 @@
+{
+  "id": "hot_news",
+  "schema_version": "2.0",
+  "report_family": "hot_news",
+  "asset_type": "market",
+  "intent_type": "event",
+  "dashboard_type": "hot_events",
+  "verbosity": "standard",
+  "max_report_words": 2000,
+  "name": "热点新闻分析",
+  "version": "1.0",
+  "role": "你是一名 A 股市场热点新闻分析师。你的任务是梳理当前市场热点事件、分析其对 A 股的潜在影响、识别受益/受损板块和标的。所有判断必须有数据支撑，不得凭感觉判断。必须区分已证实消息和市场传闻，对未经证实的信息必须标注风险。",
+  "required_skills": [
+    "mx_search",
+    "mx_data"
+  ],
+  "fallback_skills": [
+    "mx_xuangu"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "hot_topic_mapping",
+    "evidence_table",
+    "candidate_ranking",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "source_disclosure",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "news_feed",
+      "description": "当前市场热点新闻聚合",
+      "fields": [
+        "新闻标题",
+        "摘要",
+        "来源",
+        "发布时间",
+        "热度"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "market_reaction",
+      "description": "市场对热点事件的反应",
+      "fields": [
+        "大盘走势",
+        "板块涨跌",
+        "资金流向",
+        "涨跌停家数"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "hot_stocks",
+      "description": "热点关联标的",
+      "fields": [
+        "股票代码",
+        "名称",
+        "涨跌幅",
+        "关联原因",
+        "受益逻辑"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "stock_screening"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "news_feed",
+        "market_reaction"
+      ],
+      "rule": "热点事件必须与当日市场表现交叉验证：若新闻利好但板块未涨，说明市场已充分消化或不认可；若板块大涨但无明确新闻，需排查是否有未公开消息或资金炒作。"
+    },
+    {
+      "dimensions": [
+        "news_feed",
+        "hot_stocks"
+      ],
+      "rule": "关联标的必须有明确的受益逻辑链（事件→传导路径→标的），不能仅凭概念沾边。处在退潮期的热点禁止推荐追高。"
+    }
+  ],
+  "qa_rules": [
+    "必须区分已证实消息和市场传闻，未经证实的信息必须标注'待确认'。",
+    "热点事件必须给出影响级别判断（国家级/行业级/个股级）和持续性评估。",
+    "关联标的必须有明确的受益逻辑，不能只说'概念股'。",
+    "必须给出热点生命周期判断（爆发期/分化期/退潮期），退潮期禁止追高建议。",
+    "必须标注信息来源，不引用匿名来源或社交媒体传言。",
+    "必须完整输出全部板块：核心结论/热点关联分析/关键证据/受益标的排序/行动方案/观察清单/风险提示/数据来源/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "搜索当前市场热点新闻、政策动态和财经要闻"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取热点关联板块和标的的行情数据、资金流向"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "筛选热点受益标的，按涨幅和资金流入排序（降级技能）"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "data_sources"
+  ],
+  "analysis_framework": {
+    "summary": "热点新闻分析顺序：先筛选高影响力新闻（政策/产业/公司级别）→ 判断对A股的影响方向和范围 → 识别受益/受损板块和标的 → 区分短期情绪与中期逻辑 → 给出关注点和风险。",
+    "rules": [
+      "热点分级：政策级（影响全市场）> 产业级（影响产业链）> 公司级（影响个股）；同时看事件的新颖度和传播热度判断题材级别。",
+      "影响映射：每条热点必须映射到具体受益/受损板块和标的，禁止'利好相关产业'这类模糊表述；用板块涨跌幅和资金流验证市场是否已反应。",
+      "情绪与逻辑区分：单日脉冲（传闻/情绪）vs 结构逻辑（业绩/政策实质推进）；无法验证的传闻标注'传闻'并按投机处理。",
+      "验证信号：给出热点持续性的验证条件（政策落地、龙头连板、资金持续流入、业绩兑现节点）。",
+      "风险优先：热点炒作场景下追高风险最大，必须给出明确的回避条件（龙头开板、情绪退潮、板块成交萎缩）。"
+    ]
+  }
+}

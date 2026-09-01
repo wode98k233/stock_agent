@@ -180,7 +180,7 @@ if __name__ == "__main__":
                 "ctx": None,
             }
             ctx["memory"] = __import__("utils.memory", fromlist=["MemoryManager"]).MemoryManager(ctx["logger"])
-            _, _, ctx["ctx"] = __import__("utils.logger", fromlist=["get_logger"]).get_logger("agent-test")
+            _, _, ctx["ctx"], _ = __import__("utils.logger", fromlist=["get_logger"]).get_logger("agent-test")
 
             asyncio.run(test_func(ctx))
             passed += 1

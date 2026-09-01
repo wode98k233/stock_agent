@@ -43,6 +43,9 @@ class _Ansi:
             return False
         if os.getenv("TERM") == "dumb":
             return False
+        # 打包态：仅在 VT100 启用成功时才输出 ANSI 颜色
+        if getattr(__import__("sys"), "frozen", False) and not os.getenv("_VT100_ENABLED"):
+            return False
         return hasattr(os, "isatty") and os.isatty(1)
 
 
@@ -88,38 +91,56 @@ def _pick_questions(pool: list[dict], count: int = 3) -> list[dict]:
     return picked[:count]
 
 
-def build_banner() -> str:
+def build_banner(
+    *,
+    mode: str = "react_stock",
+    model: str = "",
+    trace: str = "off",
+    skill_count: int = 0,
+    template_count: int = 0,
+    cache: str = "disabled",
+) -> str:
     pool = _load_questions()
     picked = _pick_questions(pool) if pool else []
 
-    inner_w = 54
-    top = _c(_ansi.BOLD_CYAN, f"╔{'═' * inner_w}╗")
-    bot = _c(_ansi.BOLD_CYAN, f"╚{'═' * inner_w}╝")
+    inner_w = 56
+    sep = "─" * inner_w
 
-    title_raw = "📡 选股雷达 Stock Radar"
-    subtitle_raw = "智能选股 Agent (ReAct / Plan&Solve / Unified)"
-    title = _c(_ansi.BOLD_CYAN, _pad_right(title_raw, inner_w - 2))
-    subtitle = _c(_ansi.CYAN, _pad_right(subtitle_raw, inner_w - 2))
+    title = _c(_ansi.BOLD_CYAN, "Stock Radar CLI  选股雷达")
+    info_line = (
+        f"mode: {mode}    model: {model}    trace: {trace}"
+    )
+    stats_line = (
+        f"skills: {skill_count} loaded    "
+        f"templates: {template_count} active    "
+        f"cache: {cache}"
+    )
 
     lines = [
-        top,
-        f"║  {title}║",
-        f"║  {subtitle}║",
-        bot,
+        sep,
+        f"  {title}",
+        f"  {_c(_ansi.CYAN, info_line)}",
+        f"  {_c(_ansi.CYAN, stats_line)}",
+        sep,
+        "",
+        "  直接输入问题开始分析，或输入 /help 查看命令。",
+        "",
+        "  常用命令：",
+        "    /status                 查看运行状态和最近日志",
+        "    /mode list              查看并切换 Agent 模式",
+        "    /skills list            查看已发现 Skill",
+        "    /templates list         查看报告模板",
+        "    /trace recent           查看最近执行链",
     ]
 
     if picked:
         lines.append("")
-        header = _c(_ansi.BOLD_YELLOW, "💡 今日推荐:")
-        lines.append(header)
+        header = _c(_ansi.BOLD_YELLOW, "今日推荐:")
+        lines.append(f"  {header}")
         for i, q in enumerate(picked, 1):
             num = _c(_ansi.BOLD_GREEN, f"  {i}.")
             text = _c(_ansi.WHITE, q["text"])
             lines.append(f"{num} {text}")
-
-    lines.append("")
-    help_hint = _c(_ansi.DIM, "输入 help 查看命令 | exit 退出")
-    lines.append(help_hint)
 
     return "\n".join(lines)
 
@@ -141,11 +162,18 @@ def build_exit_stats(session_stats) -> str:
     sep = _c(_ansi.CYAN, f"{'━' * w}")
     header = _c(_ansi.BOLD_CYAN, "📊 会话统计")
 
+    cached = getattr(session_stats, 'total_cached_tokens', 0)
+    cache_line = f"  缓存命中    {cached:,}" if cached else ""
+
     lines = [
         sep,
         header,
         f"  查询次数    {session_stats.queries}",
         f"  Token 消耗  {session_stats.total_tokens:,}",
+    ]
+    if cache_line:
+        lines.append(cache_line)
+    lines += [
         f"  LLM 调用   {session_stats.total_llm_calls} 次",
         f"  工具调用    {session_stats.total_tool_calls} 次",
         f"  会话时长    {duration_str}",

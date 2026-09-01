@@ -2,11 +2,12 @@
 import os
 import glob
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Protocol, List
 
 from config import Config
 from utils.cache.core import get_db
+from utils.cache.market_cache_db import get_market_cache_db
 
 
 # ── 协议 + 注册器 ──
@@ -52,47 +53,25 @@ class CacheCleanerRegistry:
 # ── 清理器实现 ──
 
 class UtilsCacheCleaner:
-    """utils/cache 的缓存清理器"""
-
-    def __init__(self):
-        self._cache_tables = [
-            "cache_stock_history", "cache_board", "cache_news",
-            "cache_rating", "cache_financial", "cache_board_list",
-            "cache_valuation", "cache_valuation_history",
-            "cache_fund_flow", "cache_margin", "cache_block_trade",
-            "cache_sector_rotation", "cache_risk_metrics",
-        ]
+    """utils/cache 的缓存清理器（清理 cache_kv 过期条目）"""
 
     @property
     def name(self) -> str:
         return "utils_cache"
 
     def clean(self) -> int:
-        total_count = 0
         try:
-            with get_db() as conn:
-                now = datetime.now()
-                for table in self._cache_tables:
-                    try:
-                        rows = conn.execute(
-                            f"SELECT id, updated_at, expire_hours FROM {table}"
-                        ).fetchall()
-                        for row in rows:
-                            row_id, updated_at_str, expire_hours = row
-                            try:
-                                updated_at = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
-                                expire_time = updated_at + timedelta(hours=expire_hours)
-                                if now > expire_time:
-                                    conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
-                                    total_count += 1
-                            except Exception:
-                                continue
-                    except Exception:
-                        pass
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with get_market_cache_db() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM cache_kv WHERE expire_at IS NOT NULL AND expire_at < ?",
+                    (now_str,)
+                )
+                return cursor.rowcount
         except Exception as e:
             logger = logging.getLogger("radar.cache")
             logger.error(f"UtilsCacheCleaner 清理失败: {e}")
-        return total_count
+            return 0
 
 
 class DialogCleaner:

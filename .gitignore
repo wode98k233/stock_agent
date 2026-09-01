@@ -31,18 +31,23 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!build_spec/main.spec
 
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
+test/temp/*
 htmlcov/
 .tox/
 .nox/
 .coverage
 .coverage.*
 .cache
+# 只忽略项目根目录的运行时缓存目录；utils/cache、tools/fetcher/cache、test/*/cache 是源码目录，必须入库
+/cache/
+memory_config.json
 nosetests.xml
 coverage.xml
 *.cover
@@ -105,6 +110,10 @@ __pypackages__/
 celerybeat-schedule
 celerybeat.pid
 
+# reranker 微服务
+memory/reranker/.env
+memory/reranker/.reranker.pid
+
 # SageMath parsed files
 *.sage.py
 
@@ -144,6 +153,7 @@ cython_debug/
 # Trae
 .trae/skills/
 .trae/specs
+.trae/documents
 trace_*.json
 
 # no save learning
@@ -153,11 +163,36 @@ trace_*.json
 
 data/intent/*
 data/intent/default.json
+data/trading*.json
 
 .claude
+.codex
 superpowers-trae-main/
 superpowers-trae.zip
 superpowers-temp/
 superpowers-temp.zip
 
 docs/superpowers
+package-lock.json
+bash.exe.stackdump
+.agent-browser-sock/
+test/scripts/analyze_react_log.py
+
+test/scripts/run_agent_smoke.py
+docs/plans/karpathy-review-report.md
+backtest.db-journal
+.DS_Store
+docs/plans/
+
+.tmp
+
+.image.env
+.codebuddy/
+.workbuddy/
+nul
+data/user_profile/
+chroma_data/
+tmp/
+temp/
+docs/logging-audit-2026-07-12.md
+output/

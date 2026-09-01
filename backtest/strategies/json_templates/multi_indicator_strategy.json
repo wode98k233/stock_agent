@@ -1,0 +1,103 @@
+{
+  "meta": {
+    "name": "多指标底部反转",
+    "description": "DMA/KDJ/MACD/CYW/DPO 共 9 个条件同时成立的底部反转选股策略。核心思路：MACD 水下将金叉（DIF<0 且 DIF>DEA）、DMA 弱势区拐头（DIF<0 且 DIF>AMA）、KDJ 低位上穿且未过热（J>K、J<80、K<50）、CYW 主力控盘翻红（CYW>0）、DPO 上穿 MADPO。买入需 9 条全部满足，卖出以 MACD 死叉（DIF<DEA）为主退出信号。所有指标公式对齐同花顺。",
+    "tags": ["反转", "多因子", "DMA", "KDJ", "MACD", "CYW", "DPO"],
+    "source": "template",
+    "strategy_id": "multi_indicator_strategy",
+    "category": "reversal"
+  },
+  "params": {
+    "dma_short": { "value": 10, "min": 5, "max": 30, "step": 1, "label": "DMA短期均线", "type": "int", "unit": "日" },
+    "dma_long": { "value": 50, "min": 20, "max": 250, "step": 1, "label": "DMA长期均线", "type": "int", "unit": "日" },
+    "dma_smooth": { "value": 6, "min": 3, "max": 30, "step": 1, "label": "AMA平滑", "type": "int", "unit": "日" },
+    "kdj_n": { "value": 9, "min": 5, "max": 30, "step": 1, "label": "KDJ周期", "type": "int", "unit": "日" },
+    "macd_fast": { "value": 12, "min": 5, "max": 30, "step": 1, "label": "MACD快线", "type": "int", "unit": "日" },
+    "macd_slow": { "value": 26, "min": 15, "max": 60, "step": 1, "label": "MACD慢线", "type": "int", "unit": "日" },
+    "macd_signal": { "value": 9, "min": 5, "max": 30, "step": 1, "label": "MACD信号线", "type": "int", "unit": "日" },
+    "dpo_period": { "value": 20, "min": 10, "max": 60, "step": 1, "label": "DPO周期", "type": "int", "unit": "日" },
+    "dpo_smooth": { "value": 6, "min": 3, "max": 30, "step": 1, "label": "MADPO平滑", "type": "int", "unit": "日" },
+    "cyw_period": { "value": 10, "min": 5, "max": 30, "step": 1, "label": "CYW求和周期", "type": "int", "unit": "日" }
+  },
+  "conditions": {
+    "buy": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "dma", "args": ["close", "{dma_short}", "{dma_long}", "{dma_smooth}"], "field": "dif" },
+          "op": ">",
+          "right": { "func": "dma", "args": ["close", "{dma_short}", "{dma_long}", "{dma_smooth}"], "field": "ama" }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "dma", "args": ["close", "{dma_short}", "{dma_long}", "{dma_smooth}"], "field": "dif" },
+          "op": "<",
+          "right": { "value": 0 }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "kdj", "args": ["high", "low", "close", "{kdj_n}"], "field": "j" },
+          "op": ">",
+          "right": { "func": "kdj", "args": ["high", "low", "close", "{kdj_n}"], "field": "k" }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "kdj", "args": ["high", "low", "close", "{kdj_n}"], "field": "j" },
+          "op": "<",
+          "right": { "value": 80 }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "macd", "args": ["close", "{macd_fast}", "{macd_slow}", "{macd_signal}"], "field": "macd" },
+          "op": ">",
+          "right": { "func": "macd", "args": ["close", "{macd_fast}", "{macd_slow}", "{macd_signal}"], "field": "signal" }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "macd", "args": ["close", "{macd_fast}", "{macd_slow}", "{macd_signal}"], "field": "macd" },
+          "op": "<",
+          "right": { "value": 0 }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "cyw", "args": ["close", "{cyw_period}"], "field": "cyw" },
+          "op": ">",
+          "right": { "value": 0 }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "dpo", "args": ["close", "{dpo_period}", "{dpo_smooth}"], "field": "dpo" },
+          "op": ">",
+          "right": { "func": "dpo", "args": ["close", "{dpo_period}", "{dpo_smooth}"], "field": "madpo" }
+        },
+        {
+          "type": "indicator",
+          "left": { "func": "kdj", "args": ["high", "low", "close", "{kdj_n}"], "field": "k" },
+          "op": "<",
+          "right": { "value": 50 }
+        }
+      ]
+    },
+    "sell": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "macd", "args": ["close", "{macd_fast}", "{macd_slow}", "{macd_signal}"], "field": "macd" },
+          "op": "<",
+          "right": { "func": "macd", "args": ["close", "{macd_fast}", "{macd_slow}", "{macd_signal}"], "field": "signal" }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "fixed", "value": 0.08 },
+    "take_profit": { "type": "fixed", "value": 0.20 }
+  },
+  "chart_indicators": [
+    { "type": "MACD", "fast_period": "{macd_fast}", "slow_period": "{macd_slow}", "signal_period": "{macd_signal}" },
+    { "type": "KDJ", "period": "{kdj_n}" },
+    { "type": "DPO", "period": "{dpo_period}", "smooth": "{dpo_smooth}" }
+  ]
+}

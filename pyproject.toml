@@ -1,0 +1,34 @@
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+markers = [
+    "unit: 纯逻辑单元测试，不依赖网络和外部服务",
+    "integration: 集成测试，需要网络连接",
+    "e2e: 端到端测试，需要 LLM API",
+    "slow: 运行较慢的测试",
+    "mx: 需要 MX_APIKEY",
+    "tavily: 需要 TAVILY_API_KEYS",
+    "hithink: 需要 HITHINK_FINANCE_API_KEY",
+    "timeout(N): 超时秒数",
+]
+asyncio_mode = "auto"
+log_cli = true
+log_cli_level = "WARNING"
+
+[tool.pyrefly]
+# 解释器路径由 IDE 自动发现（VSCode Python 扩展 / 环境变量）
+# 如需手动指定，取消注释并改为你的实际路径：
+# python-interpreter-path = "venv\\Scripts\\python.exe"
+# python-interpreter-path = ".venv\\Scripts\\python.exe"
+
+# 2. 明确设置导入根目录为当前项目根目录
+search-path = ["."]
+
+# 3. 禁用自动搜索路径启发式算法，防止它错误地向上查找父目录
+disable-search-path-heuristics = true
+
+# 可选：明确指定要检查的文件范围
+project-includes = ["**/*.py*"]

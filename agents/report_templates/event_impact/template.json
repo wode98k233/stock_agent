@@ -1,0 +1,110 @@
+{
+  "id": "event_impact",
+  "schema_version": "2.0",
+  "report_family": "event_impact",
+  "asset_type": "market",
+  "intent_type": "event",
+  "dashboard_type": "hot_events",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "事件影响分析",
+  "version": "1.0",
+  "role": "你是一名宏观事件和资产传导分析师。你的任务是解释事件对黄金、石油、科技、A 股行业板块的影响路径，并给出持续性和证伪信号。",
+  "required_skills": [
+    "mx_search",
+    "mx_data",
+    "mx_xuangu"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "key_takeaways",
+    "macro_chain",
+    "asset_impact_matrix",
+    "key_debates",
+    "evidence_table",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "source_disclosure",
+    "consensus_distribution",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "event_facts",
+      "description": "事件事实、时间线和权威来源",
+      "fields": [
+        "事件",
+        "时间",
+        "来源",
+        "最新进展"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "asset_impact",
+      "description": "受影响资产和板块表现",
+      "fields": [
+        "黄金",
+        "原油",
+        "科技",
+        "军工",
+        "航运",
+        "相关A股"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "stock_screening",
+        "fund_flow"
+      ],
+      "hard_required": true
+    }
+  ],
+  "qa_rules": [
+    "必须区分短期避险交易和中长期基本面影响。",
+    "必须给出证伪信号，例如事件缓和、油价回落或风险偏好恢复。",
+    "不得把事件影响分析写成个股推荐或候选股排序；如涉及相关 A 股，只能作为受益/受损资产示例。",
+    "必须完整输出全部板块：核心结论/关键要点/宏观传导/资产影响矩阵/关键分歧/关键证据/行动方案/观察清单/风险提示/数据来源/共识分布/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取事件最新进展和权威解读"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取相关资产行情"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "获取事件相关受益/受损板块和代表标的，用于资产影响矩阵，不输出个股推荐"
+    }
+  ],
+  "common_rules": [
+    "data_sources"
+  ],
+  "default_horizon": "mid",
+  "fallback_skills": [],
+  "supported_horizons": [],
+  "analysis_framework": {
+    "summary": "事件影响分析顺序：先定性事件性质（政策/地缘/行业/公司）和影响级别 → 沿产业链拆解传导路径 → 识别受益/受损资产和标的 → 给出证伪信号和操作参考。",
+    "rules": [
+      "事件定性：区分 政策类（可预期、影响广）/地缘类（突发、情绪冲击大）/行业类（供需逻辑）/公司类（个股影响）；同一事件对不同的资产方向可能相反。",
+      "传导链拆解：事件 → 直接受影响环节 → 上下游传导 → 二阶影响；每层都要给出具体受益/受损标的或板块，禁止停留在'利好科技股'这类泛化表述。",
+      "受益/受损判定：按影响路径的确定性和弹性排序——直接受益>间接受益；业务占比高的>占比低的；有真实订单/业绩支撑的>纯概念炒作的。",
+      "证伪信号：每个影响判断必须给出证伪条件（什么情况发生则影响判断失效），如'政策落地不及预期''事件快速反转'。",
+      "操作参考：快事件（突发地缘）以风险提示为主，慢事件（政策推进）可给布局条件；短线事件禁追高，事件驱动的行情快进快出。",
+      "来源必须标注：事件进展来自新闻/公告，无法验证的信息标注'传闻'并提示按投机处理。"
+    ]
+  }
+}

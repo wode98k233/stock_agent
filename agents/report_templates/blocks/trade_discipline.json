@@ -1,0 +1,9 @@
+{
+  "id": "trade_discipline",
+  "title": "交易纪律",
+  "required": true,
+  "max_words": 420,
+  "prompt": "用于短线、题材、量价异动、次新和趋势交易场景。必须用纪律表说明是否允许追高、低吸、半路、打板，并给出对应前提。必须写清竞价不及预期、高开低走、炸板、回封失败、龙头断板、板块退潮、放量滞涨时的处理规则。止损、撤退和复盘条件要具体；新手不适合的高风险动作必须明确禁止。",
+  "data_slots": ["trend", "signal_strength", "macd_signal"],
+  "core_slots": ["trend", "signal_strength"]
+}

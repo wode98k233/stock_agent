@@ -47,21 +47,9 @@ _init_db()
 
 
 def _get_next_trading_open_time():
-    """计算下一个交易日开盘时间"""
-    now = datetime.now()
-    
-    # 如果是周末，找到下周一
-    if now.weekday() >= 5:
-        days_to_monday = (7 - now.weekday()) % 7
-        next_trading = now + timedelta(days=days_to_monday)
-    else:
-        next_trading = now + timedelta(days=1)
-        # 如果下一天是周末，继续加
-        while next_trading.weekday() >= 5:
-            next_trading += timedelta(days=1)
-    
-    # 设置为早上9:30
-    return next_trading.replace(hour=9, minute=30, second=0, microsecond=0)
+    """计算下一个交易日开盘时间（复用 market 模块，含节假日）。"""
+    from utils.cache.market import _get_next_trading_open_time as _shared
+    return _shared()
 
 
 def _get_cache_expire_hours():

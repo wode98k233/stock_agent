@@ -1,0 +1,10 @@
+{
+  "id": "visual_report_layout",
+  "title": "图表化摘要",
+  "required": true,
+  "max_words": 400,
+  "prompt": "用 Markdown 表格输出观察清单，列出次日、本周、中长期分别要盯的信号。每个时间维度包含：观察目标、触发条件、预期动作、数据来源。没有数据时写「数据缺失」，不要删除结构。",
+  "data_slots": ["trend", "signal_strength", "pe_percentile"],
+  "core_slots": ["trend"],
+  "cross_check": true
+}

@@ -1,0 +1,146 @@
+{
+  "id": "consensus_view",
+  "schema_version": "2.0",
+  "report_family": "consensus_view",
+  "asset_type": "instrument",
+  "intent_type": "screening",
+  "dashboard_type": "screening",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "机构观点汇总",
+  "version": "1.0",
+  "role": "你是一名卖方研究汇总分析师。你的任务是汇总近期机构研报的评级、目标价和核心逻辑，分析一致预期的变化趋势，识别市场分歧点。所有引用必须标注来源，不得编造研报观点。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "institution_ranking": true,
+  "output_blocks": [
+    "core_summary",
+    "key_takeaways",
+    "consensus_distribution",
+    "evidence_table",
+    "key_debates",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "source_disclosure",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_search",
+      "mx_data"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "research_reports",
+      "description": "近期研报列表——评级、目标价、核心观点",
+      "fields": [
+        "研报标题",
+        "机构名称",
+        "评级",
+        "目标价",
+        "核心逻辑",
+        "发布日期"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "consensus_metrics",
+      "description": "一致预期数据",
+      "fields": [
+        "一致预期EPS",
+        "一致预期PE",
+        "一致预期净利润增速",
+        "评级分布（买入/增持/中性/减持）"
+      ],
+      "tool_capabilities": [
+        "news_search",
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "stock_fundamentals",
+      "description": "个股基本面数据用于与预期对比",
+      "fields": [
+        "最新价",
+        "PE",
+        "PB",
+        "最新EPS",
+        "净利润增速",
+        "市值"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "divergence_points",
+      "description": "市场分歧点——不同机构观点差异",
+      "fields": [
+        "看多逻辑",
+        "看空逻辑",
+        "分歧焦点",
+        "关键假设差异"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "consensus_metrics",
+        "stock_fundamentals"
+      ],
+      "rule": "当前PE低于一致预期PE=市场尚未充分定价预期增长；当前PE高于一致预期PE=预期已充分反映或过度乐观。目标价中位数与当前价差距>30%=存在预期差机会。"
+    },
+    {
+      "dimensions": [
+        "research_reports",
+        "divergence_points"
+      ],
+      "rule": "分歧越大（买入和减持并存）=不确定性高，需要更强的证据才能操作。分歧小（高度一致看多）=预期充分反映，超预期空间有限。"
+    }
+  ],
+  "qa_rules": [
+    "研报引用必须标注机构名称和日期，不得编造。",
+    "必须给出评级分布统计（几家买入、几家增持、几家中性）。",
+    "必须分析目标价分布——最高/最低/中位数，以及与当前价的差距。",
+    "必须识别分歧焦点，不能只汇总看多观点。",
+    "不得把机构共识汇总写成直接买卖建议；只能说明共识、分歧、隐含预期和风险。",
+    "必须完整输出全部板块：核心结论/关键要点/共识分布/关键证据/关键分歧/行动方案/观察清单/风险提示/数据来源/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_search",
+      "purpose": "获取近期研报、评级和分析师观点"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取个股基本面数据用于与一致预期对比"
+    }
+  ],
+  "common_rules": [
+    "data_sources"
+  ],
+  "analysis_framework": {
+    "summary": "机构观点汇总分析顺序：先统计评级/目标价分布 → 识别市场共识与分歧点 → 用基本面数据验证一致预期合理性 → 判断预期差方向 → 输出操作参考。",
+    "rules": [
+      "共识分布解读：统计买入/增持/中性/卖出占比和目标价区间，多数机构一致看多≠股价一定涨，需结合股价已反映程度判断。",
+      "分歧点优先：机构分歧最大的维度（业绩预测、估值、催化剂）是市场定价的关键变量，必须逐条呈现多空依据并给出倾向。",
+      "预期验证：用最新基本面数据（营收/利润/订单）与一致预期对比——实际超预期=预期差向上（利好），低于预期=预期差向下（利空）。",
+      "机构可信度：优先国际投行（摩根士丹利/高盛/花旗）和国内头部券商（中信/中金）；引用必须标注机构名称和日期；目标价是预测不是承诺。",
+      "操作参考：基于共识+预期差给出条件化结论（方向+触发条件+失效条件），禁止'机构看好所以买入'式简单推导。"
+    ]
+  }
+}

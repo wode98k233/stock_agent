@@ -32,11 +32,8 @@ class SentimentAnalysisSkill(SkillBuilder):
         return self._analyze_sentiment(news, self.memory_mgr, self.logger)
 
     @skill_tool
-    def search_news_by_keyword(self, keyword: str, symbol: str = "") -> str:
-        """在个股新闻中搜索关键词。输入关键词和可选股票代码。"""
-        if not symbol:
-            # 保持与原实现一致的行为：直接返回字符串
-            return "需要提供股票代码"
+    def search_news_by_keyword(self, keyword: str, symbol: str) -> str:
+        """在个股新闻中搜索关键词。输入关键词和股票代码。"""
         news = self._get_stock_news(symbol=symbol, logger=self.logger)
         result = [n for n in news if keyword in n.get('title', '') or keyword in n.get('content', '')][:10]
         # 返回 JSON 字符串以保持与原实现一致

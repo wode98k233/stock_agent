@@ -29,11 +29,24 @@ def enrich_with_time(user_input: str) -> str:
     """
     给用户输入注入当前时间上下文。
     如果用户没有提到时间，自动添加"当前时间"作为背景信息。
+    如果输入已包含 [背景信息] 或 [用户问题] 标记，则不重复包装。
     """
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M")
     weekday_map = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
     weekday = weekday_map[now.weekday()]
+
+    # 输入已包含标记，不重复包装，只确保时间存在
+    if user_input.startswith("[背景信息]") or user_input.startswith("[用户问题]"):
+        lines = user_input.split("\n")
+        has_time = any(time_str in line for line in lines)
+        if has_time:
+            return user_input
+        # 在首行后插入时间
+        first_newline = user_input.find("\n")
+        if first_newline != -1:
+            return user_input[:first_newline] + f"\n- 当前时间：{time_str} {weekday}" + user_input[first_newline:]
+        return f"- 当前时间：{time_str} {weekday}\n" + user_input
 
     if has_explicit_time(user_input):
         # 用户提到了时间，只补充精确时间戳
