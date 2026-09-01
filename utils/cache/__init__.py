@@ -1,28 +1,7 @@
 """选股雷达 - 分类缓存管理"""
 from utils.cache.market import is_market_closed, _get_next_trading_open_time
-from utils.cache.policies import (
-    _CACHE_EXPIRE_POLICIES, _get_expire_hours,
-    _get_general_cache_expire_hours,
-    _get_rating_cache_expire_hours,
-    _get_board_cache_expire_hours,
-    _get_news_cache_expire_hours,
-    _get_financial_cache_expire_hours,
-    _get_board_list_cache_expire_hours,
-    _get_history_cache_expire_hours,
-    _get_valuation_cache_expire_hours,
-    _get_valuation_history_cache_expire_hours,
-    _get_industry_valuation_cache_expire_hours,
-    _get_fund_flow_cache_expire_hours,
-    _get_margin_cache_expire_hours,
-    _get_block_trade_cache_expire_hours,
-    _get_sector_rotation_cache_expire_hours,
-    _get_risk_metrics_cache_expire_hours,
-)
-from utils.cache.core import (
-    get_db, init_cache_tables, _is_expired,
-    _get, _set, _delete,
-    _df_to_cache, _cache_to_df, _get_df, _set_df,
-)
+from utils.cache.policies import _CACHE_EXPIRE_POLICIES, _get_expire_hours
+from utils.cache.core import get_db, init_cache_tables
 from utils.cache.api import (
     get_history_cache, set_history_cache,
     get_board_cache, set_board_cache,
@@ -51,5 +30,7 @@ CacheCleanerRegistry.register(UtilsCacheCleaner())
 CacheCleanerRegistry.register(DialogCleaner())
 CacheCleanerRegistry.register(LogsCleaner())
 
-# 初始化
-init_cache_tables()
+# init_cache_tables() 不再在模块导入时调用。
+# 改为由 bootstrap_common.init_common() 显式触发，避免在 import 链路上
+# 打开 5 个 SQLite 连接阻塞启动（~130ms）。
+# 实际调用路径：bootstrap_common → _ensure_cache_tables()

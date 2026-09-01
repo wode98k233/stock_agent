@@ -1,0 +1,126 @@
+{
+  "id": "portfolio_advice",
+  "schema_version": "2.0",
+  "report_family": "portfolio_advice",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "stock",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "持仓诊断",
+  "version": "1.0",
+  "role": "你是一名面向个人投资者的持仓诊断顾问。你的任务是先识别用户已知持仓信息和缺失信息，再给出清仓、减仓、补仓、继续持有的条件树。不得在缺少成本和仓位时直接给绝对操作。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "institution_ranking": true,
+  "output_blocks": [
+    "core_summary",
+    "position_sizing",
+    "technical_dimension",
+    "fundamental_dimension",
+    "capital_dimension",
+    "cross_synthesis",
+    "evidence_table",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "user_position_context",
+      "description": "用户成本、仓位、亏损幅度、持有周期、是否急用钱",
+      "fields": [
+        "成本价",
+        "仓位",
+        "亏损比例",
+        "持有时长",
+        "风险承受能力"
+      ],
+      "tool_capabilities": [
+        "user_input"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "sector_cycle",
+      "description": "持仓所属行业周期、估值和资金状态",
+      "fields": [
+        "行业涨跌幅",
+        "估值",
+        "资金流",
+        "景气度",
+        "政策"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "alternative_opportunities",
+      "description": "可替代配置方向",
+      "fields": [
+        "红利",
+        "宽基",
+        "债券",
+        "现金管理",
+        "强势行业"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "缺少成本、仓位或资金用途时，不得直接建议清仓、满仓补仓或重仓加仓。",
+    "必须给出至少 3 个分支：继续持有、减仓、反弹减仓或补仓条件。",
+    "引用研报和机构观点时，必须标注机构名称和日期。同一观点有多个机构支持时，优先引用摩根士丹利、高盛、花旗等国际投行，其次中信证券、中金公司等国内头部券商。国际投行与国内券商观点矛盾时，必须同时呈现并分析分歧原因。",
+    "必须完整输出全部板块：核心结论/仓位与风险预算/技术面/基本面/资金面/综合研判/关键证据/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "analysis_framework": {
+    "summary": "核心是回答'现在怎么办'：先判断持仓标的状态（浮盈/浮亏、历史位置、趋势结构）→ 再给出分支操作方案（持有/加仓/减仓/清仓）→ 每种方案必须有触发条件、具体价位和失效条件。",
+    "rules": [
+      "先定状态：持仓成本与现价关系（浮盈/浮亏比例）、标的历史位置（PE/PB分位）、趋势结构（均线排列/是否破位），三者决定操作基调。",
+      "持有条件：趋势未破（MA20/MA60上方）+基本面未恶化+估值合理=继续持有；浮盈持仓在趋势完好时不应因短期波动割肉。",
+      "加仓条件：回调至关键支撑（前低/重要均线）企稳+缩量止跌+逻辑未变，可分批加仓；加仓后总仓位不超过用户风险承受上限。",
+      "减仓/止盈：上升后冲高回落（长上影+放量）、放巨量滞涨、或累计涨幅大且主力净流出=分批止盈信号。",
+      "止损/清仓（最优先约束）：跌破关键支撑且放量确认、从介入价亏损超8-10%（或用户设定线）、基本面逻辑被证伪（业绩暴雷/政策转向）=无条件止损，禁止扛单。",
+      "输出要求：每个分支操作必须给 触发条件+具体价位+失效条件 三要素，禁止只给'拿着'或'卖出'不给依据。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取持仓所属行业和代表资产走势"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取行业周期和政策新闻，优先搜索权威机构研报"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "寻找替代配置候选"
+    }
+  ],
+  "default_horizon": "short",
+  "fallback_skills": [],
+  "supported_horizons": []
+}

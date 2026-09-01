@@ -1,0 +1,9 @@
+{
+  "id": "next_watch",
+  "title": "观察清单",
+  "required": false,
+  "max_words": 300,
+  "prompt": "用 Markdown 表格列出次日/本周/中长期需要观察的信号。每行包含：时间维度、观察目标、触发条件、预期动作、数据来源。没有数据时写'数据缺失'，不要删除结构。",
+  "data_slots": ["trend", "signal_strength"],
+  "core_slots": ["trend"]
+}

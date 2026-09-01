@@ -1,0 +1,9 @@
+{
+  "id": "evidence_table",
+  "title": "关键证据",
+  "required": true,
+  "max_words": 650,
+  "prompt": "必须用 Markdown 表格列出支持结论的关键证据。表格至少包含“证据维度、关键数据或事实、方向、对结论的影响、可信度、缺口/反证”六列。每条证据必须包含数据、来源维度和含义。没有结构化数据时标注「数据缺失」，不要用新闻或常识替代。",
+  "data_slots": ["trend", "macd_signal", "rsi_status", "news_sentiment", "pe_percentile"],
+  "core_slots": ["trend"]
+}

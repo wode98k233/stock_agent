@@ -1,0 +1,9 @@
+{
+  "id": "market_breadth",
+  "title": "市场温度",
+  "required": true,
+  "max_words": 300,
+  "prompt": "总结指数表现、涨跌家数、成交额、涨跌停数量和市场情绪。缺少任何关键市场广度数据时必须标注数据缺失。",
+  "data_slots": ["market_breadth", "trend"],
+  "core_slots": ["market_breadth"]
+}

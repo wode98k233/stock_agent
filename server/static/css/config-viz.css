@@ -1,0 +1,135 @@
+/* ── 配置可视化（紧凑版） ── */
+.config-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.viz-tabs {
+  display: flex;
+  gap: 3px;
+  background: #f4f7f9;
+  padding: 3px;
+  border-radius: 8px;
+}
+
+.viz-tab {
+  flex: 1;
+  height: 30px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7a8d;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.viz-tab:hover {
+  color: #1c2430;
+  background: rgba(23, 107, 91, 0.04);
+}
+
+.viz-tab.active {
+  background: #fff;
+  border-color: #d4e6e0;
+  color: #0d4f43;
+  box-shadow: 0 1px 3px rgba(23, 107, 91, 0.08);
+}
+
+.viz-graph-wrap {
+  display: flex;
+  justify-content: center;
+  overflow: visible;
+  width: 100%;
+  padding: 8px 4px;
+  max-height: 320px;
+}
+
+.viz-svg {
+  width: 100%;
+  height: auto;
+  min-width: 200px;
+}
+
+.viz-node {
+  fill: #fff;
+  stroke: #d4dce4;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,0.06));
+  animation: nodePulse 4s ease-in-out 1;
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+
+.viz-node:hover {
+  fill: #f0f7f5;
+  stroke: #176b5b;
+}
+
+.viz-node-terminal {
+  fill: #f6f7f9;
+  stroke: #d4dce4;
+  stroke-width: 1.2;
+}
+
+.viz-edge {
+  fill: none;
+  stroke: #176b5b;
+  stroke-width: 1.2;
+  stroke-dasharray: 5 3;
+  stroke-dashoffset: 0;
+  animation: edgeDash 1.5s linear infinite;
+  opacity: 0.4;
+}
+
+.viz-edge-bg {
+  fill: none;
+  stroke: #e2e8f0;
+  stroke-width: 1.5;
+}
+
+.viz-edge-flow {
+  fill: none;
+  stroke: url(#flowGrad);
+  stroke-width: 2.5;
+  stroke-dasharray: 6 36;
+  stroke-dashoffset: 0;
+  animation: flowParticle 2.5s linear infinite;
+  opacity: 0.6;
+  filter: url(#glow);
+}
+
+.viz-loop-rect {
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.04));
+}
+
+.viz-badge rect {
+  transition: fill 0.3s ease;
+  animation: badgePulse 0.6s ease-out 1;
+}
+
+.viz-badge text {
+  pointer-events: none;
+}
+
+.param-highlight rect {
+  fill: var(--success) !important;
+  animation: paramPulse 0.8s ease;
+}
+
+@keyframes edgeDash { to { stroke-dashoffset: -16; } }
+@keyframes flowParticle { to { stroke-dashoffset: -42; } }
+@keyframes nodePulse {
+  0%, 100% { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.06)); }
+  50% { filter: drop-shadow(0 2px 6px rgba(23, 107, 91, 0.1)); }
+}
+@keyframes badgePulse {
+  0% { opacity: 0.6; transform: scale(1.1); transform-box: fill-box; transform-origin: center; }
+  100% { opacity: 1; transform: scale(1); transform-box: fill-box; transform-origin: center; }
+}
+@keyframes paramPulse {
+  0% { transform: scale(1); transform-box: fill-box; transform-origin: center; }
+  40% { transform: scale(1.12); transform-box: fill-box; transform-origin: center; }
+  100% { transform: scale(1); transform-box: fill-box; transform-origin: center; }
+}

@@ -35,7 +35,6 @@ def _build_ctx(agent_context):
         skill_registry=agent_context["registry"],
         budget=budget,
         progress_reporter=None,
-        trace_recorder=None,
     )
 
 
@@ -66,7 +65,7 @@ async def test_replan_step_real_llm_output_not_empty_dict(agent_context):
     修复后: 无新步骤时返回 {"current_step": ...}，有新步骤时返回 {"plan": ...}。
     真实 LLM 环境下验证此修复。
     """
-    from agents.plan.replanner import replan_step
+    from agents.plan.node.replanner import replan_step
 
     ctx = _build_ctx(agent_context)
     state = _make_state()
@@ -100,7 +99,7 @@ async def test_replan_step_real_llm_with_constraints(agent_context):
     replan_step 的 LLM 输出中新步骤应聚焦光伏，
     不应出现与约束无关的行业（白酒、银行等）。
     """
-    from agents.plan.replanner import replan_step
+    from agents.plan.node.replanner import replan_step
 
     ctx = _build_ctx(agent_context)
     state = _make_state(user_constraints="只关注光伏产业链相关数据，不要扩展到其他行业")

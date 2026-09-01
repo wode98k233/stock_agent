@@ -1,0 +1,1657 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Radar Web</title>
+  <!-- AI 信号评测关键修复：仅保留 1 条 — .backtest-modal position:relative，
+       防止 .bt-tabbar (position:absolute) 锚到 .backtest-overlay (position:fixed) 导致飞出弹窗 -->
+  <style>
+    .backtest-modal { position: relative; }
+  </style>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📈%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/variables.css?v=27">
+  <link rel="stylesheet" href="/static/css/layout.css?v=26">
+  <link rel="stylesheet" href="/static/css/sidebar.css?v=26">
+  <link rel="stylesheet" href="/static/css/chat.css?v=34">
+  <link rel="stylesheet" href="/static/css/markdown.css?v=26">
+  <link rel="stylesheet" href="/static/css/dashboard.css?v=28">
+  <link rel="stylesheet" href="/static/css/detail-pane.css?v=26">
+  <link rel="stylesheet" href="/static/css/timeline.css?v=28">
+  <link rel="stylesheet" href="/static/css/config-panel.css?v=33">
+  <link rel="stylesheet" href="/static/css/template-manager.css?v=9">
+  <link rel="stylesheet" href="/static/css/route-config.css?v=2">
+  <link rel="stylesheet" href="/static/css/attribution-panel.css?v=4">
+  <link rel="stylesheet" href="/static/css/diff-modal.css?v=27">
+  <link rel="stylesheet" href="/static/css/config-viz.css?v=27">
+  <link rel="stylesheet" href="/static/css/config-viz-compression.css?v=2">
+  <link rel="stylesheet" href="/static/css/trading-calendar.css?v=2">
+  <link rel="stylesheet" href="/static/css/signal-eval.css?v=14">
+  <link rel="stylesheet" href="/static/css/watchlist.css?v=2">
+  <link rel="stylesheet" href="/static/css/skill-manager.css?v=2">
+  <link rel="stylesheet" href="/static/css/chart-kline.css?v=5">
+  <link rel="stylesheet" href="/static/css/backtest.css?v=19">
+  <link rel="stylesheet" href="/static/css/news.css?v=4">
+  <link rel="stylesheet" href="/static/css/flow.css?v=2">
+  <link rel="stylesheet" href="/static/css/data-center.css?v=3">
+  <link rel="stylesheet" href="/static/css/monitor-panel.css?v=1">
+  <link rel="stylesheet" href="/static/css/responsive.css?v=26">
+        <link rel="stylesheet" href="/static/css/style.css?v=2">
+        <link rel="stylesheet" href="/static/css/eval.css?v=7">
+  <link rel="stylesheet" href="/static/css/memory-manager.css?v=7">
+        <link rel="stylesheet" href="/static/lib/github-dark.min.css?v=1">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="对话列表">
+      <div class="brand-row">
+        <div class="brand-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" opacity="0.3"/>
+          <circle cx="12" cy="12" r="6" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+          <circle cx="12" cy="12" r="2.5" fill="currentColor" opacity="0.8"/>
+          <path d="M12 2L14 6L12 5L10 6L12 2Z" fill="currentColor"/>
+          <path d="M16 8L20 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M17 6L19 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+        </svg>
+      </div>
+        <div>
+          <div class="brand-name">选股雷达</div>
+          <div id="connectionStatus" class="subtle">就绪</div>
+        </div>
+      </div>
+      <button id="newDialogBtn" class="icon-text-button" type="button">
+        <span aria-hidden="true">＋</span>
+        <span>新对话</span>
+      </button>
+      <div id="dialogList" class="dialog-list"></div>
+      <div class="sidebar-divider"></div>
+      <button id="templateManagerBtn" class="icon-text-button sidebar-tool-button" type="button">
+        <span aria-hidden="true">▦</span>
+        <span>模板管理</span>
+      </button>
+      <button id="dashboardManagerBtn" class="icon-text-button sidebar-tool-button" type="button">
+        <span aria-hidden="true">◫</span>
+        <span>仪表盘管理</span>
+      </button>
+      <button id="logTraceBtn" class="icon-text-button sidebar-tool-button" type="button">
+        <span aria-hidden="true">⇄</span>
+        <span>日志关联</span>
+      </button>
+    </aside>
+
+    <main class="chat-pane">
+      <header class="topbar">
+        <div>
+          <div id="dialogTitle" class="dialog-title">新对话</div>
+          <div id="dialogMeta" class="dialog-meta">请选择或创建对话</div>
+        </div>
+        <div class="topbar-actions" style="position:relative;">
+          <!-- 一级工具：图标+文字 pill -->
+          <button id="klineBtn" class="tool-pill" type="button" aria-label="K线图" title="K线图">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+            <span class="pill-label">K线图</span>
+          </button>
+          <button id="watchlistBtn" class="tool-pill" type="button" aria-label="自选股" title="自选股">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            <span class="pill-label">自选股</span>
+          </button>
+          <button id="backtestBtn" class="tool-pill" type="button" aria-label="策略回测" title="策略回测">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+            <span class="pill-label">回测</span>
+          </button>
+          <button id="newsBtn" class="tool-pill" type="button" aria-label="热点新闻" title="热点新闻" onclick="window.StockRadar?.newsPanel?.show()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></svg>
+            <span class="pill-label">新闻</span>
+          </button>
+          <button id="flowBtn" class="tool-pill" type="button" aria-label="资金流向" title="资金流向">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            <span class="pill-label">资金</span>
+          </button>
+
+          <span class="tool-sep"></span>
+
+          <!-- 更多工具 ↓ -->
+          <button id="moreToolsBtn" class="tool-pill tool-more" type="button" aria-label="更多工具" title="更多工具"
+            onclick="var d=document.getElementById('moreToolsDropdown');var b=this;d.classList.toggle('open');b.classList.toggle('open');event.stopPropagation();">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+            <span class="pill-label">更多</span>
+            <svg class="tool-more-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+
+          <!-- 系统按钮组 -->
+          <span class="tool-sep"></span>
+          <div class="tool-sys">
+            <button id="monitorBtn" class="tool-sys-btn" type="button" aria-label="系统监控" title="系统监控" onclick="window.StockRadar?.monitorPanel?.toggle()">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-4"/></svg>
+            </button>
+            <button id="restartBtn" class="tool-sys-btn" type="button" aria-label="重启服务" title="重启服务" onclick="window.StockRadar?.restartServer()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
+            <button id="shutdownBtn" class="tool-sys-btn danger" type="button" aria-label="关闭服务" title="关闭服务" onclick="window.StockRadar?.shutdownServer()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+            </button>
+          </div>
+
+          <!-- 更多工具下拉菜单 -->
+          <div class="tool-dropdown" id="moreToolsDropdown">
+            <button class="tool-dropdown-item" type="button" id="calendarBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              交易日历
+            </button>
+            <button class="tool-dropdown-item" type="button" onclick="window.StockRadar?.skillManager?.openPage()">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+              Skill 管理
+            </button>
+            <button class="tool-dropdown-item" type="button" id="dataCenterBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+              数据中心
+            </button>
+            <button class="tool-dropdown-item" type="button" id="configBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              系统配置
+            </button>
+            <button class="tool-dropdown-item" type="button" onclick="window.StockRadar?.evalManager?.openPage()">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              评测系统
+            </button>
+            <button class="tool-dropdown-item" type="button" id="memoryManagerBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/></svg>
+              记忆管理
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <section id="messageList" class="message-list" aria-live="polite"></section>
+
+      <form id="composer" class="composer">
+        <!-- 示例问题引导 -->
+        <div class="composer-suggestions" id="composerSuggestions">
+          <span class="suggestions-label">试试</span>
+          <button type="button" class="suggestion-chip">分析茅台近期走势和估值</button>
+          <button type="button" class="suggestion-chip">半导体板块有哪些投资机会</button>
+          <button type="button" class="suggestion-chip">帮我诊断自选股的近期风险</button>
+          <button type="button" class="suggestion-chip">今天市场热点和龙虎榜情况</button>
+        </div>
+        <div class="composer-input-row">
+          <textarea id="messageInput" rows="3" placeholder="输入股票分析问题…"></textarea>
+          <button id="sendBtn" class="send-button" type="submit" aria-label="发送">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <span class="send-spinner"></span>
+          </button>
+        </div>
+        <div class="composer-footer-row">
+          <div class="mode-selector" id="modeSelector">
+            <span class="mode-selector-label-text">分析模式</span>
+            <div class="mode-selector-trigger" id="modeTrigger" tabindex="0" role="combobox" aria-expanded="false">
+              <span class="mode-selector-label" id="modeLabel">ReAct</span>
+              <svg class="mode-selector-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div class="mode-selector-dropdown" id="modeDropdown"></div>
+          </div>
+          <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+          <input type="hidden" id="modeSelect">
+        </div>
+      </form>
+    </main>
+
+    <aside class="detail-pane" aria-label="执行详情">
+      <div class="detail-header">
+        <div>
+          <div class="detail-title">执行详情</div>
+          <div id="taskStatus" class="subtle">暂无任务</div>
+        </div>
+        <button id="clearEventsBtn" class="icon-button" type="button" aria-label="清空进度">×</button>
+      </div>
+
+      <div class="detail-body">
+        <section class="detail-section">
+          <div class="section-label">执行进度</div>
+          <div id="progressList" class="event-list"></div>
+          <!-- 空闲状态：progressList 为空时显示 -->
+          <div id="detailIdle" class="detail-idle">
+            <div class="detail-idle-icon">📡</div>
+            <div class="detail-idle-title">准备就绪</div>
+            <div class="detail-idle-desc">发送分析问题后<br>执行进度和追踪详情会显示在这里</div>
+            <div class="detail-idle-mode" id="detailIdleMode">当前模式：ReAct</div>
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <button id="traceToggle" class="section-label section-toggle" type="button" aria-expanded="true">
+            执行详情 <span class="collapse-arrow">▴</span>
+          </button>
+          <div id="traceSection" class="trace-section-wrapper">
+            <div id="traceList" class="event-list"></div>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 配置面板 -->
+  <div id="configOverlay" class="config-overlay"></div>
+  <aside id="configPanel" class="config-panel" aria-label="配置面板">
+    <div class="config-header">
+      <div class="config-title">系统配置</div>
+      <div class="config-header-actions">
+        <button id="configReloadBtn" class="config-header-btn" type="button" title="手动编辑 .env 后点此重新加载，立即生效无需重启">&#x21bb; 重载 .env</button>
+        <span id="configReloadMsg" class="config-header-msg"></span>
+        <button id="configCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div id="configForm" class="config-body"></div>
+    <div class="config-footer">
+      <button id="configDiffBtn" class="send-button" type="button">查看变更</button>
+    </div>
+  </aside>
+
+  <!-- 报告模板管理 -->
+  <div id="templateManagerOverlay" class="template-manager-overlay"></div>
+  <aside id="templateManagerPanel" class="template-manager-panel" aria-label="报告模板管理">
+    <div class="template-manager-header">
+      <div>
+        <div class="template-manager-title">报告模板管理</div>
+        <div class="template-manager-subtitle">编辑 agents/report_templates 下的模板结构和质量规则</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="secondary-button" type="button" id="templateRouteConfigBtn">路由配置</button>
+        <button id="templateManagerCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div id="templateManagerBody" class="template-manager-body"></div>
+  </aside>
+
+  <!-- Diff 预览弹窗 -->
+  <div id="templateDiffOverlay" class="template-diff-overlay"></div>
+  <div id="templateDiffModal" class="template-diff-modal" role="dialog" aria-modal="true" aria-label="模板变更预览">
+    <div class="template-diff-header">
+      <div>
+        <div class="template-diff-title">模板变更预览</div>
+        <div id="templateDiffSummary" class="template-diff-summary"></div>
+      </div>
+      <button id="templateDiffCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <div id="templateDiffBody" class="template-diff-body"></div>
+    <div class="template-diff-footer">
+      <button id="templateDiffCancelBtn" class="secondary-button" type="button">取消</button>
+      <button id="templateDiffApplyBtn" class="send-button" type="button">确认保存</button>
+    </div>
+  </div>
+
+  <!-- 仪表盘管理 -->
+  <div id="dashboardManagerOverlay" class="template-manager-overlay"></div>
+  <aside id="dashboardManagerPanel" class="template-manager-panel" aria-label="仪表盘配置管理">
+    <div class="template-manager-header">
+      <div>
+        <div class="template-manager-title">仪表盘配置管理</div>
+        <div class="template-manager-subtitle">编辑 agents/report_templates/dashboards 下的仪表盘定义和关联关系</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="dashboardManagerCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div id="dashboardManagerBody" class="template-manager-body"></div>
+  </aside>
+
+  <!-- 仪表盘 Diff 预览弹窗 -->
+  <div id="dashboardDiffOverlay" class="template-diff-overlay"></div>
+  <div id="dashboardDiffModal" class="template-diff-modal" role="dialog" aria-modal="true" aria-label="仪表盘变更预览">
+    <div class="template-diff-header">
+      <div>
+        <div class="template-diff-title">仪表盘变更预览</div>
+        <div id="dashboardDiffSummary" class="template-diff-summary"></div>
+      </div>
+      <button id="dashboardDiffCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <div id="dashboardDiffBody" class="template-diff-body"></div>
+    <div class="template-diff-footer">
+      <button id="dashboardDiffCancelBtn" class="secondary-button" type="button">取消</button>
+      <button id="dashboardDiffApplyBtn" class="send-button" type="button">确认保存</button>
+    </div>
+  </div>
+
+  <!-- 模板路由配置 -->
+  <div id="rcOverlay" class="rc-overlay"></div>
+  <aside id="rcPanel" class="rc-panel" aria-label="模板路由配置">
+    <div class="rc-header">
+      <div>
+        <div class="rc-title">模板路由配置</div>
+        <div class="rc-subtitle">调整关键词权重，优化模板匹配精度</div>
+      </div>
+      <div class="rc-toolbar">
+        <button class="rc-btn" type="button" id="rcTestBtn">路由测试</button>
+        <button class="rc-btn primary" type="button" id="rcSaveAllBtn">保存全部</button>
+        <button class="rc-btn ghost" type="button" id="rcCloseBtn" aria-label="关闭">&times;</button>
+      </div>
+    </div>
+    <div class="rc-body">
+      <aside class="rc-sidebar">
+        <input class="rc-search" id="rcSearch" placeholder="搜索模板...">
+        <div class="rc-family-tabs" id="rcFamilyTabs"></div>
+        <div class="rc-side-section">
+          <div class="rc-side-heading">
+            <span id="rcSideHeading">全部模板</span>
+            <span id="rcSideCount"></span>
+          </div>
+          <div class="rc-template-list" id="rcTplList"></div>
+        </div>
+      </aside>
+      <section class="rc-editor" id="rcEditor">
+        <div class="rc-empty-hint" id="rcEmptyHint">
+          <div style="font-size:28px;margin-bottom:8px;opacity:0.4">&larr;</div>
+          选择左侧模板查看和编辑路由关键词
+        </div>
+        <div id="rcEditorContent" style="display:none"></div>
+      </section>
+      <aside class="rc-inspector" id="rcInspector">
+        <div class="rc-preview-panel">
+          <div class="rc-preview-head">路由说明</div>
+          <div class="rc-preview-body rc-validation">
+            <div class="rc-check">用户输入先按 report_family 分组打分</div>
+            <div class="rc-check">再在最高分 family 内选具体模板</div>
+            <div class="rc-check">同分时按列表顺序取前者</div>
+            <div class="rc-check">全未命中则使用默认模板 standard</div>
+          </div>
+        </div>
+        <div class="rc-preview-panel">
+          <div class="rc-preview-head">匹配规则</div>
+          <div class="rc-preview-body" style="font-size:12px;color:var(--muted);line-height:1.6">
+            <p style="margin:0 0 8px">关键词匹配采用<strong>子串包含</strong>检查，不区分大小写。同一模板内相同关键词只计一次。</p>
+            <p style="margin:0">权重建议：<span class="rc-pill sm green">1-10 低</span> <span class="rc-pill sm">10-25 中</span> <span class="rc-pill sm orange">25-50 高</span> <span class="rc-pill sm red">50+ 极高</span></p>
+          </div>
+        </div>
+        <div id="rcInspectorDynamic"></div>
+      </aside>
+    </div>
+  </aside>
+
+  <!-- 回答溯源 · 执行归因 -->
+  <div id="attrOverlay" class="ap-overlay"></div>
+  <aside id="attrPanel" class="ap-panel" aria-label="回答溯源 · 执行归因">
+    <div class="ap-header">
+      <div class="ap-brand">
+        <div>
+          <div class="ap-title">回答溯源 · 执行归因</div>
+          <div class="ap-sub">自动绑定当前对话，点击「定位」在对话中高亮支撑来源</div>
+        </div>
+      </div>
+      <div class="ap-toolbar">
+        <div id="attrRunPill" class="ap-run-pill" hidden><span class="dot"></span><span id="attrRunPillText"></span></div>
+        <button class="ap-btn ghost" type="button" id="attrCloseBtn" aria-label="关闭">&times;</button>
+      </div>
+    </div>
+    <div class="ap-body">
+      <div class="ap-runrow">
+        <select class="ap-runselect" id="attrRunSelect" aria-label="选择运行"></select>
+      </div>
+      <div class="ap-tabs" id="attrTabs">
+        <button class="ap-tab active" type="button" data-tab="overview">概览</button>
+        <button class="ap-tab" type="button" data-tab="sources">数据来源</button>
+        <button class="ap-tab" type="button" data-tab="chain">思考链路</button>
+        <button class="ap-tab" type="button" data-tab="raw">原始日志</button>
+      </div>
+      <div class="ap-panes">
+        <section class="ap-pane active" id="attrOverview"></section>
+        <section class="ap-pane" id="attrSources"></section>
+        <section class="ap-pane" id="attrChain"></section>
+        <section class="ap-pane" id="attrRaw"></section>
+      </div>
+      <div class="ap-status" id="attrStatus"></div>
+    </div>
+  </aside>
+
+  <!-- 路由测试弹窗 -->
+  <div class="rc-modal-overlay" id="rcTestOverlay">
+    <div class="rc-modal">
+      <div class="rc-modal-head">
+        <h3>路由测试</h3>
+        <button class="rc-btn sm" id="rcTestCloseBtn">&times;</button>
+      </div>
+      <div class="rc-modal-body">
+        <div class="rc-test-row">
+          <input class="rc-input" id="rcTestInput" placeholder="输入测试问题，如：帮我分析一下半导体板块">
+          <button class="rc-btn primary" id="rcTestRunBtn">测试匹配</button>
+        </div>
+        <div id="rcTestResults">
+          <div class="rc-empty-hint">输入问题后点击测试，查看全部模板的匹配排名</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="diffOverlay" class="diff-overlay"></div>
+  <div id="diffModal" class="diff-modal" role="dialog" aria-modal="true" aria-label="变更预览">
+    <div class="diff-modal-header">
+      <div class="diff-modal-title">变更预览</div>
+      <button id="diffCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <div id="diffBody" class="diff-modal-body"></div>
+    <div class="diff-modal-footer">
+      <button id="diffCancelBtn" class="secondary-button" type="button">取消</button>
+      <button id="diffApplyBtn" class="send-button" type="button">应用</button>
+    </div>
+  </div>
+
+  <!-- Budget Decision Modal -->
+  <div id="budgetOverlay" class="diff-overlay"></div>
+  <div id="budgetModal" class="diff-modal" role="dialog" aria-modal="true" aria-label="预算决策">
+    <div class="diff-modal-header">
+      <div class="diff-modal-title">⚠️ 预算超限</div>
+    </div>
+    <div id="budgetBody" class="diff-modal-body"></div>
+    <div class="diff-modal-footer">
+      <button id="budgetCancelBtn" class="secondary-button" type="button">取消 / 总结</button>
+      <button id="budgetContinueBtn" class="send-button" type="button">继续执行</button>
+    </div>
+  </div>
+
+  <!-- 交易日历弹窗 -->
+  <div id="calendarOverlay" class="calendar-overlay"></div>
+  <div id="calendarModal" class="calendar-modal" role="dialog" aria-modal="true" aria-label="交易日历">
+    <div class="calendar-modal-header">
+      <div class="calendar-nav-group">
+        <button id="calPrevYear" class="cal-nav-btn" type="button" aria-label="上一年">‹</button>
+        <span id="calYearTitle" class="calendar-modal-title">2026年</span>
+        <button id="calNextYear" class="cal-nav-btn" type="button" aria-label="下一年">›</button>
+      </div>
+      <div class="calendar-nav-group">
+        <button id="calPrevMonth" class="cal-nav-btn" type="button" aria-label="上月">‹</button>
+        <span id="calMonthTitle">5月</span>
+        <button id="calNextMonth" class="cal-nav-btn" type="button" aria-label="下月">›</button>
+      </div>
+      <div class="calendar-header-right">
+        <button id="calendarCloseBtn" class="calendar-close-btn" type="button" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div id="calendarBody" class="calendar-modal-body"></div>
+  </div>
+
+  <!-- 自选股弹窗 -->
+  <div id="watchlistOverlay" class="watchlist-overlay"></div>
+  <div id="watchlistModal" class="watchlist-modal" role="dialog" aria-modal="true" aria-label="自选股管理">
+    <div class="watchlist-header">
+      <div class="watchlist-title">
+        自选股
+        <span id="watchlistCount" class="watchlist-title-count">0</span>
+      </div>
+      <div class="watchlist-header-actions">
+        <div class="wl-source-selector" id="wlSourceSelector">
+          <div class="wl-source-trigger" id="wlSourceTrigger" tabindex="0" role="combobox" aria-expanded="false">
+            <svg class="wl-source-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span class="wl-source-label" id="wlSourceLabel">自动</span>
+            <svg class="wl-source-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="wl-source-dropdown" id="wlSourceDropdown"></div>
+        </div>
+        <button id="watchlistRefreshBtn" class="watchlist-refresh-btn" type="button" title="刷新行情">
+          <span class="watchlist-refresh-spinner"></span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
+        <button id="watchlistSyncBtn" class="watchlist-sync-btn" type="button" title="从 MX 同步">
+          <span class="watchlist-sync-spinner"></span>
+          <span>同步 MX</span>
+        </button>
+        <button id="watchlistCloseBtn" class="watchlist-close-btn" type="button" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div id="watchlistBody" class="watchlist-body"></div>
+    <div class="watchlist-footer">
+      <input id="watchlistAddInput" class="watchlist-input" type="text" placeholder="输入股票代码，如 600519" autocomplete="off">
+      <button id="watchlistAddBtn" class="watchlist-add-btn" type="button">添加</button>
+    </div>
+  </div>
+
+  <!-- K 线图弹窗 - 参考同花顺设计 -->
+  <div id="klineOverlay" class="kline-overlay"></div>
+  <div id="klineModal" class="kline-modal" role="dialog" aria-modal="true" aria-label="K线图">
+    <!-- 顶部：搜索 + 股票信息 + 操作 -->
+    <div class="kline-header">
+      <div class="kline-header-top">
+        <div class="kline-search-box">
+          <input id="klineSearchInput" class="kline-search-input" type="text" placeholder="输入股票代码或名称" autocomplete="off">
+          <div id="klineSearchResults" class="kline-search-results"></div>
+        </div>
+        <div class="kline-header-actions">
+          <div class="kline-source-selector" id="klineSourceSelector">
+            <div class="kline-source-trigger" id="klineSourceTrigger" tabindex="0" role="combobox" aria-expanded="false">
+              <svg class="kline-source-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <span class="kline-source-label" id="klineSourceLabel">自动</span>
+              <svg class="kline-source-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div id="klineSourceDropdown" class="kline-source-dropdown"></div>
+          </div>
+          <button id="klineSyncBtn" class="kline-sync-btn" type="button" disabled>
+            <span class="kline-sync-spinner"></span>
+            同步数据
+          </button>
+          <label class="kline-auto-sync-label">
+            <input type="checkbox" id="klineAutoSyncToggle" class="kline-auto-sync-toggle">
+            <span>自动同步</span>
+          </label>
+          <button id="klineCloseBtn" class="kline-close-btn" type="button" aria-label="关闭">×</button>
+        </div>
+      </div>
+      <!-- 股票信息栏 - 参考同花顶顶部 -->
+      <div class="kline-stock-bar" id="klineStockBar">
+        <div class="kline-stock-name">
+          <span class="kline-stock-name-text" id="klineStockName">-</span>
+          <span class="kline-stock-code" id="klineStockCode">-</span>
+        </div>
+        <div class="kline-stock-price">
+          <span class="kline-price-value" id="klinePrice">-</span>
+          <span class="kline-price-change" id="klineChange">-</span>
+          <span class="kline-price-change-pct" id="klineChangePct">-</span>
+        </div>
+        <div class="kline-stock-meta">
+          <div class="kline-meta-item">
+            <span class="kline-meta-label">成交量</span>
+            <span class="kline-meta-value" id="klineVolume">-</span>
+          </div>
+          <div class="kline-meta-item">
+            <span class="kline-meta-label">成交额</span>
+            <span class="kline-meta-value" id="klineAmount">-</span>
+          </div>
+          <div class="kline-meta-item">
+            <span class="kline-meta-label">换手率</span>
+            <span class="kline-meta-value" id="klineTurnover">-</span>
+          </div>
+        </div>
+      </div>
+      <!-- 工具栏 -->
+      <div class="kline-toolbar">
+        <div class="kline-toolbar-left">
+          <div class="kline-days-group">
+            <button class="kline-days-btn" data-days="30">1月</button>
+            <button class="kline-days-btn" data-days="60">2月</button>
+            <button class="kline-days-btn active" data-days="120">半年</button>
+            <button class="kline-days-btn" data-days="250">1年</button>
+            <button class="kline-days-btn" data-days="500">2年</button>
+          </div>
+          <div class="kline-chart-type-group">
+            <button class="kline-chart-type-btn active" data-type="candle_solid" title="K线图">
+              <svg width="14" height="14" viewBox="0 0 28 28"><path fill-rule="evenodd" clip-rule="evenodd" d="M9.6748 6V3H8.3252V6H6.7C6.03726 6 5.5 6.53726 5.5 7.2V20.8C5.5 21.4627 6.03726 22 6.7 22H8.3252V24.9998H9.6748V22H11.3C11.9627 22 12.5 21.4627 12.5 20.8V7.2C12.5 6.53726 11.9627 6 11.3 6H9.6748ZM19.6748 8V5H18.3252V8H16.7C16.0373 8 15.5 8.53726 15.5 9.2L15.5 18.8C15.5 19.4627 16.0373 20 16.7 20H18.3252V23H19.6748V20H21.3C21.9627 20 22.5 19.4627 22.5 18.8L22.5 9.2C22.5 8.53726 21.9627 8 21.3 8H19.6748Z" fill="currentColor"/></svg>
+            </button>
+            <button class="kline-chart-type-btn" data-type="candle_stroke" title="空心K线">
+              <svg width="14" height="14" viewBox="0 0 28 28"><path fill-rule="evenodd" clip-rule="evenodd" d="M9.6748 6V3H8.3252V6H6.7002L6.57715 6.00586C5.9721 6.06737 5.5 6.57892 5.5 7.2002V20.7998L5.50586 20.9229C5.56326 21.4875 6.01248 21.9367 6.57715 21.9941L6.7002 22H8.3252V24.9998H9.6748V22H11.2998L11.4229 21.9941C11.9875 21.9367 12.4367 21.4875 12.4941 20.9229L12.5 20.7998V7.2002C12.5 6.57892 12.0279 6.06737 11.4229 6.00586L11.2998 6H9.6748ZM19.6748 8V5H18.3252V8H16.7002L16.5771 8.00586C15.9721 8.06737 15.5 8.57892 15.5 9.2002V18.7998L15.5059 18.9229C15.5633 19.4875 16.0125 19.9367 16.5771 19.9941L16.7002 20H18.3252V23H19.6748V20H21.2998L21.4229 19.9941C21.9875 19.9367 22.4367 19.4875 22.4941 18.9229L22.5 18.7998V9.2002C22.5 8.57892 22.0279 8.06737 21.4229 8.00586L21.2998 8H19.6748ZM21.1504 18.6504H16.8496V9.34961H21.1504V18.6504ZM11.1504 20.6504H6.84961V7.34961H11.1504V20.6504Z" fill="currentColor"/></svg>
+            </button>
+            <button class="kline-chart-type-btn" data-type="line" title="折线图">
+              <svg width="14" height="14" viewBox="0 0 28 28"><path d="M3.5 18.0833L10.4256 10.7611L16.0291 16.6745L24.5 7.58325" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="square" stroke-linejoin="round"/></svg>
+            </button>
+            <button class="kline-chart-type-btn" data-type="area" title="面积图">
+              <svg width="14" height="14" viewBox="0 0 28 28"><path d="M3 16.5L9.92555 9.17781L15.5291 15.0912L24 6" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="square" stroke-linejoin="round"/><path fill-rule="evenodd" clip-rule="evenodd" d="M3 25.0834H25.1667V6.01001L22.865 6.04419L15.25 14.1664L10.5432 8.90227L5.33334 13.7965L3 16.2736V25.0834Z" fill="currentColor" opacity="0.3"/></svg>
+            </button>
+          </div>
+          <div class="kline-indicator-group">
+            <button class="kline-indicator-btn active" data-indicator="macd">MACD</button>
+            <button class="kline-indicator-btn" data-indicator="rsi">RSI</button>
+            <button class="kline-indicator-btn" data-indicator="kdj">KDJ</button>
+            <button class="kline-indicator-btn" data-indicator="boll">BOLL</button>
+            <button class="kline-indicator-btn" data-indicator="dpo">DPO</button>
+          </div>
+          <!-- 策略选择 + 扫描买点 + 跑回测 -->
+          <div class="kline-strategy-group">
+            <select id="klineStrategySelect" class="kline-strategy-select" title="选择回测策略">
+              <option value="">选择策略…</option>
+            </select>
+            <button id="klineScanBtn" class="kline-strategy-btn kline-scan-btn" type="button" disabled>扫描买点</button>
+            <button id="klineBacktestBtn" class="kline-strategy-btn kline-run-btn" type="button" disabled>跑回测</button>
+          </div>
+        </div>
+        <div id="klineStatus" class="kline-status">输入代码后按回车读取本地数据</div>
+      </div>
+    </div>
+    <!-- 图表区域 -->
+    <div id="klineChartContainer" class="kline-chart-container">
+      <span id="klineScanBadge" class="kline-scan-badge" hidden></span>
+    </div>
+  </div>
+
+  <!-- Skill 管理页面（全页面三栏） -->
+  <div id="skillPage" class="skill-page">
+    <header class="skill-topbar">
+      <div class="skill-topbar-left">
+        <button id="skillBackBtn" class="skill-back-btn" type="button" title="返回对话">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        </button>
+        <div class="skill-page-title">
+          <span class="skill-page-title-dot"></span>
+          <span>Skill 管理</span>
+        </div>
+      </div>
+      <div class="skill-topbar-actions">
+        <button id="skillRescanBtn" class="skill-topbar-btn" type="button" title="重新扫描">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          <span>重新扫描</span>
+        </button>
+      </div>
+    </header>
+    <main class="skill-workspace">
+      <!-- 左侧：列表 -->
+      <aside class="skill-left">
+        <input id="skillSearch" class="skill-search" type="text" placeholder="搜索 skill / tool / category" autocomplete="off">
+        <div id="skillTabs" class="skill-tabs">
+          <button class="skill-tab active" data-filter="all">全部</button>
+          <button class="skill-tab" data-filter="internal">内置</button>
+          <button class="skill-tab" data-filter="external">外部</button>
+          <button class="skill-tab" data-filter="user">导入</button>
+          <button class="skill-tab" data-filter="error">异常</button>
+        </div>
+        <div id="skillList" class="skill-list"></div>
+      </aside>
+      <!-- 中间：详情 -->
+      <section id="skillMain" class="skill-main">
+        <div class="skill-empty-hint">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.25"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          <p>选择左侧技能查看详情</p>
+        </div>
+      </section>
+      <!-- 右侧：导入向导 -->
+      <aside class="skill-right">
+        <div class="skill-right-title">导入向导</div>
+        <div class="skill-import-box">
+          <div id="skillUploadZone" class="skill-upload-zone">
+            <div>拖入 skill zip 或选择目录<br><span style="font-size:12px;font-weight:700;">先预检，不会立即安装</span></div>
+          </div>
+          <input id="skillFileInput" type="file" accept=".zip" style="display:none">
+          <div class="skill-stepper">
+            <div class="skill-step"><div class="skill-step-num">1</div><div>识别导入类型：单 skill 或外部包。</div></div>
+            <div class="skill-step"><div class="skill-step-num">2</div><div>检查路径安全、SKILL.md、工具列表和 build_tools。</div></div>
+            <div class="skill-step"><div class="skill-step-num">3</div><div>展示变更预览：新增、覆盖、依赖、风险。</div></div>
+            <div class="skill-step"><div class="skill-step-num">4</div><div>确认后复制到 user_skills 并重新扫描。</div></div>
+          </div>
+          <div class="skill-warning">导入代码可能执行本地 Python。正式实现必须限制写入路径、限制包大小，并且不自动安装依赖。</div>
+        </div>
+        <div class="skill-note-panel">
+          <div class="skill-section-head">
+            <div>
+              <div class="skill-section-title">推荐结构</div>
+              <div class="skill-section-desc">最小可导入单 skill 包。</div>
+            </div>
+          </div>
+          <pre class="skill-code-box">my_skill/
+  SKILL.md
+  main.py
+  README.md          # optional
+  requirements.txt   # optional</pre>
+          <div class="skill-guide-copy">
+            <strong>必须提供：</strong>`SKILL.md` 里的 YAML 头、目录层信息、工具列表；`main.py` 里的 `build_tools(logger, memory_mgr)`。
+          </div>
+        </div>
+        <div class="skill-note-panel" style="margin-top:14px;">
+          <div class="skill-section-head">
+            <div>
+              <div class="skill-section-title">main.py 示例</div>
+              <div class="skill-section-desc">推荐继承 SkillBuilder。</div>
+            </div>
+          </div>
+          <pre class="skill-code-box">from tools.skill_builder import SkillBuilder, skill_tool
+
+class MySkill(SkillBuilder):
+    @skill_tool
+    def get_demo_data(self, symbol: str) -> dict:
+        """获取示例数据。"""
+        return {"symbol": symbol}
+
+def build_tools(logger, memory_mgr):
+    return MySkill(logger, memory_mgr).build_langchain_tools()</pre>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- 评测系统全页面 -->
+  <div id="evalPage" class="eval-page">
+    <header class="eval-topbar">
+      <div class="eval-topbar-left">
+        <button id="evalBackBtn" class="eval-back-btn" type="button" title="返回对话" onclick="window.StockRadar?.evalManager?.closePage()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        </button>
+        <div class="eval-page-title">
+          <span class="eval-page-title-dot"></span>
+          <span>评测系统</span>
+        </div>
+      </div>
+      <div class="eval-topbar-actions">
+        <button id="evalNewBtn" class="eval-topbar-btn primary" type="button" title="新建评测">＋ 新建评测</button>
+        <button id="evalRefreshBtn" class="eval-topbar-btn" type="button" title="刷新">↻ 刷新</button>
+      </div>
+    </header>
+    <main class="eval-workspace">
+      <!-- 左侧：批次列表 -->
+      <aside class="eval-left">
+        <input id="evalSearch" class="eval-search" type="text" placeholder="搜索批次 / tag" autocomplete="off">
+        <div id="evalTabs" class="eval-tabs">
+          <button class="eval-tab active" data-tab="overview" onclick="window.StockRadar?.evalManager?.switchTab('overview')">概览</button>
+          <button class="eval-tab" data-tab="cases" onclick="window.StockRadar?.evalManager?.switchTab('cases')">Case 列表</button>
+          <button class="eval-tab" data-tab="benchmark" onclick="window.StockRadar?.evalManager?.switchTab('benchmark')">题库管理</button>
+        </div>
+        <div id="evalRunList" class="eval-run-list"></div>
+      </aside>
+      <!-- 中间：详情 -->
+      <section id="evalMain" class="eval-main">
+        <div class="eval-empty-hint">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.25"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          <p>选择左侧批次查看详情</p>
+        </div>
+      </section>
+      <!-- 右侧：Case 详情 -->
+      <aside id="evalRight" class="eval-right">
+        <div class="eval-empty-hint">选择 Case 查看详情</div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- 评测系统：新建/编辑 弹窗 -->
+  <div id="evalModal" class="eval-modal-overlay">
+    <div class="eval-modal">
+      <div class="eval-modal-header">
+        <span class="eval-modal-title">新建评测批次</span>
+        <button class="eval-modal-close" title="关闭">✕</button>
+      </div>
+      <div class="eval-modal-body"></div>
+      <div class="eval-modal-footer">
+        <button class="eval-btn cancel eval-modal-cancel">取消</button>
+        <button class="eval-btn primary eval-modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 记忆管理弹窗 -->
+  <div id="memoryOverlay" class="memory-overlay" style="display:none"></div>
+  <div id="memoryModal" class="memory-modal" role="dialog" aria-modal="true" aria-label="记忆管理" style="display:none">
+    <div class="memory-header">
+      <div class="memory-title">🧠 记忆管理</div>
+      <div id="memStatsBar" class="mem-stats-bar">加载中...</div>
+      <button id="memoryCloseBtn" class="memory-close-btn" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="memory-tabs">
+      <button class="memory-tab active" data-tab="mem">📋 记忆</button>
+      <button class="memory-tab" data-tab="profile">👤 画像</button>
+      <button class="memory-tab" data-tab="clean">🗑 清理</button>
+      <button class="memory-tab" data-tab="debug">🔬 调试</button>
+      <button class="memory-tab" data-tab="config">⚙ 配置</button>
+    </div>
+
+    <!-- Tab: 记忆 -->
+    <div class="memory-tab-panel active" id="tab-mem">
+      <div class="memory-toolbar">
+        <input type="text" id="memSearchInput" class="mem-search-input" placeholder="搜索记忆..." />
+        <select id="memSearchType" class="mem-search-type">
+          <option value="all">全部</option>
+          <option value="semantic">语义记忆</option>
+          <option value="episodic">情景记忆</option>
+        </select>
+        <button id="memSearchBtn" class="mem-search-btn">搜索</button>
+        <span class="mem-spacer"></span>
+        <button id="memRefreshBtn" class="mem-refresh-btn">刷新</button>
+      </div>
+      <div id="memResults" class="mem-results">
+        <p class="mem-hint">输入关键词搜索记忆，或浏览下方列表</p>
+      </div>
+    </div>
+
+    <!-- Tab: 画像 -->
+    <div class="memory-tab-panel" id="tab-profile">
+      <div id="memProfileContent"><span class="mem-hint">加载中...</span></div>
+    </div>
+
+    <!-- Tab: 清理 -->
+    <div class="memory-tab-panel" id="tab-clean">
+      <div class="mem-clean-row">
+        <label>清除此前日期:</label>
+        <input type="date" id="memCleanBefore" />
+        <button id="memCleanPreviewBtn" class="mem-btn-ghost">预览</button>
+        <button id="memCleanExecBtn" class="mem-btn-danger">执行</button>
+        <span id="memCleanResult"></span>
+      </div>
+      <div class="mem-clean-row">
+        <label>清除指定股票:</label>
+        <input type="text" id="memCleanStock" placeholder="股票代码 如 600519" />
+        <button id="memCleanStockPreviewBtn" class="mem-btn-ghost">预览</button>
+        <button id="memCleanStockExecBtn" class="mem-btn-danger">执行</button>
+        <span id="memCleanStockResult"></span>
+      </div>
+      <div class="mem-clean-row" style="border-top:1px solid #444;padding-top:8px;margin-top:4px">
+        <label style="color:#e55">全量清空:</label>
+        <span style="color:#888;font-size:12px">清空语义/情景/向量/画像所有数据</span>
+        <button id="memResetBtn" class="mem-btn-danger" style="margin-left:auto">全部清空</button>
+        <span id="memResetResult"></span>
+      </div>
+    </div>
+
+    <!-- Tab: 配置 -->
+    <div class="memory-tab-panel" id="tab-config">
+      <div class="mem-config-row">
+        <label>语义相似度门槛:</label>
+        <input type="number" id="memMinSimInput" min="0" max="1" step="0.01" class="mem-config-input" />
+        <span class="mem-hint">min_similarity，[0,1]。低于该余弦相似度的向量记忆会被过滤，避免无关记忆污染检索/注入上下文（默认 0.72，0 表示关闭门槛）。</span>
+      </div>
+      <div class="mem-config-row">
+        <button id="memConfigSaveBtn" class="mem-btn-primary">保存</button>
+        <span id="memConfigResult" class="mem-hint"></span>
+      </div>
+    </div>
+
+    <!-- Tab: 调试 -->
+    <div class="memory-tab-panel" id="tab-debug">
+      <div id="memDebugEmbedStats" class="mem-debug-stats">
+        <span class="mem-hint">切到此 tab 后自动加载...</span>
+      </div>
+      <div class="mem-debug-row">
+        <label>分词测试:</label>
+        <input type="text" id="memDebugTokenizeInput" placeholder="输入中文文本" value="今天CPO板块高开低走" />
+        <button id="memDebugTokenizeBtn" class="mem-btn-ghost">分词</button>
+        <span id="memDebugTokenizeResult"></span>
+      </div>
+      <div class="mem-debug-row">
+        <label>Embed 测试:</label>
+        <input type="text" id="memDebugEmbedInput" placeholder="输入要 Embed 的文本" value="今日股市总结" />
+        <button id="memDebugEmbedBtn" class="mem-btn-ghost">Embed</button>
+        <span id="memDebugEmbedResult"></span>
+      </div>
+      <div class="mem-debug-row">
+        <label>相似度:</label>
+        <input type="text" id="memDebugSim1" placeholder="文本1" value="CPO板块高开低走" />
+        <input type="text" id="memDebugSim2" placeholder="文本2" value="通信设备板块下跌" />
+        <button id="memDebugSimBtn" class="mem-btn-ghost">计算</button>
+        <span id="memDebugSimResult"></span>
+      </div>
+      <div style="border-top:1px solid var(--border);margin:10px 0;padding-top:8px">
+        <h4 style="margin:0 0 6px;font-size:12px;color:var(--text-secondary)">检索模拟（输入问题 → 查看匹配的记忆及相似度排名）</h4>
+        <div class="mem-debug-row">
+          <input type="text" id="memDebugRetrieveInput" placeholder="输入问题，如：CPO板块走势" style="flex:1" />
+          <button id="memDebugRetrieveBtn" class="mem-search-btn">检索</button>
+        </div>
+        <div id="memDebugRetrieveResult" style="margin-top:8px;font-size:12px;max-height:250px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 溯源弹窗（v2） -->
+  <div id="memTraceModal" class="memory-overlay" style="display:none">
+    <div class="memory-modal" style="width:520px;max-height:80vh;">
+      <div class="memory-header">
+        <div class="memory-title">🔍 来源溯源</div>
+        <button class="memory-close-btn" onclick="document.getElementById('memTraceModal').style.display='none'">×</button>
+      </div>
+      <div id="memTraceDetail" style="padding:14px 18px;overflow-y:auto;max-height:55vh;"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/static/lib/marked.min.js?v=1"></script>
+  <script src="/static/js/utils.js?v=26"></script>
+  <script src="/static/js/api.js?v=36"></script>
+  <script src="/static/js/config-viz-budget.js?v=26"></script>
+  <script src="/static/js/config-viz-compression.js?v=2"></script>
+  <script src="/static/js/config-viz-flow.js?v=26"></script>
+  <script src="/static/js/config.js?v=34"></script>
+  <script src="/static/js/template-manager.js?v=7"></script>
+  <script src="/static/js/dashboard-manager.js?v=4"></script>
+  <script src="/static/js/route-config.js?v=2"></script>
+  <script src="/static/js/chat-markdown.js?v=25"></script>
+  <script src="/static/js/chat-dashboard.js?v=27"></script>
+  <script src="/static/js/chat-export.js?v=26"></script>
+  <script src="/static/js/chat-core.js?v=37"></script>
+  <script src="/static/js/timeline.js?v=26"></script>
+  <script src="/static/js/attribution-panel.js?v=4"></script>
+  <script src="/static/js/status-player.js?v=1"></script>
+  <script src="/static/js/trading-calendar.js?v=3"></script>
+  <script src="/static/js/signal-eval.js?v=7"></script>
+  <script src="/static/js/watchlist.js?v=2"></script>
+  <script src="/static/js/skill-manager.js?v=3"></script>
+  <script src="/static/js/chart-kline.js?v=14"></script>
+  <script src="/static/js/chart-backtest-kline.js?v=2"></script>
+  <script src="/static/js/chart-batch-compare.js?v=5"></script>
+  <script src="/static/js/chart-multi-compare.js?v=1"></script>
+  <script src="/static/js/backtest.js?v=20"></script>
+  <script src="/static/js/data-center.js?v=9"></script>
+
+  <!-- 热点新闻弹窗 -->
+  <div id="newsOverlay" class="news-overlay"></div>
+  <div id="newsModal" class="news-modal" role="dialog" aria-modal="true" aria-label="热点新闻">
+    <div class="news-header">
+      <span id="newsTitle" class="news-header-title">热点新闻</span>
+      <div class="news-header-actions">
+        <button id="newsRefreshBtn" type="button" title="刷新">↻</button>
+        <button id="newsCloseBtn" type="button" aria-label="关闭">✕</button>
+      </div>
+    </div>
+    <div id="newsTabs" class="news-tabs">
+      <button class="news-tab active" data-category="全部">全部</button>
+      <button class="news-tab" data-category="政策">政策</button>
+      <button class="news-tab" data-category="行业">行业</button>
+      <button class="news-tab" data-category="公司">公司</button>
+      <button class="news-tab" data-category="宏观">宏观</button>
+    </div>
+    <div id="newsBody" class="news-body"></div>
+  </div>
+  <script src="/static/js/news.js?v=6"></script>
+
+  <!-- 资金流向弹窗 -->
+  <div id="flowOverlay" class="flow-overlay"></div>
+  <div id="flowModal" class="flow-modal" role="dialog" aria-modal="true" aria-label="资金流向">
+    <div class="flow-header">
+      <span id="flowTitle" class="flow-header-title">资金流向</span>
+      <div class="flow-header-actions">
+        <button id="flowRefreshBtn" type="button" title="刷新">↻</button>
+        <button id="flowCloseBtn" type="button" aria-label="关闭">✕</button>
+      </div>
+    </div>
+    <div id="flowTabs" class="flow-tabs">
+      <button class="flow-tab active" data-tab="sector">板块资金流</button>
+      <button class="flow-tab" data-tab="stock">个股资金流</button>
+      <button class="flow-tab" data-tab="north">北向资金</button>
+    </div>
+    <div id="flowBody" class="flow-body"></div>
+  </div>
+  <script src="/static/js/chart-flow.js?v=3"></script>
+
+  <!-- 数据中心弹窗 -->
+  <div id="dcOverlay" class="dc-overlay">
+    <div class="dc-modal">
+      <div class="dc-header">
+        <h2>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+          数据中心
+        </h2>
+        <div class="dc-header-actions">
+          <button class="dc-btn" onclick="_dcPanel.showCreatePanel()">＋ 新建采集任务</button>
+          <button class="dc-btn" onclick="_dcPanel.refresh()">↻ 刷新</button>
+        </div>
+      </div>
+      <div class="dc-tabs">
+        <button class="dc-tab" data-tab="dcBrowse">数据总览</button>
+        <button class="dc-tab active" data-tab="dcTasks">采集任务</button>
+        <button class="dc-tab" data-tab="dcOverview">数据概览</button>
+      </div>
+      <div class="dc-body">
+        <!-- Tab 0: 数据总览 -->
+        <div id="dcBrowse" class="dc-panel">
+          <div style="display:flex;gap:16px;height:100%;">
+            <!-- 左侧树 -->
+            <div id="dcBrowseTree" style="width:200px;min-width:200px;border-right:1px solid var(--border);padding:12px;overflow-y:auto;font-size:13px;"></div>
+            <!-- 右侧列表 -->
+            <div style="flex:1;overflow:auto;padding:12px;">
+              <div id="dcBrowseHeader" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 id="dcBrowseTitle" style="font-size:14px;font-weight:600;">选择左侧分类查看数据</h3>
+                <div id="dcBrowseActions"></div>
+              </div>
+              <div id="dcBrowseList"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 1: 采集任务 -->
+        <div id="dcTasks" class="dc-panel active">
+          <!-- 新建任务面板（默认隐藏） -->
+          <div id="dcCreatePanel" class="dc-create-panel" style="display:none;">
+            <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> 新建采集任务</h3>
+            <div class="dc-task-types">
+              <div class="dc-task-type selected" data-type="stock_list"><div class="icon">📋</div><div class="name">股票列表</div><div class="desc">采集全市场股票代码、名称、板块</div></div>
+              <div class="dc-task-type" data-type="daily_kline"><div class="icon">📈</div><div class="name">日K线数据</div><div class="desc">采集指定股票的历史日K线</div></div>
+              <div class="dc-task-type" data-type="index_kline"><div class="icon">📊</div><div class="name">指数日K线</div><div class="desc">采集主要指数（上证/深证/创业板）</div></div>
+              <div class="dc-task-type" data-type="adjust_factor"><div class="icon">🔧</div><div class="name">复权因子</div><div class="desc">采集前后复权因子，回测必须</div></div>
+              <div class="dc-task-type" data-type="board_list"><div class="icon">📊</div><div class="name">板块列表</div><div class="desc">采集行业板块和概念板块列表</div></div>
+              <div class="dc-task-type" data-type="board_kline"><div class="icon">📈</div><div class="name">板块K线</div><div class="desc">采集板块走势数据（同花顺）</div></div>
+              <div class="dc-task-type" data-type="board_member"><div class="icon">👥</div><div class="name">板块成分</div><div class="desc">采集各板块的成分股（需东财）</div></div>
+              <div class="dc-task-type" data-type="full_sync"><div class="icon">🔄</div><div class="name">全量同步</div><div class="desc">股票列表 + 日K线 + 指数（完整采集）</div></div>
+              <div class="dc-task-type" data-type="hithink_sync"><div class="icon">☁️</div><div class="name">同花顺灌库</div><div class="desc">同花顺官方快照灌库（可选 codes 灌历史K）</div></div>
+            </div>
+            <div id="dcKlineOptions" style="display:none;">
+              <div class="dc-form-row">
+                <div class="dc-form-group"><label>股票代码（逗号分隔，留空=全部）</label><input type="text" id="dcInputCodes" placeholder="600519,000858,002714"></div>
+                <div class="dc-form-group"><label>采集天数</label><input type="number" id="dcInputDays" value="500" min="30" max="2000"></div>
+              </div>
+            </div>
+            <div id="dcSourceOptions" style="display:none;">
+              <div class="dc-form-group">
+                <label>数据源</label>
+                <select id="dcInputSource"><option value="auto">自动（优先级切换）</option><option value="akshare">AkShare</option><option value="baostock">BaoStock</option><option value="mx_data">MX Data</option><option value="efinance">efinance</option><option value="sina">新浪</option></select>
+              </div>
+            </div>
+            <div id="dcBoardTypeOptions" style="display:none;">
+              <div class="dc-form-group">
+                <label>板块类型</label>
+                <select id="dcBoardType"><option value="all">全部（行业+概念）</option><option value="industry">仅行业板块</option><option value="concept">仅概念板块</option></select>
+              </div>
+            </div>
+            <div id="dcBoardOptions" style="display:none;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <label style="font-size:12px;font-weight:600;color:var(--text-secondary);">选择板块（留空=全部）</label>
+                <div style="display:flex;gap:8px;">
+                  <button class="dc-btn dc-btn-sm" onclick="_dcPanel.selectAllBoards()">全选</button>
+                  <button class="dc-btn dc-btn-sm" onclick="_dcPanel.deselectAllBoards()">清空</button>
+                </div>
+              </div>
+              <div id="dcBoardList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;display:flex;flex-wrap:wrap;gap:6px;">
+                <div style="color:var(--muted);font-size:12px;">加载中...</div>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="dcForceOverwrite" style="accent-color:var(--brand);">
+                强制全量覆盖（清除旧数据重新采集）
+              </label>
+              <div style="display:flex;gap:8px;">
+                <button class="dc-btn" onclick="_dcPanel.hideCreatePanel()">取消</button>
+                <button class="dc-btn dc-btn-primary" onclick="_dcPanel.createTask()">开始采集</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 任务列表 -->
+          <div class="dc-toolbar">
+            <div class="dc-toolbar-left"><input type="text" class="dc-search" placeholder="搜索任务..."></div>
+            <div class="dc-toolbar-right">
+              <select class="dc-btn" style="appearance:auto;"><option value="">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="paused">已暂停</option><option value="failed">失败</option></select>
+            </div>
+          </div>
+          <table class="dc-table">
+            <thead><tr><th>任务ID</th><th>类型</th><th>状态</th><th>进度</th><th>详情</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="dcTaskList"></tbody>
+          </table>
+          <!-- 任务详情面板 -->
+          <div id="dcTaskDetail" class="dc-task-detail">
+            <h3 style="display:flex;justify-content:space-between;align-items:center;">
+              <span>任务详情</span>
+              <button class="dc-btn dc-btn-sm" onclick="_dcPanel.closeDetail()">✕ 关闭</button>
+            </h3>
+            <div class="dc-task-info dc-task-info-grid"></div>
+            <h4 style="font-size:13px;margin-bottom:8px;">实时日志</h4>
+            <div class="dc-task-log"></div>
+          </div>
+        </div>
+
+        <!-- Tab 2: 数据概览 -->
+        <div id="dcOverview" class="dc-panel">
+          <div id="dcStats" class="dc-stats"></div>
+
+          <h3 style="font-size:15px;margin-bottom:16px;">数据库表概览</h3>
+          <div id="dcTableOverview"></div>
+
+          <h3 style="font-size:15px;margin:24px 0 16px;">增量采集状态</h3>
+          <div id="dcIncremental" style="background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;"></div>
+
+          <h3 style="font-size:15px;margin:24px 0 16px;">数据质量</h3>
+          <div id="dcQuality"></div>
+
+          <h3 style="font-size:15px;margin:24px 0 16px;">指数列表</h3>
+          <div id="dcIndices"></div>
+
+          <div class="dc-suggest">
+            <h4>💡 采集建议</h4>
+            <ul>
+              <li>• <strong>复权因子</strong>尚未采集，建议执行一次全量同步以支持复权计算</li>
+              <li>• <strong>日K线</strong>覆盖 500 天可满足大多数回测需求</li>
+              <li>• 建议每天收盘后执行增量同步，保持数据最新</li>
+              <li>• 回测功能依赖复权因子，建议优先采集</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 策略回测弹窗 -->
+  <div id="backtestOverlay" class="backtest-overlay">
+    <div class="backtest-modal">
+      <div class="bt-tabbar" id="btTabbar">
+        <div class="bt-tabbar-left">
+          <button class="bt-tabbar-btn active" id="btTabStrategy" type="button">策略回测</button>
+          <button class="bt-tabbar-btn" id="btTabSignalEval" type="button">AI 信号评测</button>
+        </div>
+        <div class="bt-tabbar-right">
+          <button class="bt-tabbar-btn" id="btMaximizeBtn" type="button" title="全屏">⛶</button>
+          <button class="bt-tabbar-btn" onclick="window._btPanel?.hide()" type="button" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="bt-left" id="btStrategyView">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h3 style="font-size:15px;font-weight:600;">策略回测</h3>
+          <button onclick="window._btPanel?.hide()" style="border:none;background:none;cursor:pointer;font-size:18px;color:var(--muted);">✕</button>
+        </div>
+
+        <!-- 选择策略 -->
+        <div class="bt-section">
+          <div class="bt-section-title">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            选择策略
+            <button id="btMultiModeBtn" class="bt-add-btn" title="多策略对比" aria-label="多策略对比" onclick="window._btPanel?.toggleMultiMode()" style="margin-left:8px;background:var(--panel);">多策略对比</button>
+            <button id="btAddStrategyBtn" class="bt-add-btn" title="新建策略" aria-label="新建策略">+ 新建</button>
+          </div>
+          <div id="btStrategyList"></div>
+          <!-- 策略编辑器（内联，默认隐藏） -->
+          <div id="btEditor" class="bt-editor" style="display:none">
+            <div class="bt-editor-header">
+              <span class="bt-editor-title" id="btEditorTitle">新建策略</span>
+              <div class="bt-editor-header-right">
+                <button class="bt-editor-btn bt-editor-btn-ai" id="btEditorAiBtn" onclick="window._btPanel?.toggleAiPrompt()" title="AI 生成策略">🤖 AI生成</button>
+                <button class="bt-editor-close" onclick="window._btPanel?.closeEditor()" aria-label="关闭编辑器">✕</button>
+              </div>
+            </div>
+            <!-- AI 自然语言生成 -->
+            <div id="btAiPrompt" class="bt-ai-zone" style="display:none">
+              <div class="bt-ai-title">🤖 用AI生成策略</div>
+              <div class="bt-ai-examples" id="btAiExamples">
+                <span class="bt-ai-example-tag" onclick="document.getElementById('btAiPromptInput').value='5日均线上穿20日均线买入，下穿卖出'">📈 双均线金叉</span>
+                <span class="bt-ai-example-tag" onclick="document.getElementById('btAiPromptInput').value='RSI低于30买入，高于70卖出'">📉 RSI超买超卖</span>
+                <span class="bt-ai-example-tag" onclick="document.getElementById('btAiPromptInput').value='MACD金叉买入且成交量放大'">💹 MACD量价配合</span>
+                <span class="bt-ai-example-tag" onclick="document.getElementById('btAiPromptInput').value='布林带突破上轨买入，跌破中轨止损'">📊 布林带突破</span>
+              </div>
+              <textarea id="btAiPromptInput" class="bt-ai-textarea" placeholder="描述你的策略逻辑，例如：5日均线上穿20日均线买入，下穿卖出..." spellcheck="false"></textarea>
+              <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="bt-ai-btn" id="btAiGenBtn" onclick="window._btPanel?.doAiGenerate()">🚀 生成策略</button>
+                <button class="bt-editor-btn bt-editor-btn-cancel" onclick="window._btPanel?.toggleAiPrompt()" style="padding:8px 18px; border-radius:var(--radius-md); font-size:12px; font-weight:600; cursor:pointer; transition:all 0.2s;">✕ 取消</button>
+              </div>
+              <div class="bt-ai-status" id="btAiStatus" style="display:none"></div>
+            </div>
+            <!-- 基本信息 -->
+            <div class="bt-form-row">
+              <div class="bt-form-group" style="flex:1"><label>策略 ID</label><input type="text" id="btEditorId" placeholder="my_strategy" pattern="[a-zA-Z0-9_]+"></div>
+              <div class="bt-form-group" style="flex:2"><label>策略名称</label><input type="text" id="btEditorName" placeholder="我的策略"></div>
+            </div>
+            <div class="bt-form-group"><label>策略描述</label><input type="text" id="btEditorDesc" placeholder="简单描述策略逻辑"></div>
+            <div class="bt-editor-error" id="btEditorError" style="display:none"></div>
+
+            <!-- 参数定义 -->
+            <div class="bt-builder-section">
+              <div class="bt-builder-label">参数定义 <span class="bt-builder-hint">（在条件中用 {参数名} 引用）</span></div>
+              <div id="btBuilderParams" class="bt-builder-params"></div>
+              <button class="bt-builder-add-param" onclick="window._btPanel?._builderAddParam()">+ 参数</button>
+            </div>
+
+            <!-- 买入条件 -->
+            <div class="bt-builder-section">
+              <div class="bt-builder-label">买入条件 <select id="btBuyLogic" class="bt-logic-select"><option value="AND">全部满足 (AND)</option><option value="OR">任一满足 (OR)</option></select></div>
+              <div id="btBuyRules" class="bt-builder-rules"></div>
+              <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('buy')">+ 添加买入规则</button>
+            </div>
+
+            <!-- 卖出条件 -->
+            <div class="bt-builder-section">
+              <div class="bt-builder-label">卖出条件 <select id="btSellLogic" class="bt-logic-select"><option value="AND">全部满足 (AND)</option><option value="OR">任一满足 (OR)</option></select></div>
+              <div id="btSellRules" class="bt-builder-rules"></div>
+              <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('sell')">+ 添加卖出规则</button>
+            </div>
+
+            <!-- 图表指标 -->
+            <div class="bt-builder-section">
+              <div class="bt-builder-label">K线叠加指标</div>
+              <div id="btChartIndicators" class="bt-builder-chart"></div>
+            </div>
+
+            <!-- JSON 预览 -->
+            <div class="bt-builder-section">
+              <div class="bt-collapse-header" onclick="this.classList.toggle('open'); document.getElementById('btJsonPreview').classList.toggle('open')">
+                <span class="bt-builder-label" style="margin:0">JSON 预览</span><span class="arrow">▶</span>
+              </div>
+              <div id="btJsonPreview" class="bt-collapse-body">
+                <textarea id="btEditorJson" class="bt-editor-json" readonly style="background:#f8fafc;color:var(--muted);min-height:120px;margin-top:8px" spellcheck="false"></textarea>
+              </div>
+            </div>
+
+            <div class="bt-editor-actions">
+              <button class="bt-editor-btn bt-editor-btn-insert" id="btEditorTemplateBtn">📋 从模板加载</button>
+              <div class="bt-editor-actions-right">
+                <button class="bt-editor-btn bt-editor-btn-cancel" onclick="window._btPanel?.closeEditor()">取消</button>
+                <button class="bt-editor-btn bt-editor-btn-save" id="btEditorSaveBtn">保存策略</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 策略参数 -->
+        <div class="bt-section">
+          <div class="bt-section-title">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            策略参数
+          </div>
+          <div id="btParams" class="bt-params"></div>
+        </div>
+
+        <!-- 标的选择 -->
+        <div class="bt-section">
+          <div class="bt-section-title">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            标的选择
+            <button id="btSaveTestSetBtn" class="bt-add-btn" title="把当前标的保存为常用测试集" aria-label="保存为测试集">💾 测试集</button>
+          </div>
+          <div class="bt-form-group">
+            <label>标的代码（支持多个，换行或逗号分隔）</label>
+            <textarea id="btInputCodes" rows="3" placeholder="600519&#10;000858, 510300&#10;board_industry_黄金">600519</textarea>
+            <div id="btChips" class="bt-chips-row"></div>
+            <div class="bt-form-hint">支持个股、ETF、板块代码；多个标的将进入批量对比模式</div>
+          </div>
+          <div class="bt-form-group">
+            <label>常用测试集</label>
+            <div class="bt-testset-row">
+              <select id="btTestSetSelect" onchange="window._btPanel?.loadTestSet(this.value)">
+                <option value="">— 选择测试集载入 —</option>
+              </select>
+              <button type="button" class="bt-add-btn" onclick="window._btPanel?.refreshTestSets()" title="刷新">↻</button>
+              <button type="button" class="bt-add-btn" onclick="window._btPanel?.manageTestSets()" title="管理测试集">⚙</button>
+            </div>
+          </div>
+          <div class="bt-form-row">
+            <div class="bt-form-group">
+              <label>资产类型（单标的时生效，多标的自动识别）</label>
+              <select id="btAssetType">
+                <option value="stock">个股</option>
+                <option value="etf">ETF</option>
+                <option value="index">指数</option>
+                <option value="board">板块指数</option>
+              </select>
+            </div>
+          </div>
+          <div class="bt-form-row">
+            <div class="bt-form-group"><label>开始日期</label><input type="date" id="btStartDate" value="2025-01-01"></div>
+            <div class="bt-form-group"><label>结束日期</label><input type="date" id="btEndDate" value="2026-06-01"></div>
+          </div>
+        </div>
+
+        <!-- 资金与仓位（非折叠） -->
+        <div class="bt-section">
+          <div class="bt-section-title">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+            资金与仓位
+          </div>
+          <div class="bt-form-row">
+            <div class="bt-form-group"><label>初始资金</label><input type="number" id="btCash" value="100000" step="10000"></div>
+            <div class="bt-form-group">
+              <label>仓位模式</label>
+              <select id="btPositionMode" onchange="window._btPanel?._togglePositionSize()"><option value="full">全仓</option><option value="percent">固定比例</option><option value="fixed">固定金额</option></select>
+            </div>
+          </div>
+          <div id="btPositionSizeRow" class="bt-form-group" style="display:none;">
+            <label id="btPositionSizeLabel">仓位比例</label>
+            <input type="number" id="btPositionSize" value="50" min="1" max="100">
+            <div class="bt-form-hint" id="btPositionSizeHint">每次使用可用资金的百分比</div>
+          </div>
+        </div>
+
+        <!-- 费用设置（折叠） -->
+        <div class="bt-section">
+          <div class="bt-collapse-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+            <div class="bt-section-title" style="margin-bottom:0;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              费用设置
+            </div>
+            <span class="arrow">▸</span>
+          </div>
+          <div class="bt-collapse-body">
+            <div class="bt-form-row">
+              <div class="bt-form-group"><label>佣金率</label><input type="number" id="btCommission" value="0.0003" step="0.0001" min="0"><div class="bt-form-hint">万三（0.03%）</div></div>
+              <div class="bt-form-group"><label>最低佣金</label><input type="number" id="btMinCommission" value="5" step="1" min="0"><div class="bt-form-hint">单笔最低 5 元</div></div>
+            </div>
+            <div class="bt-form-row">
+              <div class="bt-form-group"><label>印花税（卖出）</label><input type="number" id="btStampTax" value="0.0005" step="0.0001" min="0"><div class="bt-form-hint">万五（0.05%）</div></div>
+              <div class="bt-form-group"><label>过户费</label><input type="number" id="btTransferFee" value="0.00001" step="0.00001" min="0"><div class="bt-form-hint">沪市十万分之一</div></div>
+            </div>
+            <div class="bt-form-group"><label>滑点</label><input type="number" id="btSlippage" value="0.001" step="0.001" min="0"><div class="bt-form-hint">0.1% 滑点模拟</div></div>
+          </div>
+        </div>
+
+        <!-- A股规则（折叠） -->
+        <div class="bt-section">
+          <div class="bt-collapse-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+            <div class="bt-section-title" style="margin-bottom:0;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              A股规则
+            </div>
+            <span class="arrow">▸</span>
+          </div>
+          <div class="bt-collapse-body">
+            <div class="bt-switch-row">
+              <div><div class="label">T+1 交易</div><div class="hint">当天买入次日才能卖出</div></div>
+              <label class="bt-switch"><input type="checkbox" id="btTPlus1" checked><span class="slider"></span></label>
+            </div>
+            <div class="bt-switch-row">
+              <div><div class="label">最小交易单位 100 股</div><div class="hint">买入数量必须是 100 的整数倍</div></div>
+              <label class="bt-switch"><input type="checkbox" id="btLotSize100" checked><span class="slider"></span></label>
+            </div>
+            <div class="bt-switch-row">
+              <div><div class="label">涨跌停限制</div><div class="hint">涨停无法买入，跌停无法卖出</div></div>
+              <label class="bt-switch"><input type="checkbox" id="btLimitMove" checked><span class="slider"></span></label>
+            </div>
+            <div class="bt-form-group" style="margin-top:8px;">
+              <label>复权方式</label>
+              <select id="btAdjust"><option value="qfq">前复权（推荐）</option><option value="hfq">后复权</option><option value="none">不复权</option></select>
+            </div>
+          </div>
+        </div>
+
+        <!-- 止损止盈（折叠） -->
+        <div class="bt-section">
+          <div class="bt-collapse-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+            <div class="bt-section-title" style="margin-bottom:0;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              止损止盈
+            </div>
+            <span class="arrow">▸</span>
+          </div>
+          <div class="bt-collapse-body">
+            <div class="bt-form-row">
+              <div class="bt-form-group"><label>固定止损</label><input type="number" id="btStopLoss" value="8" min="0" max="100" step="1" placeholder="0=不启用"><div class="bt-form-hint">下跌 X% 止损</div></div>
+              <div class="bt-form-group"><label>固定止盈</label><input type="number" id="btTakeProfit" value="20" min="0" max="1000" step="1" placeholder="0=不启用"><div class="bt-form-hint">上涨 X% 止盈</div></div>
+            </div>
+            <div class="bt-form-group"><label>移动止损（从最高点回落）</label><input type="number" id="btTrailingStop" value="5" min="0" max="100" step="1" placeholder="0=不启用"><div class="bt-form-hint">从买入后最高点回落 X% 止损</div></div>
+          </div>
+        </div>
+
+        <button id="btRunBtn" class="bt-run-btn">▶ 开始回测</button>
+      </div>
+
+      <div class="bt-right">
+        <!-- 右侧 Tab -->
+        <div class="bt-tabs">
+          <button class="bt-tab active" data-btab="btResultPanel" onclick="window._btPanel?.switchTab(this)">回测结果</button>
+          <button class="bt-tab" data-btab="btBatchPanel" onclick="window._btPanel?.switchTab(this)">批量对比</button>
+          <button class="bt-tab" data-btab="btMultiPanel" onclick="window._btPanel?.switchTab(this)">多策略对比</button>
+          <button class="bt-tab" data-btab="btHistoryPanel" onclick="window._btPanel?.switchTab(this)">回测历史</button>
+          <button class="bt-tab" id="btRightTabSignalEval" style="color:var(--brand);font-weight:600;">AI 信号评测</button>
+        </div>
+
+        <!-- Tab 1: 回测结果 -->
+        <div id="btResultPanel" class="bt-tab-panel active">
+        <div id="btEmpty" class="bt-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+          <div class="title">配置策略并运行回测</div>
+          <div class="desc">在左侧面板选择策略、配置参数、输入股票代码，然后点击"开始回测"</div>
+        </div>
+
+        <div id="btRunning" class="bt-running">
+          <div class="bt-spinner"></div>
+          <div class="text">正在回测...</div>
+          <div id="btProgress" style="margin-top:12px;width:200px;">
+            <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+              <div id="btProgressBar" style="height:100%;background:var(--brand);border-radius:3px;width:0%;transition:width 0.3s;"></div>
+            </div>
+            <div id="btProgressText" style="font-size:11px;color:var(--text-secondary);margin-top:4px;text-align:center;">准备中...</div>
+          </div>
+        </div>
+
+        <div id="btResult" style="display:none;">
+          <div id="btResultHeader" class="result-header"></div>
+          <div id="btWarnings" style="display:none;"></div>
+          <div id="btMetrics" class="bt-metrics"></div>
+
+          <div class="bt-chart-box" id="btEquityChartBox">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <h3 style="margin:0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg> 净值曲线</h3>
+              <button class="bt-fullscreen-btn" onclick="window._btPanel?._toggleFullscreen('btEquityChartBox')" title="全屏">⛶</button>
+            </div>
+            <div id="btEquityChart" class="bt-chart"></div>
+          </div>
+          <div class="bt-chart-box" id="btKlineChartBox">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <h3 style="margin:0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg> 行情与交易（K线 + 买卖点）</h3>
+              <button class="bt-fullscreen-btn" onclick="window._btPanel?._toggleFullscreen('btKlineChartBox')" title="全屏">⛶</button>
+            </div>
+            <div id="btKlineChart" class="bt-chart" style="height:420px;"></div>
+          </div>
+          <div class="bt-chart-box" id="btDrawdownChartBox">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <h3 style="margin:0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M3 3v18h18"/><path d="M3 12h18"/><path d="M7 8l4 4 4-4 4 4"/></svg> 回撤曲线（水下曲线）</h3>
+              <button class="bt-fullscreen-btn" onclick="window._btPanel?._toggleFullscreen('btDrawdownChartBox')" title="全屏">⛶</button>
+            </div>
+            <div id="btDrawdownChart" class="bt-chart" style="height:180px;"></div>
+          </div>
+          <div class="bt-chart-box">
+            <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> 月度收益</h3>
+            <div id="btMonthlyHeatmap"></div>
+          </div>
+          <div class="bt-chart-box">
+            <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> 交易记录</h3>
+            <table class="trades-table">
+              <thead><tr><th>#</th><th>方向</th><th>日期</th><th>价格</th><th>数量</th><th>金额</th><th>手续费</th><th>盈亏</th><th>收益率</th></tr></thead>
+              <tbody id="btTradesBody"></tbody>
+            </table>
+          </div>
+        </div>
+        </div><!-- /btResultPanel -->
+
+        <!-- Tab 2: 批量对比 -->
+        <div id="btBatchPanel" class="bt-tab-panel">
+          <div id="btBatchEmpty" class="bt-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
+            <div class="title">批量对比回测</div>
+            <div class="desc">在左侧输入多个标的代码，系统会自动并发回测并对比净值曲线、买卖点和综合收益</div>
+          </div>
+          <div id="btBatchRunning" class="bt-running">
+            <div class="bt-spinner"></div>
+            <div class="text" id="btBatchRunningText">批量回测中...</div>
+            <div id="btBatchProgress" style="margin-top:12px;width:240px;">
+              <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+                <div id="btBatchProgressBar" style="height:100%;background:var(--brand);border-radius:3px;width:0%;transition:width 0.3s;"></div>
+              </div>
+              <div id="btBatchProgressText" style="font-size:11px;color:var(--text-secondary);margin-top:4px;text-align:center;">准备中...</div>
+            </div>
+          </div>
+          <div id="btBatchResult" style="display:none;">
+            <div id="btBatchHeader" class="result-header"></div>
+            <div id="btBatchSummary" class="bt-metrics"></div>
+            <div class="bt-chart-box" id="btBatchEquityChartBox">
+              <div class="bt-chart-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg> 净值对比（点击图例可隐藏/显示对应标的）</h3>
+                <div class="bt-chart-controls">
+                  <button class="bt-fullscreen-btn" onclick="window._btPanel?._toggleFullscreen('btBatchEquityChartBox')" title="全屏">⛶</button>
+                  <label class="bt-chart-toggle">
+                    <span class="bt-switch"><input type="checkbox" id="btBsToggle"><span class="slider"></span></span>
+                    <span>显示 B/S 标注</span>
+                  </label>
+                  <label class="bt-chart-toggle">
+                    <span class="bt-switch"><input type="checkbox" id="btAggregateToggle" checked><span class="slider"></span></span>
+                    <span>显示综合净值</span>
+                  </label>
+                </div>
+              </div>
+              <div id="btBatchEquityChart" class="bt-chart" style="height:420px;"></div>
+              <div class="bt-legend-hint">右上角 legend 可点击切换忽略标的 · 综合指标随 legend 实时重算</div>
+            </div>
+            <div class="bt-chart-box">
+              <div class="bt-items-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> 各标的明细</h3>
+                <span id="btBatchItemsActions"></span>
+              </div>
+              <table class="trades-table" style="width:100%;">
+                <thead><tr><th>标的</th><th>类型</th><th>状态</th><th>总收益</th><th>年化</th><th>夏普</th><th>最大回撤</th><th>胜率</th><th>交易数</th><th>操作</th></tr></thead>
+                <tbody id="btBatchItemsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div><!-- /btBatchPanel -->
+
+        <!-- Tab 3: 多策略对比 -->
+        <div id="btMultiPanel" class="bt-tab-panel">
+          <div id="btMultiEmpty" class="bt-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            <div class="title">多策略对比回测</div>
+            <div class="desc">选择多个策略和多个标的，系统会自动生成策略×标的对比矩阵，包括热力图、排名表和策略分览</div>
+          </div>
+          <div id="btMultiRunning" class="bt-running">
+            <div class="bt-spinner"></div>
+            <div class="text" id="btMultiRunningText">多策略回测中...</div>
+            <div id="btMultiProgress" style="margin-top:12px;width:240px;">
+              <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+                <div id="btMultiProgressBar" style="height:100%;background:var(--brand);border-radius:3px;width:0%;transition:width 0.3s;"></div>
+              </div>
+              <div id="btMultiProgressText" style="font-size:11px;color:var(--text-secondary);margin-top:4px;text-align:center;">准备中...</div>
+            </div>
+          </div>
+          <div id="btMultiResult" style="display:none;">
+            <!-- Hero Card -->
+            <div id="btMultiHero" class="bt-multi-hero"></div>
+            <!-- 着色切换 -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <h3 style="margin:0;">📊 策略 × 标的 热力图</h3>
+              <div class="bt-color-toggle" id="btMultiColorToggle">
+                <button class="active" data-mode="return">收益</button>
+                <button data-mode="sharpe">夏普</button>
+                <button data-mode="drawdown">最大回撤</button>
+              </div>
+            </div>
+            <div id="btMultiHeatmap" class="bt-chart" style="height:320px;margin-bottom:8px;"></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:16px;">点击热力图任意格子 → 跳转到对应策略 Tab + 高亮标的</div>
+            <!-- 综合排名表 -->
+            <div class="bt-chart-box">
+              <h3>📋 综合排名表（点击列头排序）</h3>
+              <table class="trades-table" style="width:100%;">
+                <thead>
+                  <tr>
+                    <th class="bt-sortable" data-sort="strategy">策略 <span class="sort-arrow">▾</span></th>
+                    <th class="bt-sortable" data-sort="code">标的</th>
+                    <th class="bt-sortable" data-sort="return">总收益</th>
+                    <th class="bt-sortable" data-sort="excess">超额收益</th>
+                    <th class="bt-sortable" data-sort="sharpe">夏普</th>
+                    <th class="bt-sortable" data-sort="drawdown">最大回撤</th>
+                    <th class="bt-sortable" data-sort="consecutive">最大连亏</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="btMultiRankingBody"></tbody>
+              </table>
+            </div>
+            <!-- 策略 Tab 切换 -->
+            <div class="bt-chart-box" style="margin-top:16px;">
+              <h3>📈 策略净值对比（分览）</h3>
+              <div class="bt-strategy-tabs" id="btMultiStrategyTabs"></div>
+              <div id="btMultiStrategyContent"></div>
+            </div>
+          </div>
+        </div><!-- /btMultiPanel -->
+
+        <div id="btHistoryPanel" class="bt-tab-panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <div style="font-size:14px;font-weight:600;">回测历史</div>
+            <div style="display:flex;gap:8px;">
+              <button onclick="window._btPanel?.loadHistory()" style="padding:6px 14px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);cursor:pointer;">↻ 刷新</button>
+              <button onclick="window._btPanel?.cleanFailed()" style="padding:6px 14px;font-size:12px;border:1px solid #dc2626;color:#dc2626;border-radius:var(--radius);background:var(--panel);cursor:pointer;" title="删除全部失败的运行记录">🗑 清理失败</button>
+            </div>
+          </div>
+          <div id="btCleanProgress" style="display:none;margin-bottom:12px;">
+            <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
+              <div class="progress-fill" style="height:100%;background:var(--brand);border-radius:2px;width:0%;transition:width 0.3s;"></div>
+            </div>
+            <div id="btCleanProgressText" style="font-size:10px;color:var(--muted);margin-top:2px;">准备中...</div>
+          </div>
+          <!-- 单股回测 -->
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;">📊 单股回测</div>
+          <table class="trades-table" style="width:100%;">
+            <thead>
+              <tr><th>运行ID</th><th>标的</th><th>策略</th><th>状态</th><th>收益率</th><th>夏普</th><th>最大回撤</th><th>交易次数</th><th>时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="btHistoryBody">
+              <tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px;">点击"刷新"加载历史记录</td></tr>
+            </tbody>
+          </table>
+          <div id="btHistoryPagination" style="margin-top:4px;text-align:center;"></div>
+          <!-- 批量回测 -->
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:20px 0 8px;">📦 批量回测</div>
+          <table class="trades-table" style="width:100%;">
+            <thead>
+              <tr><th>批次ID</th><th>策略</th><th>状态</th><th>平均收益</th><th>平均夏普</th><th>平均回撤</th><th>覆盖标的</th><th>时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="btBatchHistoryBody">
+              <tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px;">点击"刷新"加载历史记录</td></tr>
+            </tbody>
+          </table>
+          <div id="btBatchHistoryPagination" style="margin-top:4px;text-align:center;"></div>
+          <!-- 多策略对比历史 -->
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:20px 0 8px;">🔲 多策略对比</div>
+          <table class="trades-table" style="width:100%;">
+            <thead>
+              <tr><th>批次ID</th><th>策略数</th><th>标的数</th><th>状态</th><th>时间</th><th>耗时</th><th>操作</th></tr>
+            </thead>
+            <tbody id="btMultiHistoryBody">
+              <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px;">点击"刷新"加载历史记录</td></tr>
+            </tbody>
+          </table>
+          <div id="btMultiHistoryPagination" style="margin-top:4px;text-align:center;"></div>
+        </div>
+
+      </div>
+      <!-- AI 信号评测视图（子页签，全宽） -->
+      <div class="bt-signal-eval-full" id="btSignalEvalView" style="display:none;">
+        <div class="bt-signal-eval-loading">加载中...</div>
+      </div>
+    </div>
+    <!-- 测试集保存弹窗 -->
+    <div class="bt-modal-overlay" id="btSaveTestsetModal">
+      <div class="bt-modal">
+        <h3>💾 保存为常用测试集</h3>
+        <div class="bt-form-group">
+          <label>测试集名称 *</label>
+          <input type="text" id="btTestsetName" placeholder="如：白酒龙头 + ETF">
+        </div>
+        <div class="bt-form-group">
+          <label>描述（可选）</label>
+          <input type="text" id="btTestsetDesc" placeholder="简单描述用途">
+        </div>
+        <div class="bt-form-group">
+          <label>标签（逗号分隔）</label>
+          <input type="text" id="btTestsetTags" placeholder="如：白酒, ETF, 反转">
+        </div>
+        <div class="bt-form-group">
+          <label>当前代码（<span id="btModalChipsCount">0</span> 个）</label>
+          <div class="bt-chips-row" id="btModalChips"></div>
+        </div>
+        <div class="bt-modal-actions">
+          <button class="bt-modal-btn" onclick="document.getElementById('btSaveTestsetModal').classList.remove('visible')">取消</button>
+          <button class="bt-modal-btn primary" id="btTestsetSaveBtn">保存</button>
+        </div>
+      </div>
+    </div>
+    <!-- 测试集管理弹窗 -->
+    <div class="bt-modal-overlay" id="btManageTestsetModal">
+      <div class="bt-modal">
+        <h3>⚙ 管理常用测试集</h3>
+        <table class="bt-modal-table">
+          <thead>
+            <tr><th>名称</th><th>代码数</th><th>创建时间</th><th>操作</th></tr>
+          </thead>
+          <tbody id="btManageTestsetBody"></tbody>
+        </table>
+        <div class="bt-modal-actions">
+          <button class="bt-modal-btn" onclick="document.getElementById('btManageTestsetModal').classList.remove('visible')">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/static/js/group-chat.js?v=1"></script>
+  <script src="/static/js/chat-monitor.js?v=1"></script>
+  <script src="/static/js/eval-manager.js?v=6"></script>
+  <script src="/static/js/memory-manager.js?v=10"></script>
+  <script>
+    // 点击外部关闭更多工具下拉
+    document.addEventListener('click',function(e){
+      var dd=document.getElementById('moreToolsDropdown');
+      var btn=document.getElementById('moreToolsBtn');
+      if(!dd||!dd.classList.contains('open'))return;
+      if(!dd.contains(e.target)&&e.target!==btn&&!btn.contains(e.target)){
+        dd.classList.remove('open');
+        btn.classList.remove('open');
+      }
+    });
+    // 点击下拉项后自动关闭
+    (function(){
+      var dd=document.getElementById('moreToolsDropdown');
+      if(dd)dd.addEventListener('click',function(){
+        setTimeout(function(){dd.classList.remove('open');document.getElementById('moreToolsBtn').classList.remove('open');},100);
+      });
+    })();
+    // 示例问题 chip 点击填入输入框
+    document.getElementById('composerSuggestions').addEventListener('click',function(e){
+      var chip=e.target.closest('.suggestion-chip');
+      if(!chip)return;
+      var ta=document.getElementById('messageInput');
+      ta.value=chip.textContent.trim();
+      ta.focus();
+      ta.dispatchEvent(new Event('input',{bubbles:true}));
+    });
+  </script>
+  <script src="/static/js/app.js?v=36"></script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+{
+  "id": "etf_analysis",
+  "schema_version": "2.0",
+  "report_family": "etf_analysis",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "sector",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "ETF/基金/跨市场产品分析",
+  "version": "1.0",
+  "role": "你是一名 ETF 与跨市场基金产品分析师。你的任务是区分产品价格、净值、跟踪指数、成分股和跨市场因素，解释涨跌原因、溢价折价风险和可操作条件。所有判断必须基于结构化行情、净值/IOPV、跟踪指数和成分股数据，不能把关联公司或概念股误当成 ETF 成分股。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "technical_dimension",
+    "capital_dimension",
+    "theme_rotation",
+    "cross_synthesis",
+    "evidence_table",
+    "action_plan_compact",
+    "next_watch",
+    "user_profile_fit",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search",
+      "mx_xuangu"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "product_quote",
+      "description": "ETF/基金产品行情与成交活跃度",
+      "fields": [
+        "最新价",
+        "涨跌幅",
+        "成交额",
+        "换手率",
+        "基金净值",
+        "IOPV",
+        "溢价率",
+        "折价率"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "tracking_index",
+      "description": "跟踪指数表现及偏离情况",
+      "fields": [
+        "跟踪指数",
+        "指数涨跌幅",
+        "近5日涨跌幅",
+        "近20日涨跌幅",
+        "跟踪误差",
+        "指数估值"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "valuation"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "holdings_snapshot",
+      "description": "真实成分股/重仓股表现和权重",
+      "fields": [
+        "成分股名称",
+        "权重",
+        "涨跌幅",
+        "成交额",
+        "所属市场",
+        "贡献方向"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "cross_market_context",
+      "description": "跨市场影响因素",
+      "fields": [
+        "港股/美股表现",
+        "汇率",
+        "交易时段差异",
+        "QDII额度",
+        "申赎状态",
+        "重大新闻"
+      ],
+      "tool_capabilities": [
+        "news_search",
+        "market_data"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "capital_flow",
+      "description": "产品资金流和份额变化",
+      "fields": [
+        "资金净流入",
+        "份额变化",
+        "主力资金",
+        "套利资金",
+        "场内成交结构"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "product_quote",
+        "tracking_index"
+      ],
+      "rule": "ETF 场内价格涨跌必须和跟踪指数、净值/IOPV分开判断。若场内价格跌幅大于指数跌幅且溢价率回落，优先解释为溢价收敛或套利资金影响，而不是简单说指数走弱。"
+    },
+    {
+      "dimensions": [
+        "holdings_snapshot",
+        "cross_market_context"
+      ],
+      "rule": "跨市场 ETF 必须检查真实成分股及所属市场。不得用A股同名公司、供应商、股东或概念关联公司替代港股/美股成分股。"
+    },
+    {
+      "dimensions": [
+        "capital_flow",
+        "product_quote"
+      ],
+      "rule": "若成交额放大但份额下降，可能是赎回或套利资金撤出；若成交额放大且份额上升，才更接近资金主动流入。两者缺一时必须标注数据不足。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "必须区分 ETF 场内价格、基金净值/IOPV、跟踪指数和成分股表现，不能混为一个涨跌原因。",
+    "涉及港股、美股、QDII 或跨市场产品时，必须说明汇率、交易时段差异、申赎状态和溢价折价对价格的影响。",
+    "成分股分析必须使用真实成分股或重仓股；若工具返回的是A股概念股、股东或关联公司，必须标注为数据质量问题。",
+    "溢价/折价超过合理区间时，必须提示套利回归风险；没有净值或IOPV数据时，不得下溢价结论。",
+    "操作建议必须给出观察条件：跟踪指数企稳、溢价收敛、成交额/份额变化、关键成分股表现。",
+    "必须完整输出全部板块：核心结论/技术面/资金面/主线与轮动/综合研判/关键证据/行动方案/观察清单/投资者适配/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取 ETF/基金产品行情、净值、IOPV和溢价折价"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取跟踪指数、指数涨跌幅、估值和前十大成分股权重"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取跨市场、汇率、申赎状态和重大事件影响"
+    }
+  ],
+  "default_horizon": "mid",
+  "supported_horizons": []
+}

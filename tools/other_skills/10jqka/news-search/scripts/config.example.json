@@ -1,0 +1,25 @@
+{
+  "api": {
+    "base_url": "https://openapi.iwencai.com",
+    "endpoint": "/v1/comprehensive/search",
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 1.0
+  },
+  "search": {
+    "default_limit": 10,
+    "default_days": 30,
+    "min_articles_for_sufficient": 3
+  },
+  "output": {
+    "default_format": "text",
+    "csv_encoding": "utf-8-sig",
+    "json_indent": 2
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "注意": "API密钥应从环境变量 IWENCAI_API_KEY 获取，不要在此配置文件中硬编码",
+  "数据来源": "本技能所有数据均来源于同花顺问财财经资讯搜索接口，使用时请注明数据来源"
+}

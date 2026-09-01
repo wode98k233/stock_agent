@@ -1,0 +1,9 @@
+{
+  "id": "candidate_ranking",
+  "title": "候选标的排序",
+  "required": true,
+  "max_words": 650,
+  "prompt": "优先用 Markdown 排序表列出候选标的、排序依据、关键优势、主要短板、适合的投资者类型和排除理由。不能只给推荐名单，必须说明为什么入选和为什么不选其他标的；多标的时必须补充一张“保守/均衡/进攻”风格适配矩阵。",
+  "data_slots": ["trend", "pe_percentile"],
+  "core_slots": []
+}

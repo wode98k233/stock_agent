@@ -56,19 +56,34 @@ category: 数据处理
 
 ## 使用指南
 
-### 典型调用流程
-1. **批量选股流程**：stock_query(get_board_stocks) → technical_analysis(批量calc_technical_indicators) → aggregation(stocks_overview统计概览 → llm_filter_stocks按条件筛选)
-2. **个股综合报告**：收集单只股票的技术指标+行情+财务+新闻数据 → llm_build_report(生成多维度报告)
-3. **技术面深度解读**：calc_technical_indicators → llm_tech_interpret(生成专业分析文案)
+### 适用场景
+- 已经有多只股票的技术指标或综合数据，需要统计、筛选、排序。
+- 已经有单只股票多维数据，需要生成分析报告或技术指标解释。
+- 需要把多个工具的结果整理成更易读的结论。
 
-### 工具间依赖关系
-- **所有工具都依赖前置数据**：indicators_list_json 来自 technical_analysis 技能的 calc_technical_indicators 批量结果
-- stocks_overview 和 llm_filter_stocks 的输入是**多只股票的技术指标列表JSON**
-- llm_build_report 的输入是**单只股票的多维度数据**（技术+行情+财务+新闻）
-- llm_tech_interpret 的输入是**单只股票的技术指标JSON**
-- llm_rank_stocks 的输入是**股票数据列表JSON**，可以是技术指标也可以是综合数据
+### 不适用场景
+- 不负责直接获取行情、新闻、财务或历史K线。
+- 不适合拿空数据调用；必须先由其他技能产生 JSON 输入。
+- 不用于大股票池原始筛选；自然语言选股优先用 mx_xuangu_filter。
 
-### 注意事项
-- 传入的JSON字符串必须是原始工具返回值，不要手动构造
-- 批量分析时，如果股票数量超过20只，建议先用 stocks_overview 做概览统计，再用 llm_filter_stocks 筛选，避免LLM处理过多数据
-- llm_build_report 需要尽可能多的维度数据，数据越全报告质量越高
+### 必填参数
+- JSON 字符串参数必须来自前置工具的原始输出，不要手写半结构化文本。
+- `condition` 和 `sort_intent` 使用自然语言描述。
+- `top_n` 可选，默认 10。
+
+### 典型调用
+1. 批量技术筛选：`calc_technical_indicators` 多次调用 → `stocks_overview(indicators_list_json)` → `llm_filter_stocks(indicators_list_json, "MACD金叉且成交量放大")`
+2. 股票排序：准备股票数据列表JSON → `llm_rank_stocks(stock_data_list_json, "短线强势优先", 10)`
+3. 单股报告：收集行情、技术、估值、新闻数据 → `llm_build_report(stock_data_json)`
+
+### 输出形态
+- 统计、筛选、排序和报告工具均返回 dict/JSON。
+- LLM 工具可能返回自然语言字段和结构化字段混合的结果。
+
+### 失败 fallback
+- JSON 解析失败时，回到前置工具重新获取原始 JSON，不要手动拼接。
+- 输入股票过多时，先减少股票数或用 stocks_overview 做概览，再排序/筛选。
+
+### 不要重试条件
+- 参数不是合法 JSON 字符串时不要重复调用；先修正输入。
+- 前置数据为空时不要调用 aggregation，先补数据源或缩小范围。

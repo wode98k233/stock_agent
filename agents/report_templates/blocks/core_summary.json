@@ -1,0 +1,9 @@
+{
+  "id": "core_summary",
+  "title": "核心结论",
+  "required": true,
+  "max_words": 200,
+  "prompt": "第一句话直接回答用户最关心的问题，必须包含方向、时间框架和信号强度。第二句话说明最关键的证据组合。禁止用没有数据支撑的绝对判断。",
+  "data_slots": ["verdict", "signal_strength"],
+  "core_slots": []
+}

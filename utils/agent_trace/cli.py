@@ -234,9 +234,10 @@ def cmd_stats(args):
             if extra:
                 try:
                     d = json.loads(extra)
-                    tu = d.get("token_usage", {})
-                    inp = tu.get("prompt_tokens", 0) or 0
-                    out = tu.get("completion_tokens", 0) or 0
+                    from utils.token_usage import normalize_token_usage_dict
+                    tu = normalize_token_usage_dict(d.get("token_usage"))
+                    inp = tu["input_tokens"]
+                    out = tu["output_tokens"]
                     total_in += inp
                     total_out += out
                     mn = s["step_name"]
@@ -288,33 +289,176 @@ def cmd_export(args):
         print(f"数据库不存在: {db}")
         return
     run_id = args.run_id
-    with _conn(db) as c:
-        run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        if not run:
-            print(f"未找到 run: {run_id}")
-            return
-        steps = c.execute(
-            "SELECT * FROM steps WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
-        step_ids = [s["id"] for s in steps]
-        messages = {}
-        if step_ids:
-            placeholders = ",".join("?" * len(step_ids))
-            for m in c.execute(
-                f"SELECT * FROM messages WHERE step_id IN ({placeholders}) ORDER BY id",
-                step_ids,
-            ).fetchall():
-                messages.setdefault(m["step_id"], []).append(dict(m))
+    from utils.agent_trace.migrate import TraceExporter
+    exporter = TraceExporter(db)
+    try:
+        out = exporter.export_run(run_id, output_path=args.output or None, db_path=db)
+        print(f"已导出: {out}")
+    except ValueError as e:
+        print(str(e))
 
-    data = {
-        "run": dict(run),
-        "steps": [dict(s) for s in steps],
-        "messages": messages,
-    }
-    out = args.output or f"trace_{run_id[:8]}.json"
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    print(f"已导出: {out}")
+
+def cmd_import(args):
+    db = _db_path(args)
+    from utils.agent_trace.migrate import TraceImporter
+    importer = TraceImporter(db)
+    strategy = args.strategy or "skip"
+    json_path = args.json_path
+    if Path(json_path).is_dir():
+        result = importer.import_batch(json_path, strategy, db_path=db)
+        print(f"导入完成: {result['imported']} 成功, {result['skipped']} 跳过, {result['errors']} 失败")
+    else:
+        try:
+            ok = importer.import_run(json_path, strategy, db_path=db)
+            print(f"{'导入成功' if ok else '跳过(已存在)'}: {json_path}")
+        except ValueError as e:
+            print(f"导入失败: {e}")
+
+
+def cmd_calendar(args):
+    """按日期分组展示 run 的 token 统计和耗时。"""
+    db = _db_path(args)
+    if not Path(db).exists():
+        print(f"数据库不存在: {db}")
+        return
+    n = args.n or 30
+    year = getattr(args, "year", None)
+    month = getattr(args, "month", None)
+
+    with _conn(db) as c:
+        # 构造查询条件
+        where_parts = []
+        params: list = []
+        if year:
+            prefix = f"{year}-"
+            if month:
+                prefix = f"{year}-{month:02d}-"
+            where_parts.append("r.created_at LIKE ?")
+            params.append(f"{prefix}%")
+
+        where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        rows = c.execute(
+            f"SELECT r.id, r.agent_name, r.status, r.created_at, r.duration_ms "
+            f"FROM runs r{where_sql} ORDER BY r.created_at DESC",
+            params,
+        ).fetchall()
+
+        if not rows:
+            print("无记录")
+            return
+
+        # 按日期分组
+        from collections import OrderedDict
+        days: OrderedDict[str, list] = OrderedDict()
+        for r in rows:
+            created = r["created_at"] or ""
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created)
+                day_str = dt.strftime("%Y-%m-%d")
+            except Exception:
+                day_str = created[:10]
+            days.setdefault(day_str, []).append(dict(r))
+
+        # 限制天数
+        day_keys = list(days.keys())[:n]
+
+        # 查询所有相关 run 的 token 统计
+        all_run_ids = []
+        for dk in day_keys:
+            for r in days[dk]:
+                all_run_ids.append(r["id"])
+
+        token_map: dict = {}
+        if all_run_ids:
+            placeholders = ",".join("?" * len(all_run_ids))
+            steps = c.execute(
+                f"SELECT run_id, extra FROM steps "
+                f"WHERE run_id IN ({placeholders}) AND step_type='llm'",
+                all_run_ids,
+            ).fetchall()
+
+            from utils.token_usage import normalize_token_usage_dict
+            for s in steps:
+                rid = s["run_id"]
+                extra_str = s["extra"]
+                if not extra_str:
+                    continue
+                try:
+                    d = json.loads(extra_str)
+                    tu = normalize_token_usage_dict(d.get("token_usage"))
+                    if rid not in token_map:
+                        token_map[rid] = {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                    token_map[rid]["llm_calls"] += 1
+                    token_map[rid]["input_tokens"] += tu["input_tokens"]
+                    token_map[rid]["output_tokens"] += tu["output_tokens"]
+                    token_map[rid]["total_tokens"] += tu["total_tokens"]
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+
+    # 输出
+    print(f"📅 Trace Calendar (最近 {len(day_keys)} 天)")
+    print(f"{'═'*80}")
+
+    for dk in day_keys:
+        runs = days[dk]
+        total = len(runs)
+        ok = sum(1 for r in runs if r["status"] == "success")
+        err = sum(1 for r in runs if r["status"] == "error")
+
+        day_in = 0
+        day_out = 0
+        day_total = 0
+        day_calls = 0
+        durations = []
+        for r in runs:
+            tm = token_map.get(r["id"], {})
+            day_in += tm.get("input_tokens", 0)
+            day_out += tm.get("output_tokens", 0)
+            day_total += tm.get("total_tokens", 0)
+            day_calls += tm.get("llm_calls", 0)
+            if r.get("duration_ms"):
+                durations.append(r["duration_ms"])
+
+        avg_d = sum(durations) / len(durations) if durations else 0
+        status_str = f"✅{ok}"
+        if err:
+            status_str += f" ❌{err}"
+
+        token_str = ""
+        if day_total > 0:
+            token_str = f"  🔤 {day_in:,} in / {day_out:,} out / {day_total:,} total ({day_calls} calls)"
+
+        dur_str = ""
+        if avg_d > 0:
+            dur_str = f"  ⏱ avg {avg_d/1000:.1f}s"
+
+        print(f"\n  📆 {dk}  │ {total} runs │ {status_str}{token_str}{dur_str}")
+
+        # 展示每条 run
+        for r in runs:
+            icon = {"success": "✅", "error": "❌", "running": "⏳"}.get(r["status"], "?")
+            ms = f"{r['duration_ms']/1000:.1f}s" if r.get("duration_ms") else "—"
+            tm = token_map.get(r["id"], {})
+            tok = f"{tm.get('total_tokens', 0):,} tok" if tm.get("total_tokens") else ""
+            agent = r["agent_name"][:20]
+            rid = r["id"][:8]
+            print(f"    {icon} {rid}  {agent:<20} {ms:<8} {tok}")
+
+
+def cmd_calendar_json(args) -> dict:
+    """返回日历统计的 JSON 数据（供 API 使用）。"""
+    db = _db_path(args)
+    if not Path(db).exists():
+        return {"year": None, "month": None, "run_days": {}}
+
+    year = getattr(args, "year", None)
+    month = getattr(args, "month", None)
+
+    from utils.agent_trace.calendar_query import query_trace_calendar
+    with _conn(db) as c:
+        return query_trace_calendar(c, year, month)
 
 
 def main():
@@ -347,6 +491,16 @@ def main():
     p_export.add_argument("run_id", help="Run ID")
     p_export.add_argument("-o", "--output", default="", help="输出文件路径")
 
+    p_import = sub.add_parser("import", help="导入 trace JSON")
+    p_import.add_argument("json_path", help="JSON 文件路径或目录")
+    p_import.add_argument("--strategy", default="skip", choices=["skip", "replace", "error"],
+                          help="冲突处理策略 (默认: skip)")
+
+    p_cal = sub.add_parser("calendar", help="按日期查看 token 统计")
+    p_cal.add_argument("-n", type=int, default=30, help="显示天数")
+    p_cal.add_argument("--year", type=int, default=None, help="过滤年份")
+    p_cal.add_argument("--month", type=int, default=None, help="过滤月份")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -359,6 +513,8 @@ def main():
         "stats": cmd_stats,
         "search": cmd_search,
         "export": cmd_export,
+        "import": cmd_import,
+        "calendar": cmd_calendar,
     }
     fn = cmds.get(args.command)
     if fn:

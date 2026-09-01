@@ -13,14 +13,18 @@ import os
 import sys
 import json
 import logging
+
+from config import Config
 import importlib.util
 import yaml
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from utils.app_paths import get_external_skills_dir
+
 logger = logging.getLogger("radar.eastmoney")
 
-EASTMONEY_SKILLS_ROOT = os.path.dirname(__file__)
+EASTMONEY_SKILLS_ROOT = os.path.join(get_external_skills_dir(), "eastmoney")
 
 _eastmoney_skill_meta = {}
 _eastmoney_skill_loaders = {}
@@ -68,10 +72,20 @@ def _mx_data_query_core(query: str) -> str:
         if err:
             return json.dumps({"query": query, "error": err, "status": "failed"}, ensure_ascii=False)
         terminal_output = mx.format_terminal(result, tables, total_rows)
+        structured_tables = [
+            {
+                "sheet_name": table.get("sheet_name", ""),
+                "fieldnames": table.get("fieldnames", []),
+                "rows": table.get("rows", [])[:20],
+            }
+            for table in tables
+            if isinstance(table, dict)
+        ]
         return json.dumps({
             "query": query,
             "tables_count": len(tables),
             "total_rows": total_rows,
+            "tables": structured_tables,
             "terminal_output": terminal_output,
         }, ensure_ascii=False)
     except Exception as e:
@@ -130,121 +144,17 @@ def _mx_xuangu_filter_core(query: str) -> str:
 
 
 def _mx_moni_operation_core(query: str) -> str:
-    try:
-        import requests
-        MX_APIKEY = os.environ.get('MX_APIKEY')
-        MX_API_URL = os.environ.get('MX_API_URL', 'https://mkapi2.dfcfs.com/finskillshub')
-        if not MX_APIKEY:
-            return json.dumps({"error": "MX_APIKEY 未配置"}, ensure_ascii=False)
-        headers = {'apikey': MX_APIKEY, 'Content-Type': 'application/json'}
-        endpoint = None
-        body = {}
-        import re
-        if any(word in query for word in ['持仓', '我的持仓', '持仓情况']):
-            endpoint = '/api/claw/mockTrading/positions'
-            body = {'moneyUnit': 1}
-        elif any(word in query for word in ['资金', '我的资金', '账户余额', '资金情况']):
-            endpoint = '/api/claw/mockTrading/balance'
-            body = {'moneyUnit': 1}
-        elif any(word in query for word in ['委托', '我的委托', '订单', '委托记录']):
-            endpoint = '/api/claw/mockTrading/orders'
-            body = {'fltOrderDrt': 0, 'fltOrderStatus': 0}
-        elif any(word in query for word in ['买入', '买进', '建仓']):
-            code_match = re.search(r'(\d{6})', query)
-            if not code_match:
-                return json.dumps({"error": "无法解析股票代码"}, ensure_ascii=False)
-            stock_code = code_match.group(1)
-            quantity_match = re.search(r'(\d+)\s*(股|手)', query)
-            quantity = None
-            if quantity_match:
-                qty = int(quantity_match.group(1))
-                if quantity_match.group(2) == '手':
-                    qty = qty * 100
-                quantity = qty
-            if not quantity:
-                return json.dumps({"error": "无法解析委托数量"}, ensure_ascii=False)
-            is_market = any(word in query for word in ['市价', '市价买入', '现价买入'])
-            price = None
-            if not is_market:
-                price_candidates = re.findall(r'\d+\.?\d*', query)
-                for candidate in price_candidates:
-                    if len(candidate) != 6:
-                        price = float(candidate)
-                        break
-            endpoint = '/api/claw/mockTrading/trade'
-            body = {'type': 'buy', 'stockCode': stock_code, 'quantity': quantity, 'useMarketPrice': is_market}
-            if not is_market and price:
-                body['price'] = price
-        elif any(word in query for word in ['卖出', '抛售', '减仓']):
-            code_match = re.search(r'(\d{6})', query)
-            if not code_match:
-                return json.dumps({"error": "无法解析股票代码"}, ensure_ascii=False)
-            stock_code = code_match.group(1)
-            quantity_match = re.search(r'(\d+)\s*(股|手)', query)
-            quantity = None
-            if quantity_match:
-                qty = int(quantity_match.group(1))
-                if quantity_match.group(2) == '手':
-                    qty = qty * 100
-                quantity = qty
-            if not quantity:
-                return json.dumps({"error": "无法解析委托数量"}, ensure_ascii=False)
-            is_market = any(word in query for word in ['市价', '市价卖出', '现价卖出'])
-            price = None
-            if not is_market:
-                price_candidates = re.findall(r'\d+\.?\d*', query)
-                for candidate in price_candidates:
-                    if len(candidate) != 6:
-                        price = float(candidate)
-                        break
-            endpoint = '/api/claw/mockTrading/trade'
-            body = {'type': 'sell', 'stockCode': stock_code, 'quantity': quantity, 'useMarketPrice': is_market}
-            if not is_market and price:
-                body['price'] = price
-        elif any(word in query for word in ['撤单', '撤销']):
-            if any(word in query for word in ['全部', '所有', '一键撤单']):
-                endpoint = '/api/claw/mockTrading/cancel'
-                body = {'type': 'all'}
-            else:
-                order_id_match = re.search(r'(\d{16,20})', query)
-                order_id = order_id_match.group(1) if order_id_match else None
-                if not order_id:
-                    return json.dumps({"error": "请提供委托编号"}, ensure_ascii=False)
-                endpoint = '/api/claw/mockTrading/cancel'
-                body = {'type': 'order', 'orderId': order_id}
-        else:
-            return json.dumps({"error": "无法识别意图"}, ensure_ascii=False)
-        full_url = MX_API_URL + endpoint
-        response = requests.post(full_url, headers=headers, json=body, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        return json.dumps({"query": query, "result": result}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"query": query, "error": str(e), "status": "failed"}, ensure_ascii=False)
+    """模拟组合操作 — 委托 mx_moni 子模块实现"""
+    from .mx_moni.mx_moni import execute_operation
+    result = execute_operation(query)
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _mx_zixuan_manage_core(query: str) -> str:
-    try:
-        import requests
-        MX_APIKEY = os.environ.get('MX_APIKEY')
-        if not MX_APIKEY:
-            return json.dumps({"error": "MX_APIKEY 未配置"}, ensure_ascii=False)
-        headers = {'Content-Type': 'application/json', 'apikey': MX_APIKEY}
-        if any(keyword in query for keyword in ["查询", "列表", "我的自选", "有哪些"]):
-            url = "https://mkapi2.dfcfs.com/finskillshub/api/claw/self-select/get"
-            response = requests.post(url, headers=headers, json={}, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return json.dumps({"query": query, "action": "query", "result": result}, ensure_ascii=False)
-        else:
-            url = "https://mkapi2.dfcfs.com/finskillshub/api/claw/self-select/manage"
-            data = {"query": query}
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return json.dumps({"query": query, "action": "manage", "result": result}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"query": query, "error": str(e), "status": "failed"}, ensure_ascii=False)
+    """自选股管理 — 委托 mx_zixuan 子模块实现"""
+    from .mx_zixuan.mx_zixuan import execute_zixuan_operation
+    result = execute_zixuan_operation(query)
+    return json.dumps(result, ensure_ascii=False)
 
 
 TOOL_REGISTRY = {
@@ -253,6 +163,14 @@ TOOL_REGISTRY = {
     "mx_xuangu_filter": (_mx_xuangu_filter_core, MXXuanguFilterParams),
     "mx_moni_operation": (_mx_moni_operation_core, MXMoniOperationParams),
     "mx_zixuan_manage": (_mx_zixuan_manage_core, MXZixuanManageParams),
+}
+
+TOOL_DESC_MAP = {
+    "mx_data_query": "妙想金融数据查询：查询行情、财务、关联关系等金融数据。输入自然语言查询。",
+    "mx_search_news": "妙想资讯搜索：搜索金融相关资讯（新闻、研报、公告等）。输入自然语言查询。",
+    "mx_xuangu_filter": "妙想智能选股：根据自然语言条件筛选股票。输入自然语言选股条件。",
+    "mx_moni_operation": "妙想模拟组合管理：查询持仓、买卖操作、撤单、委托查询等。输入自然语言指令。",
+    "mx_zixuan_manage": "妙想自选股管理：查询、添加、删除自选股。输入自然语言指令。",
 }
 
 
@@ -277,7 +195,6 @@ def _load_eastmoney_single_skill(skill_dir):
             meta = {"name": skill_name, "description": ""}
             content = md_content
         actual_skill_name = meta.get("name", skill_name).replace("-", "_")
-        actual_skill_name = actual_skill_name.replace("-", "_")
 
         tool_name_map = {
             "mx_data": "mx_data_query",
@@ -291,37 +208,19 @@ def _load_eastmoney_single_skill(skill_dir):
             tools = []
             tool_name = tool_name_map.get(actual_skill_name)
             if tool_name and tool_name in TOOL_REGISTRY:
-                core_func, param_model = TOOL_REGISTRY[tool_name]
-                if tool_name == "mx_data_query":
-                    @tool
-                    def mx_data_query(query):
-                        """妙想金融数据查询：查询行情、财务、关联关系等金融数据。输入自然语言查询。"""
-                        return core_func(query)
-                    tools.append(mx_data_query)
-                elif tool_name == "mx_search_news":
-                    @tool
-                    def mx_search_news(query):
-                        """妙想资讯搜索：搜索金融相关资讯（新闻、研报、公告等）。输入自然语言查询。"""
-                        return core_func(query)
-                    tools.append(mx_search_news)
-                elif tool_name == "mx_xuangu_filter":
-                    @tool
-                    def mx_xuangu_filter(query):
-                        """妙想智能选股：根据自然语言条件筛选股票。输入自然语言选股条件。"""
-                        return core_func(query)
-                    tools.append(mx_xuangu_filter)
-                elif tool_name == "mx_moni_operation":
-                    @tool
-                    def mx_moni_operation(query):
-                        """妙想模拟组合管理：查询持仓、买卖操作、撤单、委托查询等。输入自然语言指令。"""
-                        return core_func(query)
-                    tools.append(mx_moni_operation)
-                elif tool_name == "mx_zixuan_manage":
-                    @tool
-                    def mx_zixuan_manage(query):
-                        """妙想自选股管理：查询、添加、删除自选股。输入自然语言指令。"""
-                        return core_func(query)
-                    tools.append(mx_zixuan_manage)
+                core_func, _ = TOOL_REGISTRY[tool_name]
+                desc = TOOL_DESC_MAP.get(tool_name, f"调用 {tool_name}")
+
+                def _make_wrapper(fn, name):
+                    def wrapper(query: str) -> str:
+                        return fn(query)
+                    wrapper.__name__ = name
+                    wrapper.__qualname__ = name
+                    return wrapper
+
+                named_func = _make_wrapper(core_func, tool_name)
+                t = tool(description=desc)(named_func)
+                tools.append(t)
             return tools
 
         _eastmoney_skill_meta[actual_skill_name] = meta
@@ -379,7 +278,7 @@ def get_skill_loaders():
 
 def build_all_tools(logger_obj, memory_mgr):
     tools = []
-    if not os.getenv("MX_APIKEY"):
+    if not Config.MX_APIKEY:
         logger_obj.warning("MX_APIKEY 未配置，东方财富 Skills 不可用")
         return tools
     for skill_name, loader in _eastmoney_skill_loaders.items():

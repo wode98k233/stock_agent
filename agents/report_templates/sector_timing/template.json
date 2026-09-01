@@ -1,0 +1,148 @@
+{
+  "id": "sector_timing",
+  "schema_version": "2.0",
+  "report_family": "sector_timing",
+  "asset_type": "sector",
+  "intent_type": "timing",
+  "dashboard_type": "sector",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "板块择时",
+  "version": "1.0",
+  "role": "你是一名 A 股板块择时分析师。你的任务不是写泛泛研报，而是回答用户现在能不能追高、等什么条件再介入。所有判断必须有结构化数据支撑，新闻只能用于消息面，不能替代技术指标或资金流。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow",
+    "technical_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "position_judgment",
+    "sector_purity",
+    "technical_dimension",
+    "sentiment_dimension",
+    "capital_dimension",
+    "fundamental_dimension",
+    "theme_rotation",
+    "key_debates",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "evidence_table"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_xuangu",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "sector_representatives",
+      "description": "至少 3 只板块代表股，包含价格、涨跌幅、成交额、换手率、量比、PE/PB",
+      "fields": [
+        "最新价",
+        "涨跌幅",
+        "成交额",
+        "换手率",
+        "量比",
+        "PE",
+        "PB"
+      ],
+      "tool_capabilities": [
+        "stock_screening"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "technical_snapshot",
+      "description": "代表股技术位置，优先通过 mx_data_query 查询，失败时再考虑内部技术分析工具",
+      "fields": [
+        "MA5",
+        "MA10",
+        "MA20",
+        "MA60",
+        "MACD",
+        "RSI",
+        "KDJ",
+        "近期高低点"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "capital_flow",
+      "description": "板块和代表股资金流向，必须是结构化资金数据",
+      "fields": [
+        "主力净流入",
+        "超大单",
+        "大单",
+        "北向资金",
+        "融资融券"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "news_context",
+      "description": "近期驱动事件和风险提示",
+      "fields": [
+        "新闻标题",
+        "日期",
+        "来源",
+        "利好/利空"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": true
+    }
+  ],
+  "qa_rules": [
+    "如果未获取到结构化 MACD/RSI/均线，不得判断技术面金叉或超买，只能标注数据缺失。",
+    "如果资金面只有新闻描述，不得写主力资金结论，只能写新闻提及。",
+    "操作建议必须包含价位、确认信号和失效条件。"
+  ],
+  "analysis_framework": {
+    "summary": "分析顺序：先判断板块所处阶段（启动/主升/分化/退潮）→ 识别龙头与跟风 → 用资金和量能验证阶段 → 输出条件化介入方案（现在能不能追、等什么条件再介入）。",
+    "rules": [
+      "阶段识别（第一优先）：启动=首批个股异动放量、涨停家数开始出现；主升=龙头连板、跟风股增多、板块成交额占比上升；分化=涨跌互现、资金分歧、龙头炸板；退潮=集体回落、龙头补跌。不同阶段操作完全不同：主升期可参与，退潮期一律回避。",
+      "龙头辨识：最先启动、涨幅或连板最高、成交额居前、机构聚焦的个股为龙头。操作只做龙头，跟风股/补涨股不重仓。",
+      "介入条件（回答'现在能不能追'）：主升期龙头回踩5日/10日线不破+板块成交额持续放大+主力净流入为正，可参与回调机会；板块累计涨幅已大（>30%）时追高需严格控仓。",
+      "止盈止损：龙头跌破10日线或板块指数跌破前低=阶段判断失效，离场；从介入价亏损超8%止损，禁止扛单。",
+      "资金验证：板块主力净流入持续为正验证主升；主力连续流出+涨停家数骤降=退潮前兆，必须提示。",
+      "消息面：政策/业绩驱动的板块持续性优于纯情绪炒作；消息无法验证的板块异动按投机处理，提示快进快出风险。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_xuangu",
+      "purpose": "获取板块代表股和基础行情"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取代表股技术指标、资金流和关键行情字段"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取板块最新新闻和风险提示"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding",
+    "trading_discipline"
+  ],
+  "default_horizon": "mid",
+  "supported_horizons": []
+}

@@ -1,10 +1,14 @@
 import json
+import logging
 import threading
 import time
 import sqlite3
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -22,25 +26,39 @@ from utils.agent_trace.models import (
     _pick_name,
 )
 
+# 全局 ContextVar：AgentRunContext 设置后，所有 LLM 调用自动 trace
+_active_recorder: ContextVar[Optional["TraceRecorder"]] = ContextVar(
+    "active_trace_recorder", default=None
+)
+
 
 class TraceRecorder(BaseCallbackHandler):
     name = "TraceRecorder"
     raise_error = False
 
-    def __init__(self, agent_name: str = "unknown", db_path: str = "agent_trace.db"):
+    def __init__(self, agent_name: str = "unknown", db_path: str = "agent_trace.db",
+                 db_adapter=None):
         super().__init__()
         self.agent_name = agent_name
-        self._db = Path(db_path)
-        self._ddl_ran: bool = False
-        if str(self._db) != ":memory:":
-            _ensure_db(self._db)
-            self._ddl_ran = True
         self._root: Optional[str] = None
         self._run_created: bool = False
         self._sid: Dict[str, int] = {}
         self._t: Dict[str, float] = {}
         self._lock = threading.RLock()
+        self._recent_llm_events: Dict[str, float] = {}
+        self._dedup_window_ms = 100
+
+        self._db = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
+        self._db_adapter = db_adapter
+
+        if db_adapter is not None:
+            self._ddl_ran = True
+        else:
+            self._ddl_ran: bool = False
+            if str(self._db) != ":memory:":
+                _ensure_db(self._db)
+                self._ddl_ran = True
 
     def _get_conn(self):
         if self._conn is None:
@@ -105,6 +123,7 @@ class TraceRecorder(BaseCallbackHandler):
     def start_run(self, task_input="") -> str:
         self._root = str(uuid4())
         self._run_created = True
+        self._run_t0 = time.perf_counter()
         with self._lock:
             c = self._get_conn()
             c.execute(
@@ -118,21 +137,74 @@ class TraceRecorder(BaseCallbackHandler):
     def end_run(self, output="", status="success", error=""):
         if not self._root:
             return
+        duration_ms = None
+        if hasattr(self, '_run_t0') and self._run_t0:
+            duration_ms = round((time.perf_counter() - self._run_t0) * 1000, 2)
         with self._lock:
             c = self._get_conn()
             c.execute(
-                "UPDATE runs SET output=?,status=?,error=?,finished_at=? "
+                "UPDATE runs SET output=?,status=?,error=?,finished_at=?,duration_ms=? "
                 "WHERE id=?",
-                (_json(output), status, error, _now(), self._root),
+                (_json(output), status, error, _now(), duration_ms, self._root),
             )
             c.commit()
+
+    def get_run_totals(self, run_id: str | None = None) -> dict:
+        """从 SQLite steps 表聚合当前 run 的 LLM token 与调用次数。"""
+        rid = run_id or self._root
+        if not rid:
+            return {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                    "cached_tokens": 0, "cache_hit_ratio": 0.0}
+        try:
+            from utils.token_usage import normalize_token_usage_dict
+            with self._lock:
+                c = self._get_conn()
+                rows = c.execute(
+                    "SELECT extra FROM steps WHERE run_id=? AND step_type='llm'",
+                    (rid,),
+                ).fetchall()
+            llm_calls = 0
+            input_tokens = 0
+            output_tokens = 0
+            total_tokens = 0
+            cached_tokens = 0
+            for row in rows:
+                extra_str = row["extra"] if hasattr(row, "__getitem__") else row[0]
+                if not extra_str:
+                    continue
+                try:
+                    extra = json.loads(extra_str)
+                    tu = normalize_token_usage_dict(extra.get("token_usage"))
+                    llm_calls += 1
+                    input_tokens += tu["input_tokens"]
+                    output_tokens += tu["output_tokens"]
+                    total_tokens += tu["total_tokens"]
+                    cached_tokens += tu.get("cached_tokens", 0)
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+            hit_ratio = round(cached_tokens / input_tokens, 4) if input_tokens > 0 else 0.0
+            return {
+                "llm_calls": llm_calls,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
+                "cache_hit_ratio": hit_ratio,
+            }
+        except Exception as e:
+            logger.warning("[TraceRecorder] get_run_totals error: %s", e)
+            return {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                    "cached_tokens": 0, "cache_hit_ratio": 0.0}
 
     def close(self):
         self._t.clear()
         self._sid.clear()
+        self._recent_llm_events.clear()
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+        if hasattr(self, '_db_adapter') and self._db_adapter is not None:
+            self._db_adapter.close()
 
     @_guard
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kw):
@@ -172,6 +244,22 @@ class TraceRecorder(BaseCallbackHandler):
     def _llm_start(self, serialized, run_id, parent_run_id, raw_input, **kw):
         rid = str(run_id)
         prid = str(parent_run_id) if parent_run_id else None
+
+        # 短窗口幂等防御
+        dedup_key = f"{rid}:llm_start"
+        now = time.perf_counter()
+        last = self._recent_llm_events.get(dedup_key)
+        if last is not None and (now - last) * 1000 < self._dedup_window_ms:
+            logger.warning("[TraceRecorder] 重复 llm_start 被跳过: run_id=%s", rid)
+            return
+        self._recent_llm_events[dedup_key] = now
+        # 清理过期条目
+        if len(self._recent_llm_events) > 1000:
+            cutoff = now - 0.5
+            self._recent_llm_events = {
+                k: v for k, v in self._recent_llm_events.items() if v > cutoff
+            }
+
         self._tick(rid)
 
         if self._root is None:
@@ -183,10 +271,15 @@ class TraceRecorder(BaseCallbackHandler):
                  if k in params}
 
         metadata = kw.get("metadata", {})
+        node = metadata.get("node", "")
         langgraph_node = metadata.get("langgraph_node", "")
-        if langgraph_node:
-            extra["label"] = _GRAPH_NODE_LABELS.get(langgraph_node, langgraph_node)
-            extra["node"] = langgraph_node
+        effective_node = node or langgraph_node
+        if effective_node:
+            extra["label"] = _GRAPH_NODE_LABELS.get(effective_node, effective_node)
+            extra["node"] = effective_node
+        pdor_context = metadata.get("pdor_context", "")
+        if pdor_context:
+            extra["pdor_context"] = pdor_context
 
         with self._lock:
             c = self._get_conn()
@@ -208,10 +301,10 @@ class TraceRecorder(BaseCallbackHandler):
                         d = _msg_info(m)
                         c.execute(
                             "INSERT INTO messages"
-                            "(step_id,seq,role,content,tool_calls,tool_call_id) "
-                            "VALUES(?,?,?,?,?,?)",
+                            "(step_id,seq,role,content,tool_calls,tool_call_id,reasoning) "
+                            "VALUES(?,?,?,?,?,?,?)",
                             (sid, seq, d["role"], d["content"],
-                             d["tool_calls"], d["tool_call_id"]),
+                             d["tool_calls"], d["tool_call_id"], d.get("reasoning")),
                         )
                         seq += 1
             c.commit()
@@ -229,6 +322,16 @@ class TraceRecorder(BaseCallbackHandler):
     @_guard
     def on_llm_end(self, response: LLMResult, *, run_id, **kw):
         rid = str(run_id)
+
+        # 短窗口幂等防御
+        dedup_key = f"{rid}:llm_end"
+        now = time.perf_counter()
+        last = self._recent_llm_events.get(dedup_key)
+        if last is not None and (now - last) * 1000 < self._dedup_window_ms:
+            logger.warning("[TraceRecorder] 重复 llm_end 被跳过: run_id=%s", rid)
+            return
+        self._recent_llm_events[dedup_key] = now
+
         ms = self._ms(rid)
         sid = self._sid.get(rid)
         if not sid:
@@ -250,16 +353,17 @@ class TraceRecorder(BaseCallbackHandler):
                         parts.append(d)
                         c.execute(
                             "INSERT INTO messages"
-                            "(step_id,seq,role,content,tool_calls,tool_call_id) "
-                            "VALUES(?,?,?,?,?,?)",
+                            "(step_id,seq,role,content,tool_calls,tool_call_id,reasoning) "
+                            "VALUES(?,?,?,?,?,?,?)",
                             (sid, seq, d["role"], d["content"],
-                             d["tool_calls"], d["tool_call_id"]),
+                             d["tool_calls"], d["tool_call_id"], d.get("reasoning")),
                         )
                         seq += 1
                     else:
                         parts.append({"role": "assistant", "content": g.text})
 
-            usage = (response.llm_output or {}).get("token_usage", {})
+            from utils.token_usage import extract_token_usage
+            usage = extract_token_usage(response)
             existing_extra = {}
             try:
                 row = c.execute("SELECT extra FROM steps WHERE id=?", (sid,)).fetchone()
@@ -294,11 +398,16 @@ class TraceRecorder(BaseCallbackHandler):
         tool_input = inputs if inputs is not None else input_str
 
         metadata = kw.get("metadata", {})
+        node = metadata.get("node", "")
         langgraph_node = metadata.get("langgraph_node", "")
         extra = {}
-        if langgraph_node:
-            extra["label"] = _GRAPH_NODE_LABELS.get(langgraph_node, langgraph_node)
-            extra["node"] = langgraph_node
+        effective_node = node or langgraph_node
+        if effective_node:
+            extra["label"] = _GRAPH_NODE_LABELS.get(effective_node, effective_node)
+            extra["node"] = effective_node
+        pdor_context = metadata.get("pdor_context", "")
+        if pdor_context:
+            extra["pdor_context"] = pdor_context
 
         self._create_step(run_id, parent_run_id, "tool", name, tool_input, extra)
 
@@ -334,3 +443,12 @@ class TraceRecorder(BaseCallbackHandler):
     @_guard
     def on_retriever_error(self, error, *, run_id, **kw):
         self._finish_step(run_id, status="error", error=error)
+
+
+# 注册全局 hook：LangChain 每次创建 CallbackManager 时自动检查
+# _active_recorder 非 None 则注入，实现零侵入 trace
+try:
+    from langchain_core.tracers.context import register_configure_hook
+    register_configure_hook(_active_recorder, inheritable=True)
+except ImportError:
+    logger.warning("[TraceRecorder] register_configure_hook 不可用，trace 将不会自动注入")

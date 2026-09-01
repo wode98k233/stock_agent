@@ -1,0 +1,25 @@
+/* ── 三栏布局 ── */
+.app-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(420px, 1fr) 340px;
+  height: 100vh;
+  min-height: 620px;
+}
+
+.chat-pane {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative;
+}
+
+.composer {
+  border-top: 1px solid var(--border-main);
+  padding: 12px 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #ffffff;
+  box-shadow: 0 -1px 6px rgba(0,0,0,0.04);
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+}

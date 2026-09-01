@@ -1,0 +1,190 @@
+/* Stock Radar TUI v2 — 三栏布局 + 响应式断点 */
+
+Screen {
+    background: #0d1117;
+    color: #c9d1d9;
+    layout: vertical;
+}
+
+/* ── 顶栏 ─────────────────────────────────────────── */
+TopBar {
+    height: 1;
+    background: #161b22;
+    color: #c9d1d9;
+    padding: 0 1;
+    border-bottom: solid #30363d;
+}
+
+TopBar .pill {
+    height: 1;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+TopBar .pill-mode { color: #58a6ff; }
+TopBar .pill-skills { color: #d2a8ff; }
+TopBar .pill-templates { color: #79c0ff; }
+TopBar .pill-trace { color: #56d364; }
+TopBar .pill-trace.off { color: #8b949e; }
+TopBar .pill-tokens { color: #e3b341; }
+TopBar .pill-pending { color: #f0883e; }
+
+/* ── 工作区：水平三栏 ─────────────────────────────── */
+#workspace {
+    height: 1fr;
+    layout: horizontal;
+}
+
+SidePanel {
+    width: 28;
+    background: #0d1117;
+    border-right: solid #21262d;
+    padding: 1 1;
+}
+
+SidePanel.-hidden { display: none; }
+
+InspectorPanel {
+    width: 36;
+    background: #0d1117;
+    border-left: solid #21262d;
+    padding: 1 1;
+}
+
+InspectorPanel.-hidden { display: none; }
+
+MainPanel {
+    width: 1fr;
+    height: 1fr;
+    background: #0d1117;
+}
+
+/* ── SidePanel 内部 ──────────────────────────────── */
+SidePanel .section-label {
+    color: #8b949e;
+    text-style: bold;
+    margin: 1 0;
+    height: 1;
+}
+
+SidePanel .nav-item {
+    height: 1;
+    color: #c9d1d9;
+    padding: 0 1;
+}
+
+SidePanel .nav-item .nav-key {
+    color: #6e7681;
+    text-style: dim;
+}
+
+/* ── InspectorPanel 内部 ─────────────────────────── */
+InspectorPanel .panel {
+    border: solid #30363d;
+    border-title-color: #58a6ff;
+    padding: 1 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+InspectorPanel .panel-title {
+    color: #58a6ff;
+    text-style: bold;
+}
+
+InspectorPanel .row {
+    height: 1;
+    color: #c9d1d9;
+}
+
+InspectorPanel .row .label { color: #8b949e; }
+InspectorPanel .row .value { color: #c9d1d9; }
+
+/* ── MainPanel / TabbedContent ───────────────────── */
+MainPanel TabbedContent {
+    height: 1fr;
+}
+
+MainPanel TabPane {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* ── 底部输入 ───────────────────────────────────── */
+InputArea {
+    height: 3;
+    background: #161b22;
+    padding: 0 1;
+    border-top: solid #30363d;
+}
+
+InputArea #prompt-label {
+    width: 6;
+    color: #58a6ff;
+    content-align: left middle;
+}
+
+InputArea Input {
+    background: #0d1117;
+    color: #c9d1d9;
+    border: none;
+}
+
+InputArea Input:focus {
+    background: #0d1117;
+}
+
+InputArea.-locked {
+    background: #1c1c1c;
+}
+
+InputArea.-locked Input {
+    color: #8b949e;
+}
+
+/* ── ConfirmModal 全屏 ───────────────────────────── */
+ConfirmModal {
+    align: center middle;
+}
+
+ConfirmModal > Vertical {
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    background: #0d1117;
+    border: thick #f0883e;
+    padding: 1 2;
+}
+
+ConfirmModal .modal-title {
+    color: #f0883e;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+ConfirmModal .modal-section {
+    color: #8b949e;
+    text-style: bold;
+    height: 1;
+    margin-top: 1;
+}
+
+ConfirmModal .modal-row {
+    height: 1;
+    color: #c9d1d9;
+}
+
+ConfirmModal .modal-row .label {
+    color: #8b949e;
+    width: 12;
+}
+
+ConfirmModal .modal-hint {
+    dock: bottom;
+    height: 1;
+    color: #8b949e;
+    margin-top: 1;
+}
+
+/* ── 响应式断点（暂不支持 @media，用 class 控制显隐） ── */

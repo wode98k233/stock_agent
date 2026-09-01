@@ -19,6 +19,7 @@ category: 估值分析
 ## 目录层信息
 - 关键参数：股票代码（必填）、年数（可选）、增长率/折现率（可选）
 - 核心目标：评估个股估值水平，判断高估/低估
+- 市场支持：主要支持 A股/沪深市场；港股、美股、ADR 的估值数据优先通过 mx_data_query 获取，避免调用本技能的历史分位、行业对比、DCF/DDM 深层工具。
 
 ## 工具列表
 ### 工具1：get_valuation_indicators
@@ -65,20 +66,35 @@ category: 估值分析
 
 ## 使用指南
 
-### 典型调用流程
-1. **快速估值判断**：调用 get_valuation_summary(symbol) → 直接获取完整估值画像
-2. **单项深度分析**：get_valuation_indicators(看估值指标) → get_industry_valuation_compare(看行业对比) → get_valuation_percentile(看历史分位)
-3. **内在价值计算**：calc_dcf_valuation(现金流折现) 或 calc_ddm_valuation(股利折现) → 对比当前价判断安全边际
-4. **综合选股流程**：stock_query(get_board_stocks) → 批量 get_valuation_indicators → aggregation(llm_filter_stocks 按估值条件筛选)
+### 适用场景
+- 查询 A 股个股 PE/PB/PS/PEG/股息率等相对估值。
+- 需要行业估值对比、历史估值分位或估值综合画像。
+- 需要用 DCF/DDM 做粗略内在价值测算。
 
-### 工具间依赖关系
-- **重要**：get_industry_valuation_compare 需要先通过 stock_query 的 get_stock_realtime 获取个股所属行业信息
-- get_valuation_percentile 依赖历史估值数据，数据源不支持时可能返回空结果
-- calc_dcf_valuation 和 calc_ddm_valuation 依赖财务数据，数据不足时返回错误提示
-- get_valuation_summary 是综合工具，内部会依次调用其他估值工具
+### 不适用场景
+- 港股、美股、ADR 的估值优先用 mx_data_query。
+- 不用于实时行情、新闻、技术指标或资金流。
+- 财务数据不足时不适合 DCF/DDM。
 
-### 注意事项
-- 估值指标解读等级基于通用阈值，不同行业可能需要调整标准
-- DCF/DDM 模型的结果高度依赖输入参数（增长率、折现率等），建议根据行业特征调整
-- 行业对比基于同行业股票的实时行情聚合，行业划分取决于数据源
-- 历史分位需要足够长的历史数据（至少3年），数据不足时结果参考性有限
+### 必填参数
+- 所有工具的 `symbol` 必填。
+- `years` 可选，默认 5。
+- DCF/DDM 的增长率、折现率参数可选；不确定时使用默认值。
+
+### 典型调用
+1. 快速估值：`get_valuation_summary("600519")`
+2. 单项估值：`get_valuation_indicators("600519")` → `get_industry_valuation_compare("600519")` → `get_valuation_percentile("600519", 5)`
+3. 绝对估值：`calc_dcf_valuation("600519")` 或 `calc_ddm_valuation("600519")`
+
+### 输出形态
+- 估值工具返回 dict/JSON，包含估值指标、解释、行业对比、分位或模型结果。
+- 综合工具返回 `valuation_indicators`、`industry_compare`、`percentile` 三块。
+
+### 失败 fallback
+- 相对估值失败时，改用 `mx_data_query("{symbol} 市盈率 市净率 市销率 股息率")`。
+- 行业或历史分位失败时，保留已有估值指标，不要阻断报告。
+- 港股、美股、ADR 直接用 mx_data_query 查询估值表格。
+
+### 不要重试条件
+- 明确提示行业信息、历史估值、财务或股利数据缺失时，不要重复同参调用。
+- DCF/DDM 返回不适用时，不要强行重试；改用相对估值或 MX 原始数据。

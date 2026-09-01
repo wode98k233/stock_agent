@@ -5,9 +5,8 @@
 1. 获取大盘指数行情
 2. 获取涨跌统计
 3. 获取热门/冷门板块
-4. 获取重要新闻
-5. LLM简评
-6. 格式化输出
+4. LLM简评
+5. 格式化输出
 """
 import json
 import logging
@@ -16,6 +15,28 @@ from output.formatter import render_market_overview
 
 logger = logging.getLogger("radar.scenario")
 
+# ── 提示词（从 agents/prompts.py 迁入）────────────────────────
+MARKET_OVERVIEW_PROMPT = """你是专业的市场分析师。根据以下数据，生成今日A股市场简评。
+
+## 用户问题
+{user_input}
+
+## 大盘指数
+{index_data_json}
+
+## 涨跌统计
+{breadth_json}
+
+## 涨幅前5板块
+{hot_sectors_json}
+
+请生成2-3句话的市场简评，包含：
+1. 市场整体走势判断
+2. 主要热点方向
+3. 短期关注点
+
+要求简洁有力，控制在100字以内。"""
+
 
 async def handle_market_overview(
     user_input: str,
@@ -23,12 +44,12 @@ async def handle_market_overview(
     context: dict,
     data_timestamp: str,
     budget=None,
-) -> Optional[str]:
+) -> Optional["ScenarioResult"]:
     """处理市场概览场景"""
     import asyncio
     from tools.fetcher import ak_spot_em
+    from agents.scenarios.common import ScenarioResult
 
-    # 获取一次 spot 数据，共享给 index 和 breadth
     loop = asyncio.get_event_loop()
     try:
         df = await loop.run_in_executor(None, ak_spot_em)
@@ -39,24 +60,28 @@ async def handle_market_overview(
     if df is None or df.empty:
         return None
 
-    # 1. 从同一份 df 中提取指数和涨跌统计
     index_data = _extract_index_data(df)
     breadth = _compute_breadth(df)
-
-    # 2. 获取板块排行
     hot_sectors, cold_sectors = _get_sector_ranking()
 
-    # 3. LLM简评（使用 enriched_input）
     summary = await _generate_summary(enriched_input, index_data, breadth, hot_sectors)
 
-    # 4. 格式化输出
-    return render_market_overview(
-        index_data=index_data,
-        breadth=breadth,
-        hot_sectors=hot_sectors,
-        cold_sectors=cold_sectors,
-        summary=summary,
-        data_timestamp=data_timestamp,
+    return ScenarioResult(
+        text=render_market_overview(
+            index_data=index_data,
+            breadth=breadth,
+            hot_sectors=hot_sectors,
+            cold_sectors=cold_sectors,
+            summary=summary,
+            data_timestamp=data_timestamp,
+        ),
+        data={
+            "index_data": index_data,
+            "breadth": breadth,
+            "hot_sectors": hot_sectors,
+            "cold_sectors": cold_sectors,
+            "summary": summary,
+        },
     )
 
 
@@ -105,7 +130,6 @@ def _get_sector_ranking() -> tuple:
         if df is None or df.empty:
             return hot, cold
 
-        # 按涨幅排序
         if '涨跌幅' in df.columns:
             sorted_df = df.sort_values('涨跌幅', ascending=False)
 
@@ -134,7 +158,6 @@ async def _generate_summary(
     budget=None,
 ) -> str:
     """LLM生成市场简评"""
-    from agents.prompts import MARKET_OVERVIEW_PROMPT
     from agents.scenarios.common import BaseScenarioHandler
 
     prompt = MARKET_OVERVIEW_PROMPT.format(

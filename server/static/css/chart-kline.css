@@ -1,0 +1,790 @@
+/* K 线图弹窗 - 与项目整体淡绿色风格一致 */
+
+.kline-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+  z-index: 910; /* 高于回测弹框(900)，从回测内跳转 K 线不被遮挡 */
+}
+
+.kline-overlay.open {
+  opacity: 1;
+  visibility: visible;
+}
+
+.kline-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.98);
+  width: min(1200px, 96vw);
+  height: min(800px, 94vh);
+  background: var(--panel, #ffffff);
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-md, 10px);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.25s ease;
+  z-index: 950; /* 高于 .kline-overlay(910) 与 .backtest-overlay(900)，确保从回测/信号评测跳转时浮在最上层 */
+  box-shadow: var(--shadow-lg, 0 8px 30px rgba(0,0,0,0.12));
+  overflow: hidden;
+}
+
+.kline-modal.open {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.kline-header {
+  padding: 0;
+  border-bottom: 1px solid var(--line, #dfe4ea);
+  background: var(--panel, #fff);
+}
+
+.kline-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  gap: 12px;
+}
+
+.kline-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 股票信息栏 */
+.kline-stock-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 8px 16px;
+  background: var(--bg, #f6f7f9);
+  border-top: 1px solid var(--line, #dfe4ea);
+}
+
+.kline-stock-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kline-stock-name-text {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text, #1c2430);
+}
+
+.kline-stock-code {
+  font-size: 13px;
+  color: var(--muted, #667085);
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+}
+
+.kline-stock-price {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kline-price-value {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+}
+
+.kline-price-value.up { color: #e74c3c; }
+.kline-price-value.down { color: var(--brand, #176b5b); }
+
+.kline-price-change,
+.kline-price-change-pct {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+}
+
+.kline-price-change.up,
+.kline-price-change-pct.up { color: #e74c3c; }
+.kline-price-change.down,
+.kline-price-change-pct.down { color: var(--brand, #176b5b); }
+
+.kline-stock-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.kline-meta-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.kline-meta-label {
+  font-size: 12px;
+  color: var(--muted, #667085);
+}
+
+.kline-meta-value {
+  font-size: 13px;
+  color: var(--text, #1c2430);
+  font-weight: 500;
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+}
+
+.kline-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.kline-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text, #1c2430);
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.kline-title::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand, #176b5b);
+}
+
+.kline-search-box {
+  position: relative;
+  width: min(280px, 30vw);
+  min-width: 180px;
+}
+
+.kline-search-input {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-sm, 6px);
+  padding: 0 10px;
+  color: var(--text, #1c2430);
+  background: var(--panel, #fff);
+  outline: none;
+  font-size: 13px;
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.kline-search-input:focus {
+  border-color: var(--brand, #176b5b);
+  box-shadow: 0 0 0 2px var(--brand-glow, rgba(23, 107, 91, 0.12));
+}
+
+.kline-search-input::placeholder {
+  color: var(--muted, #667085);
+}
+
+.kline-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--panel, #fff);
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-sm, 6px);
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,0.08));
+  padding: 4px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, visibility 0.15s ease, transform 0.15s ease;
+  z-index: 30;
+}
+
+.kline-search-results.open {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.kline-search-item {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.15s ease;
+}
+
+.kline-search-item:hover {
+  background: var(--bg, #f6f7f9);
+}
+
+.kline-search-code {
+  color: var(--text, #1c2430);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: "'DIN Alternate', 'Tabular Nums', 'Courier New', monospace";
+}
+
+.kline-search-name {
+  color: var(--muted, #667085);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.kline-search-market {
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 3px;
+  background: var(--bg, #f6f7f9);
+  color: var(--muted, #667085);
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.kline-search-empty {
+  padding: 8px;
+  color: var(--muted, #667085);
+  font-size: 12px;
+  text-align: center;
+}
+
+.kline-stock-info {
+  min-width: 0;
+  color: var(--text, #1c2430);
+  background: var(--bg, #f6f7f9);
+  border-radius: var(--radius-sm, 6px);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kline-source-selector {
+  position: relative;
+}
+
+.kline-source-trigger {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 12px;
+  color: var(--text, #1c2430);
+  cursor: pointer;
+  font-weight: 500;
+  user-select: none;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.kline-source-trigger:hover,
+.kline-source-trigger[aria-expanded="true"] {
+  background: var(--bg, #f6f7f9);
+  border-color: var(--brand, #176b5b);
+}
+
+.kline-source-chevron {
+  opacity: 0.5;
+  transition: transform 0.2s ease;
+}
+
+.kline-source-trigger[aria-expanded="true"] .kline-source-chevron {
+  transform: rotate(180deg);
+}
+
+.kline-source-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-sm, 6px);
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,0.08));
+  padding: 4px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, visibility 0.15s ease, transform 0.15s ease;
+  z-index: 50;
+}
+
+.kline-source-dropdown.open {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.kline-source-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.kline-source-option:hover,
+.kline-source-option.active {
+  background: var(--bg, #f6f7f9);
+}
+
+.kline-source-option-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.kline-source-option-name {
+  color: var(--text, #1c2430);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.kline-source-option.active .kline-source-option-name {
+  color: var(--brand, #176b5b);
+  font-weight: 600;
+}
+
+.kline-source-option-desc {
+  color: var(--muted, #667085);
+  font-size: 10px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kline-source-option-check {
+  color: var(--brand, #176b5b);
+  opacity: 0;
+}
+
+.kline-source-option.active .kline-source-option-check {
+  opacity: 1;
+}
+
+.kline-sync-btn {
+  height: 30px;
+  border: 1px solid var(--brand, #176b5b);
+  background: var(--brand, #176b5b);
+  color: #fff;
+  border-radius: var(--radius-sm, 6px);
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.kline-sync-btn:hover:not(:disabled) {
+  background: var(--brand-strong, #0d4f43);
+  border-color: var(--brand-strong, #0d4f43);
+}
+
+.kline-sync-btn:disabled {
+  background: var(--line, #dfe4ea);
+  border-color: var(--line, #dfe4ea);
+  cursor: not-allowed;
+}
+
+.kline-sync-spinner {
+  display: none;
+}
+
+.kline-sync-btn.syncing .kline-sync-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: klineSpin 0.6s linear infinite;
+}
+
+.kline-close-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--muted, #667085);
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.kline-close-btn:hover {
+  color: var(--error, #b42318);
+  background: rgba(180, 35, 24, 0.08);
+}
+
+.kline-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--panel, #fff);
+  min-width: 0;
+}
+
+.kline-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.kline-days-group,
+.kline-indicator-group {
+  display: flex;
+  gap: 2px;
+  background: var(--bg, #f6f7f9);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+}
+
+.kline-days-btn,
+.kline-indicator-btn {
+  height: 26px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted, #667085);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.kline-days-btn:hover,
+.kline-indicator-btn:hover {
+  color: var(--text, #1c2430);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.kline-days-btn.active,
+.kline-indicator-btn.active {
+  color: #fff;
+  background: var(--brand, #176b5b);
+  font-weight: 600;
+}
+
+/* K线样式切换按钮 */
+.kline-chart-type-group {
+  display: flex;
+  gap: 2px;
+  background: var(--bg, #f6f7f9);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px;
+}
+
+.kline-chart-type-btn {
+  width: 28px;
+  height: 26px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted, #667085);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.kline-chart-type-btn:hover {
+  color: var(--text, #1c2430);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.kline-chart-type-btn.active {
+  color: #fff;
+  background: var(--brand, #176b5b);
+}
+
+.kline-status {
+  margin-left: auto;
+  min-width: 150px;
+  color: var(--muted, #667085);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kline-status.ok { color: var(--success, #067647); }
+.kline-status.loading { color: var(--accent, #2f6f9f); }
+.kline-status.empty { color: var(--warn, #9a6700); }
+.kline-status.error { color: var(--error, #b42318); }
+
+/* 自动同步开关 */
+.kline-auto-sync-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted, #667085);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.kline-auto-sync-toggle {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand, #176b5b);
+  cursor: pointer;
+}
+
+.kline-auto-sync-label:hover {
+  color: var(--text, #1c2430);
+}
+
+.kline-chart-container {
+  position: relative;
+  min-height: 0;
+  padding: 8px 10px 10px;
+  background: var(--panel, #fff);
+}
+
+.kline-tooltip {
+  font-size: 12px;
+  line-height: 1.7;
+  min-width: 150px;
+}
+
+.kline-tooltip-date {
+  color: var(--text);
+  font-weight: 900;
+  margin-bottom: 3px;
+}
+
+/* 策略选择 + 扫描买点 + 跑回测 */
+.kline-strategy-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kline-strategy-select {
+  height: 26px;
+  min-width: 120px;
+  border: 1px solid var(--line, #dfe4ea);
+  border-radius: var(--radius-sm, 6px);
+  padding: 0 6px;
+  color: var(--text, #1c2430);
+  background: var(--panel, #fff);
+  outline: none;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.kline-strategy-select:hover:not(:disabled) {
+  border-color: var(--brand, #176b5b);
+}
+
+.kline-strategy-select:focus {
+  border-color: var(--brand, #176b5b);
+  box-shadow: 0 0 0 2px var(--brand-glow, rgba(23, 107, 91, 0.12));
+}
+
+.kline-strategy-select:disabled {
+  background: var(--bg, #f6f7f9);
+  color: var(--muted, #667085);
+  cursor: not-allowed;
+}
+
+.kline-strategy-btn {
+  height: 26px;
+  border: 1px solid var(--brand, #176b5b);
+  border-radius: var(--radius-sm, 6px);
+  padding: 0 10px;
+  background: var(--panel, #fff);
+  color: var(--brand, #176b5b);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.kline-strategy-btn:hover:not(:disabled) {
+  background: var(--brand, #176b5b);
+  color: #fff;
+}
+
+.kline-strategy-btn:disabled {
+  border-color: var(--line, #dfe4ea);
+  background: var(--bg, #f6f7f9);
+  color: var(--muted, #667085);
+  cursor: not-allowed;
+}
+
+.kline-strategy-btn.kline-run-btn {
+  background: var(--brand, #176b5b);
+  color: #fff;
+}
+
+.kline-strategy-btn.kline-run-btn:hover:not(:disabled) {
+  background: var(--brand-strong, #0d4f43);
+  border-color: var(--brand-strong, #0d4f43);
+}
+
+.kline-strategy-btn.running {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.kline-strategy-btn.running::after {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: klineSpin 0.6s linear infinite;
+  margin-left: 2px;
+}
+
+/* 买点徽章 - 浮在图表顶部 */
+.kline-scan-badge {
+  position: absolute;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: klineBadgeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.kline-scan-badge.buy {
+  background: linear-gradient(135deg, #e74c3c, #c0392b);
+}
+
+.kline-scan-badge.sell {
+  background: linear-gradient(135deg, #176b5b, #0d4f43);
+}
+
+.kline-scan-badge.neutral {
+  background: linear-gradient(135deg, #6b7280, #4b5563);
+}
+
+.kline-scan-badge .badge-date {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.9;
+  margin-left: 6px;
+}
+
+@keyframes klineBadgeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes klineSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 760px) {
+  .kline-modal {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .kline-title-row,
+  .kline-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .kline-search-box {
+    order: 3;
+    width: 100%;
+    min-width: 0;
+    flex-basis: 100%;
+  }
+
+  .kline-stock-info {
+    max-width: calc(100vw - 210px);
+  }
+
+  .kline-status {
+    flex-basis: 100%;
+    margin-left: 0;
+    text-align: left;
+  }
+}
+
+/* ── 点击 K 线 → 至今收益卡片 ── */
+.kline-click-info {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #1e293b;
+  pointer-events: none;
+  min-width: 200px;
+}
+.kci-date { font-weight: 700; color: #475569; }
+.kci-row b { font-family: 'DIN Alternate', 'Tabular Nums', 'Courier New', monospace; }
+.kci-pct { font-size: 18px; font-weight: 700; font-family: 'DIN Alternate', 'Tabular Nums', 'Courier New', monospace; }
+.kci-pct.up { color: #e74c3c; }
+.kci-pct.down { color: #176b5b; }
+.kci-note { font-size: 11px; color: #94a3b8; }

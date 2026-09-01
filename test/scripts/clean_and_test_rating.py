@@ -8,17 +8,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from config import Config
 from tools.stock_data import get_stock_rating
 
 print("开始清理评级缓存...")
 
-# 清理缓存
+# 清理缓存（cache_kv 中 cache_rating 前缀的条目）
 try:
     import sqlite3
-    conn = sqlite3.connect(Config.DB_PATH)
+    from utils.app_paths import get_market_cache_db_path
+    conn = sqlite3.connect(get_market_cache_db_path())
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM cache_rating")
+    cursor.execute("DELETE FROM cache_kv WHERE cache_key LIKE 'cache_rating:%'")
     conn.commit()
     conn.close()
     print("   缓存清理成功")

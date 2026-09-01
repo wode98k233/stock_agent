@@ -1,0 +1,197 @@
+/* ── 左侧 Sidebar：sticky 固定 ── */
+.sidebar {
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-main);
+  padding: 18px 14px;
+  display: flex; flex-direction: column; gap: 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.brand-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 2px 4px 8px;
+}
+
+.brand-mark {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, #176b5b 0%, #0d4f43 100%);
+  color: #fff;
+  font-weight: 700;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 8px rgba(23, 107, 91, 0.2);
+}
+
+.brand-mark:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(23, 107, 91, 0.3);
+}
+
+.brand-name { font-size: 16px; font-weight: 700; }
+
+.subtle, .dialog-meta { color: var(--muted); font-size: 12px; }
+
+.icon-text-button, .secondary-button, .icon-button {
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+}
+
+.icon-text-button {
+  height: 38px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.sidebar-tool-button {
+  background: #fbfcfd;
+  color: #344256;
+  font-size: 13px;
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 0;
+}
+
+.icon-text-button:hover, .secondary-button:hover, .icon-button:hover {
+  border-color: var(--brand);
+  box-shadow: var(--shadow-sm);
+}
+
+.dialog-list {
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+  padding-right: 2px;
+}
+
+.dialog-item {
+  position: relative;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  padding: 10px 36px 10px 10px;
+  text-align: left;
+  color: var(--text);
+  width: 100%;
+  transition: background 0.15s ease, transform 0.15s ease;
+  cursor: pointer;
+}
+
+.dialog-item:hover {
+  background: #eef4f3;
+  transform: translateX(2px);
+  box-shadow: 0 1px 4px rgba(23, 107, 91, 0.06);
+}
+.dialog-item.active {
+  background: #e3f0ed;
+  border-color: #afd1c9;
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.dialog-item-title {
+  font-weight: 600;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+
+.dialog-item-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+.dialog-delete-btn {
+  display: none;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--muted);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.dialog-item:hover .dialog-delete-btn {
+  display: flex;
+}
+
+.dialog-delete-btn:hover {
+  background: rgba(180, 35, 24, 0.1);
+  color: var(--error);
+}
+
+.dialog-delete-confirm {
+  position: fixed;
+  z-index: 1000;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  min-width: 160px;
+  animation: confirmPop 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes confirmPop {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.dialog-delete-confirm span {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.dialog-delete-confirm .confirm-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.dialog-delete-confirm .confirm-yes {
+  background: var(--error);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dialog-delete-confirm .confirm-yes:hover {
+  background: #991b1b;
+}
+
+.dialog-delete-confirm .confirm-no {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dialog-delete-confirm .confirm-no:hover {
+  background: #f1f5f9;
+  color: var(--text);
+}

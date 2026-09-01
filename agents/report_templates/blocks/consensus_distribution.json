@@ -1,0 +1,9 @@
+{
+  "id": "consensus_distribution",
+  "title": "一致预期与分歧",
+  "required": true,
+  "max_words": 650,
+  "prompt": "用 Markdown 表格汇总机构评级、目标价、盈利预测和关键假设。必须列出最高/最低/中位目标价、评级分布、看多逻辑、看空逻辑和分歧焦点；缺少公开来源时明确标注「数据缺失」，不得编造机构观点。",
+  "data_slots": ["trend", "pe_percentile", "news_sentiment"],
+  "core_slots": []
+}

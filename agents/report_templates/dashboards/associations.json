@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "mappings": [
+    {
+      "template_id": "market_daily",
+      "dashboard_id": "market"
+    },
+    {
+      "template_id": "macro_daily",
+      "dashboard_id": "market"
+    },
+    {
+      "template_id": "event_impact",
+      "dashboard_id": "hot_events"
+    },
+    {
+      "template_id": "sector_timing",
+      "dashboard_id": "sector"
+    },
+    {
+      "template_id": "sector_landscape",
+      "dashboard_id": "sector"
+    },
+    {
+      "template_id": "theme_trading",
+      "dashboard_id": "sector"
+    },
+    {
+      "template_id": "industry_chain",
+      "dashboard_id": "sector"
+    },
+    {
+      "template_id": "etf_analysis",
+      "dashboard_id": "sector"
+    },
+    {
+      "template_id": "stock_deep_dive",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "standard",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "trend_following",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "volume_price_alert",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "valuation_percentile",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "earnings_analysis",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "ipo_analysis",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "portfolio_advice",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "stock_comparison",
+      "dashboard_id": "stock"
+    },
+    {
+      "template_id": "dividend_screening",
+      "dashboard_id": "screening"
+    },
+    {
+      "template_id": "multi_factor_screening",
+      "dashboard_id": "screening"
+    },
+    {
+      "template_id": "consensus_view",
+      "dashboard_id": "screening"
+    }
+  ],
+  "standalone": [
+    {
+      "dashboard_id": "market",
+      "label": "大盘速览"
+    },
+    {
+      "dashboard_id": "screening",
+      "label": "筛选结果面板"
+    },
+    {
+      "dashboard_id": "hot_events",
+      "label": "热点事件面板"
+    }
+  ]
+}

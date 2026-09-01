@@ -1,0 +1,9 @@
+{
+  "id": "key_takeaways",
+  "title": "关键要点",
+  "required": true,
+  "max_words": 360,
+  "prompt": "用 3-5 条要点概括报告核心结论。每条必须按「结论 / 证据 / 影响」组织，优先写可验证事实和数据缺口，禁止写成泛泛建议。",
+  "data_slots": ["verdict", "signal_strength"],
+  "core_slots": ["verdict"]
+}

@@ -1,0 +1,260 @@
+/* 系统监控面板 */
+.monitor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 2000;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--transition-normal), visibility var(--transition-normal);
+}
+.monitor-overlay.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.monitor-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 400px;
+  height: 100vh;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  z-index: 2001;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform var(--transition-normal);
+  box-shadow: var(--shadow-lg);
+}
+.monitor-panel.visible {
+  transform: translateX(0);
+}
+
+.monitor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--detail-bg);
+}
+.monitor-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.monitor-title svg {
+  color: var(--brand);
+}
+.monitor-close-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.monitor-close-btn:hover {
+  color: var(--text);
+  background: var(--border-light);
+}
+
+/* Tab 切换 */
+.monitor-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--detail-bg);
+}
+.monitor-tab {
+  flex: 1;
+  padding: 10px 0;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  position: relative;
+  transition: color var(--transition-fast);
+}
+.monitor-tab:hover {
+  color: var(--text);
+}
+.monitor-tab.active {
+  color: var(--brand);
+}
+.monitor-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  background: var(--brand);
+  border-radius: 1px;
+}
+
+/* 面板主体 */
+.monitor-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 指标卡片 */
+.monitor-card {
+  background: var(--detail-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+.monitor-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.monitor-card-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.monitor-card-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+/* 进度条 */
+.monitor-bar-wrap {
+  height: 6px;
+  background: var(--border-light);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.monitor-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.monitor-bar.ok { background: var(--success); }
+.monitor-bar.warn { background: var(--warn); }
+.monitor-bar.danger { background: var(--error); }
+
+/* 指标网格 */
+.monitor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.monitor-item {
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.monitor-item-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.monitor-item-value {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.monitor-item-value.ok { color: var(--success); }
+.monitor-item-value.warn { color: var(--warn); }
+.monitor-item-value.danger { color: var(--error); }
+
+/* 底部操作栏 */
+.monitor-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--detail-bg);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.monitor-footer-status {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.monitor-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.monitor-dot.live { background: var(--success); animation: monitor-pulse 2s infinite; }
+.monitor-dot.stale { background: var(--muted); }
+.monitor-dot.error { background: var(--error); }
+
+@keyframes monitor-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.monitor-refresh-btn {
+  background: var(--brand);
+  color: #fff;
+  border: none;
+  padding: 6px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--transition-fast);
+}
+.monitor-refresh-btn:hover {
+  background: var(--brand-strong);
+}
+.monitor-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* DB 状态徽标 */
+.monitor-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.monitor-badge.ok { background: var(--success-bg); color: var(--success); }
+.monitor-badge.warn { background: var(--warning-bg); color: var(--warn); }
+.monitor-badge.danger { background: var(--danger-bg); color: var(--error); }
+
+/* 实时模式下的更新时间 */
+.monitor-updated {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+  font-family: var(--font-mono);
+}

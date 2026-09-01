@@ -7,36 +7,40 @@ import sys
 import os
 import time
 import pandas as pd
+import pytest
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module")
+def bs():
+    """baostock 连接 fixture"""
+    try:
+        import baostock as _bs
+    except ImportError:
+        pytest.skip("baostock 未安装")
+    lg = _bs.login()
+    if lg.error_code != '0':
+        pytest.skip(f"baostock 登录失败: {lg.error_msg}")
+    yield _bs
+    try:
+        _bs.logout()
+    except Exception:
+        pass
+
 
 def test_baostock_login():
     """测试 baostock 登录"""
-    print("=" * 60)
-    print("测试 1: baostock 登录")
-    print("=" * 60)
-    
     try:
-        import baostock as bs
-        print("  导入 baostock 成功")
-        
-        t0 = time.time()
-        lg = bs.login()
-        elapsed = time.time() - t0
-        
-        if lg.error_code == '0':
-            print(f"  ✅ 登录成功，耗时: {elapsed:.2f}s")
-            return True, bs
-        else:
-            print(f"  ❌ 登录失败: {lg.error_code} - {lg.error_msg}")
-            return False, None
-    except Exception as e:
-        print(f"  ❌ 异常: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return False, None
+        import baostock as _bs
+        lg = _bs.login()
+        assert lg.error_code == '0', f"登录失败: {lg.error_msg}"
+        _bs.logout()
+    except ImportError:
+        pytest.skip("baostock 未安装")
 
 
 def test_history_kline(bs):

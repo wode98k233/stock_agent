@@ -1,0 +1,147 @@
+{
+  "id": "stock_comparison",
+  "schema_version": "2.0",
+  "report_family": "stock_comparison",
+  "asset_type": "instrument",
+  "intent_type": "comparison",
+  "dashboard_type": "stock",
+  "verbosity": "detailed",
+  "max_report_words": 3500,
+  "name": "对比分析报告",
+  "version": "1.0",
+  "role": "你是一名专业证券对比分析师。你的任务是对多只股票进行横向对比，必须给出明确倾向和排序，不允许和稀泥式结论。技术面与消息面矛盾时，以技术面为主、消息面为辅，但必须说明矛盾点和判断依据。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "fallback_skills": [
+    "technical_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "candidate_ranking",
+    "evidence_table",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "stock_comparison_data",
+      "description": "对比股票的行情数据和技术指标快照，每只股票必须包含相同字段以便横向比较",
+      "fields": [
+        "最新价",
+        "涨跌幅",
+        "成交额",
+        "换手率",
+        "量比",
+        "PE",
+        "PB",
+        "市值",
+        "MA5",
+        "MA10",
+        "MA20",
+        "MA60"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "technical_comparison",
+      "description": "各股技术指标对比，重点 MACD/RSI/均线位置差异",
+      "fields": [
+        "MACD",
+        "MACD信号线",
+        "MACD柱状",
+        "RSI6",
+        "RSI12",
+        "RSI24",
+        "均线多头/空头排列",
+        "支撑位",
+        "压力位"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "news_comparison",
+      "description": "各股近期消息面对比，含利好利空和事件催化",
+      "fields": [
+        "新闻标题",
+        "日期",
+        "来源",
+        "利好/利空",
+        "影响程度"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "technical_comparison",
+        "news_comparison"
+      ],
+      "rule": "技术面看多但消息面利空时，以技术面为主判断方向，在风险提示中标注消息面矛盾，给出消息面证伪的观察条件。"
+    },
+    {
+      "dimensions": [
+        "technical_comparison",
+        "news_comparison"
+      ],
+      "rule": "技术面看空但消息面利好时，以技术面为主判断方向，在操作建议中标注消息面可能带来的短期反弹机会，但不改变主方向判断。"
+    },
+    {
+      "dimensions": [
+        "technical_comparison"
+      ],
+      "rule": "技术指标之间矛盾（如 MACD 金叉但 RSI 超买）时，以趋势类指标（均线/MACD）为优先，震荡类指标（RSI/KDJ）为辅助，在证据表中标注矛盾。"
+    }
+  ],
+  "report_format": {
+    "action_required_fields": [
+      "方向",
+      "价位",
+      "确认信号"
+    ],
+    "action_template": "方向：{做多/做空/观望} | 目标价位：{价格} | 确认信号：{技术条件}"
+  },
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "对比分析必须给出明确排序和倾向，禁止'各有优劣'式结论。",
+    "技术面与消息面矛盾时，以技术面为主，但必须在风险提示中说明矛盾点。",
+    "操作建议必须包含方向、价位和确认信号，缺一不可。",
+    "任何维度数据缺失时，必须明确标注，不得用文字描述替代结构化数据。",
+    "多股票财务对比表必须使用同一报告期数据（如同为年报或同为一季报），不得混用不同周期。若某股票缺少该周期数据，必须标注'数据缺失'而非用其他周期替代。",
+    "必须完整输出全部板块：核心结论/候选标的排序/关键证据/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "批量获取对比股票的行情、估值和技术指标"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "分别获取各对比股票的最新消息和风险提示"
+    }
+  ]
+}

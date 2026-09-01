@@ -1,0 +1,226 @@
+{
+  "default": "standard",
+  "templates": {
+    "standard": {
+      "name": "标准",
+      "description": "多维度分析，适合大多数场景",
+      "path": "standard/template.json",
+      "enabled": true
+    },
+    "market_daily": {
+      "name": "市场日报",
+      "description": "面向今日 A 股市场总结，输出市场温度、主线、风险和明日观察",
+      "path": "market_daily/template.json",
+      "enabled": true
+    },
+    "macro_daily": {
+      "name": "经济日报",
+      "description": "面向宏观经济与政策事件总结，输出宏观变量、市场传导和资产影响",
+      "path": "macro_daily/template.json",
+      "enabled": true
+    },
+    "sector_timing": {
+      "name": "板块择时",
+      "description": "面向板块涨高后是否还能买入，输出操作条件树和风险约束",
+      "path": "sector_timing/template.json",
+      "enabled": true
+    },
+    "stock_deep_dive": {
+      "name": "个股深度分析",
+      "description": "面向单只股票的多维证据分析，输出买卖条件和风险底线",
+      "path": "stock_deep_dive/template.json",
+      "enabled": true
+    },
+    "dividend_screening": {
+      "name": "红利选股",
+      "description": "面向高股息/红利策略选股，输出候选池、排序依据和排除理由",
+      "path": "dividend_screening/template.json",
+      "enabled": true
+    },
+    "event_impact": {
+      "name": "事件影响分析",
+      "description": "面向地缘、政策、利率等事件，输出传导链、受益受损资产和证伪信号",
+      "path": "event_impact/template.json",
+      "enabled": true
+    },
+    "portfolio_advice": {
+      "name": "持仓诊断",
+      "description": "面向用户持仓亏损、清仓、减仓、补仓问题，输出分支操作方案",
+      "path": "portfolio_advice/template.json",
+      "enabled": true
+    },
+    "stock_comparison": {
+      "name": "对比分析",
+      "description": "面向多只股票对比分析，输出综合评分、操作建议和风险提示",
+      "path": "stock_comparison/template.json",
+      "enabled": true
+    },
+    "earnings_analysis": {
+      "name": "业绩分析",
+      "description": "面向财报季业绩拆解，输出增速分析、盈利质量、估值匹配和超/低预期判断",
+      "path": "earnings_analysis/template.json",
+      "enabled": true
+    },
+    "theme_trading": {
+      "name": "题材炒作",
+      "description": "面向A股题材概念炒作，输出题材级别、炒作阶段、龙头辨识和跟风标的",
+      "path": "theme_trading/template.json",
+      "enabled": true
+    },
+    "industry_chain": {
+      "name": "产业链分析",
+      "description": "沿产业链拆解上中下游，输出利润分配格局、强势环节和配置建议",
+      "path": "industry_chain/template.json",
+      "enabled": true
+    },
+    "volume_price_alert": {
+      "name": "量价异动",
+      "description": "识别异常量价信号，输出信号性质判断和短线操作条件",
+      "path": "volume_price_alert/template.json",
+      "enabled": true
+    },
+    "sector_landscape": {
+      "name": "行业全景轮动",
+      "description": "横向比较各行业景气周期、估值和资金流，输出行业配置建议",
+      "path": "sector_landscape/template.json",
+      "enabled": true
+    },
+    "consensus_view": {
+      "name": "机构观点汇总",
+      "description": "汇总研报评级、目标价和一致预期，分析市场分歧点",
+      "path": "consensus_view/template.json",
+      "enabled": true
+    },
+    "valuation_percentile": {
+      "name": "估值分位分析",
+      "description": "分析PE/PB历史分位位置，判断低估/合理/高估区间",
+      "path": "valuation_percentile/template.json",
+      "enabled": true
+    },
+    "multi_factor_screening": {
+      "name": "多因子选股",
+      "description": "从成长、盈利质量、估值、动量、资金五维度量化筛选排序",
+      "path": "multi_factor_screening/template.json",
+      "enabled": true
+    },
+    "ipo_analysis": {
+      "name": "新股/次新分析",
+      "description": "分析新股发行定价合理性、行业对比和次新股投资价值",
+      "path": "ipo_analysis/template.json",
+      "enabled": true
+    },
+    "trend_following": {
+      "name": "趋势跟踪",
+      "description": "基于均线系统和MACD判断趋势状态，给出加减仓信号条件",
+      "path": "trend_following/template.json",
+      "enabled": true
+    },
+    "etf_analysis": {
+      "name": "ETF/基金/跨市场产品分析",
+      "description": "面向ETF、基金、QDII和跨市场产品，输出跟踪指数、成分股、溢价折价和交易风险",
+      "path": "etf_analysis/template.json",
+      "enabled": true
+    },
+    "hot_news": {
+      "name": "热点新闻分析",
+      "description": "梳理当前市场热点事件，分析对A股的潜在影响，识别受益/受损板块和标的",
+      "path": "hot_news/template.json",
+      "enabled": true
+    }
+  },
+  "skills": {
+    "stock_query": {
+      "enabled": false
+    },
+    "technical_analysis": {
+      "enabled": false
+    },
+    "sentiment_analysis": {
+      "enabled": false
+    },
+    "aggregation": {
+      "enabled": false
+    },
+    "valuation": {
+      "enabled": false
+    },
+    "money_flow": {
+      "enabled": false
+    },
+    "margin_trading": {
+      "enabled": false
+    },
+    "sector_rotation": {
+      "enabled": false
+    },
+    "risk_metrics": {
+      "enabled": false
+    },
+    "block_trades": {
+      "enabled": false
+    },
+    "mx_data": {
+      "enabled": true
+    },
+    "mx_search": {
+      "enabled": true
+    },
+    "mx_xuangu": {
+      "enabled": true
+    },
+    "mx_moni": {
+      "enabled": true
+    },
+    "mx_zixuan": {
+      "enabled": true
+    }
+  },
+  "capability_mapping": {
+    "market_data": {
+      "skills": [
+        "mx_data",
+        "stock_query"
+      ],
+      "description": "行情数据：价格、涨跌幅、成交额、换手率等基础字段"
+    },
+    "news_search": {
+      "skills": [
+        "mx_search",
+        "stock_query",
+        "sentiment_analysis"
+      ],
+      "description": "新闻/公告搜索：最新新闻、研报、公告和情感分析（stock_query 的 search_stock_news 支持多搜索引擎聚合）"
+    },
+    "stock_screening": {
+      "skills": [
+        "mx_xuangu"
+      ],
+      "description": "选股筛选：多条件筛选、行业筛选、概念股筛选"
+    },
+    "fund_flow": {
+      "skills": [
+        "mx_data",
+        "money_flow"
+      ],
+      "description": "资金流向：主力资金、北向资金、融资融券、龙虎榜"
+    },
+    "technical_indicator": {
+      "skills": [
+        "mx_data",
+        "technical_analysis"
+      ],
+      "description": "技术指标：MACD、RSI、KDJ、均线系统、布林带等"
+    },
+    "valuation": {
+      "skills": [
+        "mx_data",
+        "valuation"
+      ],
+      "description": "估值分析：PE/PB历史分位、估值对比、PEG计算"
+    },
+    "user_input": {
+      "skills": [],
+      "description": "用户提供的信息：成本价、仓位、风险偏好等，无需工具调用"
+    }
+  }
+}

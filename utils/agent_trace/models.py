@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_steps_run     ON steps(run_id);
+CREATE INDEX IF NOT EXISTS idx_steps_run_type ON steps(run_id, step_type);
 CREATE INDEX IF NOT EXISTS idx_steps_parent  ON steps(parent_run_id);
 CREATE INDEX IF NOT EXISTS idx_messages_step ON messages(step_id);
 CREATE INDEX IF NOT EXISTS idx_runs_ts       ON runs(created_at DESC);
@@ -75,6 +76,14 @@ def _ensure_db(db: Path):
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         conn.executescript(_DDL)
+        # 幂等迁移：新增列（v2 reasoning 思考过程），列已存在时静默跳过
+        for col_sql in [
+            "ALTER TABLE messages ADD COLUMN reasoning TEXT",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass  # 列已存在
         conn.commit()
     except Exception:
         conn.rollback()
@@ -118,10 +127,16 @@ def _msg_info(msg) -> dict:
         content=getattr(msg, "content", ""),
         tool_calls=None,
         tool_call_id=getattr(msg, "tool_call_id", None),
+        reasoning=None,
     )
     tc = getattr(msg, "tool_calls", None)
     if tc:
         info["tool_calls"] = json.dumps(tc, ensure_ascii=False, default=str)
+    # 思考过程（reasoning_content）截断存储，避免撑爆 trace 库
+    ak = getattr(msg, "additional_kwargs", None) or {}
+    reasoning = ak.get("reasoning_content")
+    if reasoning is not None:
+        info["reasoning"] = str(reasoning)[:2000]
     return info
 
 
@@ -142,23 +157,48 @@ _GRAPH_NODE_NAMES = {
     "executor": "executor",
     "replanner": "replanner",
     "classifier": "classifier",
+    "skill-selector": "skill-selector",
+    "select_template": "select_template",
+    "template_report": "template_report",
+    "partial_summary": "partial_summary",
+    "dashboard": "dashboard",
     "unified_executor": "unified_executor",
+    "observer": "observer",
+    "adjuster": "adjuster",
+    "reviewer": "reviewer",
+    "react-context-summary": "react-context-summary",
+    "react-tool-compress": "react-tool-compress",
+    "sentiment-extract": "sentiment-extract",
 }
 
 _GRAPH_NODE_LABELS = {
     "classifier": "问题分类",
+    "skill-selector": "技能选择",
+    "select_template": "模板选择",
+    "template_report": "模板报告",
+    "partial_summary": "部分总结",
+    "dashboard": "仪表盘",
     "planner": "生成计划",
     "executor": "执行步骤",
     "replanner": "重新规划",
+    "observer": "观察判定",
+    "adjuster": "调整计划",
+    "reviewer": "总结复盘",
     "agent": "Agent 思考",
     "tools": "工具执行",
     "unified_executor": "统一执行",
+    "react-context-summary": "上下文压缩",
+    "react-tool-compress": "工具输出压缩",
+    "sentiment-extract": "舆情分析",
 }
 
 _TYPE_ICONS = {
     "llm": "🤖", "tool": "🔧", "chain": "🔗", "retriever": "📄",
     "agent": "🤖", "tools": "🔧", "planner": "📋", "executor": "⚡",
-    "replanner": "🔄", "classifier": "🏷️", "graph": "🌳",
+    "replanner": "🔄", "observer": "👁️", "adjuster": "🔧", "reviewer": "📝",
+    "classifier": "🏷️", "skill-selector": "🎯", "select_template": "📄",
+    "template_report": "📊", "partial_summary": "📝", "dashboard": "📈",
+    "graph": "🌳", "sentiment-extract": "📰",
     "undefined": "❓",
 }
 
@@ -166,8 +206,17 @@ _TYPE_ICONS = {
 def _identify_graph_node(serialized, kw, parent_run_id=None):
     name = _pick_name(serialized)
     metadata = kw.get("metadata", {})
+    node = metadata.get("node", "")
     langgraph_node = metadata.get("langgraph_node", "")
+    pdor_context = metadata.get("pdor_context", "")
 
+    # 优先级 1: metadata.node（业务代码显式指定）
+    if node:
+        display = _GRAPH_NODE_NAMES.get(node, node)
+        label = _GRAPH_NODE_LABELS.get(node, display)
+        return node, display, label, False
+
+    # 优先级 2: metadata.langgraph_node（LangGraph 自动传入）
     if langgraph_node:
         display = _GRAPH_NODE_NAMES.get(langgraph_node, langgraph_node)
         label = _GRAPH_NODE_LABELS.get(langgraph_node, display)
@@ -177,10 +226,20 @@ def _identify_graph_node(serialized, kw, parent_run_id=None):
         return "graph", "LangGraph", "LangGraph 工作流", False
 
     name_lower = name.lower()
+
+    # 优先级 3: pdor_context == "react_step" 下识别 agent/tools
+    if pdor_context == "react_step":
+        if "agent" in name_lower:
+            return "agent", "agent", "Agent 思考", False
+        if "tool" in name_lower:
+            return "tools", "tools", "工具执行", False
+
+    # 优先级 4: 旧的名称猜测逻辑
     if "agent" in name_lower:
         return "agent", "agent", "Agent 思考", True
     if "tool" in name_lower:
         return "tools", "tools", "工具执行", True
 
+    # 优先级 5: fallback
     is_noise = parent_run_id is not None and not langgraph_node
     return "undefined", name, name, is_noise

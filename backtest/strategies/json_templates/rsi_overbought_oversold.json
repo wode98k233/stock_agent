@@ -1,0 +1,46 @@
+{
+  "meta": {
+    "name": "RSI超买超卖",
+    "description": "RSI指标低于超卖线买入（超卖反弹），高于超买线卖出（超买回落）。基于均值回归原理，适合震荡市。",
+    "tags": ["反转", "RSI", "入门"],
+    "source": "template",
+    "strategy_id": "rsi_overbought_oversold",
+    "category": "reversal"
+  },
+  "params": {
+    "rsi_period": { "value": 14, "min": 2, "max": 50, "step": 1, "label": "RSI周期", "type": "int" },
+    "oversold": { "value": 30, "min": 10, "max": 40, "step": 1, "label": "超卖线", "type": "int" },
+    "overbought": { "value": 70, "min": 60, "max": 90, "step": 1, "label": "超买线", "type": "int" }
+  },
+  "conditions": {
+    "buy": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "rsi", "args": ["close", "{rsi_period}"] },
+          "op": "<",
+          "right": { "value": "{oversold}" }
+        }
+      ]
+    },
+    "sell": {
+      "logic": "AND",
+      "rules": [
+        {
+          "type": "indicator",
+          "left": { "func": "rsi", "args": ["close", "{rsi_period}"] },
+          "op": ">",
+          "right": { "value": "{overbought}" }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "fixed", "value": 0.06 },
+    "take_profit": { "type": "fixed", "value": 0.12 }
+  },
+  "chart_indicators": [
+    { "type": "RSI", "period": "{rsi_period}" }
+  ]
+}

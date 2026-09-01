@@ -1,0 +1,25 @@
+{
+  "id": "sector",
+  "display_name": "板块决策仪表盘",
+  "description": "板块阶段、龙头辨识、资金流向",
+  "scenario_tag": "板块决策仪表盘",
+  "checklist_dimensions": ["板块趋势", "龙头表现", "资金流向", "板块情绪"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "action_items", "renderer": "action_items", "fields": ["action_items"]},
+    {"id": "sector_stage", "renderer": "stage_bar", "fields": ["sector_stage", "trend_prediction"]},
+    {"id": "leading_stocks", "renderer": "leader_cards", "fields": ["leading_stocks"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "market_temperature", "type": "int", "description": "板块热度温度 0-100，综合板块内个股涨跌比、资金流入、涨停数得出", "example": "72"},
+    {"name": "sector_stage", "type": "str", "description": "板块当前所处阶段：启动（首批异动，量能放大）、主升（龙头连板，跟风股增多）、分化（涨跌互现，资金分歧）、退潮（集体回落，龙头补跌）", "example": "主升"},
+    {"name": "leading_stocks", "type": "list", "description": "板块龙头股列表：角色分龙头（领涨核心）、跟风（跟随上涨）、补涨（后期异动），每只股票简要说明", "example": "[{\"name\":\"北方华创\",\"role\":\"龙头\",\"detail\":\"连续放量突破，主力资金大幅流入\"},{\"name\":\"中微公司\",\"role\":\"跟风\",\"detail\":\"跟随板块上涨，量能配合\"}]"},
+    {"name": "portfolio_action", "type": "str", "description": "基于板块判断的操作建议（一句话，如\"关注龙头回调机会\"、\"板块进入退潮期，回避\"）", "example": "关注龙头回调机会，回避跟风股"},
+    {"name": "action_items", "type": "list", "description": "具体可执行的行动项（每项≤30字，2-4项）", "example": "[\"等待龙头股回调至5日线附近介入\",\"板块ETF可轻仓参与\",\"止损设在板块指数前低\"]"}
+  ]
+}

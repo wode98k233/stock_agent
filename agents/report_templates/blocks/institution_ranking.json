@@ -1,0 +1,40 @@
+{
+  "id": "institution_ranking",
+  "title": "机构权威度排序",
+  "required": false,
+  "prompt": "引用研报和机构观点时，按权威度分层引用。搜索时优先包含 Tier 1 机构名称。",
+  "description": "引用研报和机构观点时，按权威度分层引用。搜索时优先包含 Tier 1 机构名称。",
+  "tiers": {
+    "tier1_global": {
+      "label": "国际顶级投行",
+      "institutions": ["摩根士丹利", "Morgan Stanley", "高盛", "Goldman Sachs", "花旗", "Citigroup", "摩根大通", "JP Morgan", "瑞银", "UBS", "美银", "Bank of America"],
+      "weight": 1.0,
+      "note": "全球视野，影响力最大，优先引用"
+    },
+    "tier2_domestic_top": {
+      "label": "国内头部券商",
+      "institutions": ["中信证券", "中金公司", "CICC", "华泰证券", "国泰君安", "海通证券", "招商证券", "中信建投", "广发证券", "申万宏源"],
+      "weight": 0.8,
+      "note": "国内研究实力最强，数据详实"
+    },
+    "tier3_specialized": {
+      "label": "专业领域强所",
+      "institutions": ["天风证券", "国信证券", "兴业证券", "长江证券", "东方证券", "浙商证券", "中泰证券", "光大证券", "平安证券", "方正证券"],
+      "weight": 0.6,
+      "note": "部分行业深度研究有优势"
+    },
+    "tier4_futures": {
+      "label": "期货/资管机构",
+      "institutions": ["信达期货", "瑞达期货", "格林大华", "宝城期货", "永安期货", "南华期货", "中信期货"],
+      "weight": 0.5,
+      "note": "商品和衍生品领域专业"
+    }
+  },
+  "citation_rules": [
+    "引用研报时必须标注机构名称和日期，格式：[机构名 日期]",
+    "同一观点有多个机构支持时，优先引用 Tier 1 机构",
+    "若 Tier 1 机构无覆盖，引用 Tier 2 机构并注明'国内头部券商观点'",
+    "搜索研报时，query 中加入 Tier 1 机构名称以提高命中率",
+    "国际投行观点与国内券商矛盾时，必须同时呈现并分析分歧原因"
+  ]
+}

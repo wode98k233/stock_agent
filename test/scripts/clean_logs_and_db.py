@@ -107,52 +107,27 @@ def clean_orphan_dialog_records():
 
 
 def clean_expired_cache():
-    """清理所有 cache_* 表中的过期数据"""
-    db_path = get_db_path()
+    """清理 market_cache.db cache_kv 表中的过期数据"""
+    from utils.app_paths import get_market_cache_db_path
+    db_path = get_market_cache_db_path()
     if not os.path.isfile(db_path):
         print(f"  数据库不存在: {db_path}")
         return 0
 
-    cache_tables = [
-        'cache_stock_history',
-        'cache_news',
-        'cache_rating',
-        'cache_financial',
-        'cache_board_list',
-    ]
     total_removed = 0
-
     try:
         conn = sqlite3.connect(db_path)
-        for table in cache_tables:
-            try:
-                count_before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                conn.execute(f"""
-                    DELETE FROM {table}
-                    WHERE datetime(updated_at, '+' || expire_hours || ' hours') < datetime('now', 'localtime')
-                """)
-                count_after = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                deleted = count_before - count_after
-                if deleted > 0:
-                    print(f"  {table}: 清理 {deleted} 条过期记录 (剩余 {count_after})")
-                total_removed += deleted
-            except sqlite3.OperationalError:
-                pass
-
-        # cache_realtime: 清理非当天的记录
-        try:
-            from datetime import datetime
-            today = datetime.now().strftime('%Y-%m-%d')
-            count_before = conn.execute("SELECT COUNT(*) FROM cache_realtime").fetchone()[0]
-            conn.execute("DELETE FROM cache_realtime WHERE trade_date != ?", (today,))
-            count_after = conn.execute("SELECT COUNT(*) FROM cache_realtime").fetchone()[0]
-            deleted = count_before - count_after
-            if deleted > 0:
-                print(f"  cache_realtime: 清理 {deleted} 条非今日记录 (剩余 {count_after})")
-            total_removed += deleted
-        except sqlite3.OperationalError:
-            pass
-
+        from datetime import datetime
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        count_before = conn.execute("SELECT COUNT(*) FROM cache_kv").fetchone()[0]
+        conn.execute(
+            "DELETE FROM cache_kv WHERE expire_at IS NOT NULL AND expire_at < ?",
+            (now_str,)
+        )
+        count_after = conn.execute("SELECT COUNT(*) FROM cache_kv").fetchone()[0]
+        total_removed = count_before - count_after
+        if total_removed > 0:
+            print(f"  cache_kv: 清理 {total_removed} 条过期记录 (剩余 {count_after})")
         conn.commit()
         conn.close()
     except Exception as e:

@@ -1,0 +1,25 @@
+{
+  "id": "stock",
+  "display_name": "个股决策仪表盘",
+  "description": "个股买卖点、仓位建议、证伪信号",
+  "scenario_tag": "个股决策仪表盘",
+  "checklist_dimensions": ["技术面", "基本面", "资金面", "情绪面"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "price_levels", "renderer": "price_grid", "fields": ["price_levels"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "split_advice", "renderer": "advice_cards", "fields": ["split_advice"]},
+    {"id": "position_guidance", "renderer": "position_guidance", "fields": ["position_guidance"]},
+    {"id": "falsification_signal", "renderer": "falsification_signal", "fields": ["falsification_signal"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "price_levels", "type": "dict", "description": "关键价位（从报告中提取具体数字）：支撑位、压力位、止损位、目标价", "example": "{\"支撑\":28.50,\"压力\":32.00,\"止损\":27.00,\"目标\":35.00}"},
+    {"name": "split_advice", "type": "dict", "description": "分视角操作建议：短线（1-5天）和中线（1-3个月）各自的操作方向和理由", "example": "{\"短线\":\"回踩支撑位可低吸\",\"中线\":\"持有，目标35元\"}"},
+    {"name": "position_guidance", "type": "dict", "description": "仓位指引：建议仓位水平（轻仓/半仓/重仓）及理由", "example": "{\"仓位\":\"半仓\",\"理由\":\"趋势未明，等待放量确认\"}"},
+    {"name": "falsification_signal", "type": "str", "description": "证伪条件：什么情况下该判断失效，需要止损或反向操作（≤50字）", "example": "跌破27元支撑位且放量，则趋势转空"}
+  ]
+}

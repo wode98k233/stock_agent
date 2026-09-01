@@ -1,0 +1,33 @@
+{
+  "id": "market",
+  "display_name": "市场决策仪表盘",
+  "description": "大盘温度、板块轮动、涨跌家数",
+  "scenario_tag": "市场决策仪表盘",
+  "checklist_dimensions": ["大盘趋势", "资金流向", "市场情绪", "板块轮动"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "action_items", "renderer": "action_items", "fields": ["action_items"]},
+    {"id": "sector_rotation", "renderer": "sector_tabs", "fields": ["sector_rotation"]},
+    {"id": "index_data", "renderer": "index_cards", "fields": ["index_data"]},
+    {"id": "market_breadth", "renderer": "updown_grid", "fields": ["market_breadth", "market_temperature"]},
+    {"id": "volume_summary", "renderer": "text_block", "fields": ["volume_summary"]},
+    {"id": "sector_strength", "renderer": "sector_tags", "fields": ["strong_sectors", "weak_sectors"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "market_temperature", "type": "int", "description": "市场温度 0-100，综合涨跌比、成交量、情绪得出的热度指标", "example": "65"},
+    {"name": "sector_rotation", "type": "list", "description": "板块轮动方向，列出报告提及的主要板块及其当前趋势（bullish/neutral/bearish）", "example": "[{\"name\":\"半导体\",\"trend\":\"bullish\"},{\"name\":\"消费\",\"trend\":\"neutral\"}]"},
+    {"name": "sector_stage", "type": "str", "description": "当前板块轮动所处阶段：启动（首批异动）、主升（集中上涨）、分化（涨跌互现）、退潮（集体回落）", "example": "主升"},
+    {"name": "portfolio_action", "type": "str", "description": "基于市场整体判断的操作建议（一句话，如\"逢高减仓\"、\"持股待涨\"）", "example": "逢高减仓，控制仓位"},
+    {"name": "action_items", "type": "list", "description": "具体可执行的行动项（每项≤30字，2-4项）", "example": "[\"减仓至6成\",\"关注半导体回调机会\",\"回避高位消费股\"]"},
+    {"name": "index_data", "type": "list", "description": "主要指数行情数据，从报告中提取收盘价和涨跌幅", "example": "[{\"name\":\"上证指数\",\"close\":3245.67,\"change_pct\":-0.35},{\"name\":\"深证成指\",\"close\":10876.12,\"change_pct\":0.42}]"},
+    {"name": "market_breadth", "type": "dict", "description": "市场广度统计：上涨/下跌家数、涨停/跌停数，从报告中提取", "example": "{\"advance\":2100,\"decline\":2800,\"limit_up\":35,\"limit_down\":12}"},
+    {"name": "strong_sectors", "type": "list", "description": "报告中提到的强势板块名称列表（3-5个）", "example": "[\"半导体\",\"新能源\",\"军工\"]"},
+    {"name": "weak_sectors", "type": "list", "description": "报告中提到的弱势板块名称列表（3-5个）", "example": "[\"白酒\",\"地产\",\"医药\"]"},
+    {"name": "volume_summary", "type": "str", "description": "成交量总结（≤50字，描述放量/缩量及与近期对比）", "example": "两市成交额8500亿，较昨日缩量12%，连续3日低于万亿"}
+  ]
+}

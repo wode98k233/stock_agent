@@ -8,9 +8,21 @@
 """
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("radar.scenario")
+
+
+@dataclass
+class ScenarioResult:
+    """场景处理器返回值，同时携带格式化文本和原始数据包
+
+    text: 格式化后的输出文本（面向用户）
+    data: 原始数据包（供分析框架后处理消费，如模板增强）
+    """
+    text: str
+    data: dict = field(default_factory=dict)
 
 
 # ── 股票代码校验 ──────────────────────────────────────────────
@@ -216,8 +228,8 @@ class BaseScenarioHandler:
         llm = get_llm()
         try:
             if json_mode:
-                return await llm_json_with_retry(llm, [("user", prompt)], logger, label=label)
-            resp = await tracked_invoke(llm, [("user", prompt)], logger, label=label, budget=budget)
+                return await llm_json_with_retry(llm, [("user", prompt)], logger, label=label, skip_cache_prefix=True)
+            resp = await tracked_invoke(llm, [("user", prompt)], logger, label=label, budget=budget, skip_cache_prefix=True)
             return resp.content if hasattr(resp, "content") else str(resp)
         except Exception as e:
             logger.warning(f"⚠️ {label} LLM 调用失败: {e}")

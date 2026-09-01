@@ -1,12 +1,18 @@
 """
 选股雷达 - 统一用户决策交互
 所有 Agent 遇到需要用户决策的场景，统一使用此模块
+
+支持两种模式：
+- CLI 模式：直接 print/input 交互
+- Web 模式：通过 budget_decision_ctx 回调走 SSE 通道
 """
 
 
 def ask_user_decision(header: str, status_lines: list[str], options: list[str]) -> str:
     """
     打印决策信息 + 编号选项，返回用户选择
+
+    自动检测 Web 模式（通过 budget_decision_ctx），Web 模式下通过回调返回。
 
     Args:
         header: 决策场景标题（如 "Step 3 执行失败：baostock 接口超时"）
@@ -16,6 +22,22 @@ def ask_user_decision(header: str, status_lines: list[str], options: list[str]) 
     Returns:
         用户选择的选项文本，或 "custom" 表示用户输入了自定义内容
     """
+    # Web 模式：通过 SSE 回调让用户决策
+    try:
+        from agents.shared.budget_ctx import budget_decision_ctx
+        web_callback = budget_decision_ctx.get()
+        if web_callback is not None:
+            decision = web_callback({
+                "reason": "user_decision",
+                "header": header,
+                "status_lines": status_lines,
+                "options": options,
+            })
+            return decision or (options[-1] if options else "cancel")
+    except Exception:
+        pass
+
+    # CLI 模式：交互式 print/input
     print(f"\n{'='*60}")
     print(f"⚠️ {header}")
     print(f"{'='*60}")
@@ -23,15 +45,26 @@ def ask_user_decision(header: str, status_lines: list[str], options: list[str]) 
     for line in status_lines:
         print(f"  {line}")
 
-    print(f"\n请选择：")
-    for i, option in enumerate(options, 1):
-        print(f"  {i}. {option}")
+    # 构建快捷提示（对齐 ReAct 交互风格）
+    confirm_hint = options[0] if options else "确认"
+    reject_hint = options[-1] if len(options) > 1 else "取消"
+    print(f"\n请选择 (y/{confirm_hint}，n/{reject_hint}，或输入编号):")
 
     while True:
         try:
-            choice = input("请输入编号: ").strip()
+            choice = input("> ").strip()
             if not choice:
                 continue
+
+            lower = choice.lower()
+            if lower in ('y', 'yes'):
+                selected = options[0]
+                print(f"✅ 已选择: {selected}")
+                return selected
+            if lower in ('n', 'no'):
+                selected = options[-1]
+                print(f"✅ 已选择: {selected}")
+                return selected
 
             idx = int(choice)
             if 1 <= idx <= len(options):
@@ -39,9 +72,8 @@ def ask_user_decision(header: str, status_lines: list[str], options: list[str]) 
                 print(f"✅ 已选择: {selected}")
                 return selected
             else:
-                print(f"请输入 1-{len(options)} 之间的数字")
+                print(f"请输入 y/n 或 1-{len(options)} 之间的数字")
         except ValueError:
-            # 用户输入了非数字，视为自定义内容
             print(f"✅ 已收到你的输入: {choice}")
             return "custom"
         except (KeyboardInterrupt, EOFError):

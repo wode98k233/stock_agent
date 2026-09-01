@@ -1,0 +1,267 @@
+{
+  "id": "standard",
+  "schema_version": "2.0",
+  "report_family": "standard",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "stock",
+  "verbosity": "standard",
+  "max_report_words": 3000,
+  "name": "标准分析报告",
+  "version": "1.1",
+  "role": "你是一名资深证券分析师，正在撰写专业分析报告。所有判断必须有数据支撑，不要编造数据。使用专业、客观、严谨的语言。不得承诺收益或给出绝对买卖指令。禁止使用'应处于'、'可能'、'应该'等猜测性表述。没有数据就标注'数据缺失'，不要编造。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "institution_ranking": true,
+  "fallback_skills": [
+    "money_flow",
+    "technical_analysis",
+    "valuation"
+  ],
+  "supported_horizons": [
+    "short",
+    "mid",
+    "long"
+  ],
+  "default_horizon": "short",
+  "output_blocks": [
+    "core_summary",
+    "position_judgment",
+    "technical_dimension",
+    "sentiment_dimension",
+    "fundamental_dimension",
+    "capital_dimension",
+    "cross_synthesis",
+    "evidence_table",
+    "action_plan_compact",
+    "next_watch",
+    "user_profile_fit",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "time_horizon": {
+    "default": "short",
+    "presets": {
+      "short": {
+        "label": "短线",
+        "description": "1-5个交易日",
+        "data_range": "近20日",
+        "weight_overrides": {
+          "technical": 1.2,
+          "sentiment": 1.0,
+          "fundamental": 0.5,
+          "capital_flow": 1.0
+        }
+      },
+      "mid": {
+        "label": "中线",
+        "description": "1-3个月",
+        "data_range": "近1季度",
+        "weight_overrides": {
+          "technical": 0.8,
+          "sentiment": 0.8,
+          "fundamental": 1.2,
+          "capital_flow": 1.0
+        }
+      },
+      "long": {
+        "label": "长线",
+        "description": "3个月以上",
+        "data_range": "近1年",
+        "weight_overrides": {
+          "technical": 0.5,
+          "sentiment": 0.5,
+          "fundamental": 1.5,
+          "capital_flow": 0.8
+        }
+      }
+    }
+  },
+  "cross_checks": [
+    {
+      "dimensions": [
+        "technical_dimension",
+        "sentiment_dimension"
+      ],
+      "rule": "若技术面看多但消息面利空，必须判断哪个力量占优。判断框架：溢价率>20%=系统性风险（非短期事件），消息面风险占优；监管问询+停牌=流动性风险信号，技术面将被逆转；纯个股利空（如某公司亏损）不影响板块趋势，技术面占优。必须给出明确倾向和依据。"
+    },
+    {
+      "dimensions": [
+        "fundamental_dimension",
+        "sentiment_dimension"
+      ],
+      "rule": "若估值偏高但景气度极高，必须判断高估值能否被业绩增长消化。判断依据：PEG是否合理、行业增速是否匹配估值溢价。如果PEG>2且增速放缓，估值回归概率大。"
+    },
+    {
+      "dimensions": [
+        "capital_dimension",
+        "technical_dimension"
+      ],
+      "rule": "若资金面与技术面信号矛盾，必须分析资金性质。判断框架：主力资金净流入+技术金叉=趋势确认；散户资金涌入+技术超买=诱多风险；换手率>20%=游资接力（危险信号），换手率<10%=机构锁仓（健康信号）。必须给出明确倾向。"
+    },
+    {
+      "dimensions": [
+        "fundamental_dimension"
+      ],
+      "rule": "若获取到审计意见，非标准无保留意见（如保留意见、否定意见、无法表示意见）视为重大风险信号，必须在风险提示中置顶说明。标准无保留意见可作为财务数据可信度的正面佐证。"
+    }
+  ],
+  "report_format": {
+    "core_summary": "第一句必须是一句话方向判断+具体价位，格式：'短线承压，观望为主；若回调至XX元附近可关注'",
+    "operation_condition": "操作建议必须包含三要素：①方向（看多/看空/观望）②价位区间（支撑位/压力位）③确认信号（如'缩量回调+MACD未死叉'）。禁止只给价位不给确认条件",
+    "risk_ordering": "风险提示按严重程度从高到低排序，第一条必须是当前最需要担心的风险",
+    "jargon_explanation": "技术指标首次出现时加括号大白话解释，如'RSI 89.49（涨太快了，短期可能要跌）'、'MACD金叉（上升趋势确认）'",
+    "cross_validation_framework": "溢价率>20%视为系统性风险（非短期事件），换手率>20%视为游资接力信号，ETF停牌+溢价=流动性风险信号",
+    "data_preservation": "保留原始报告中的具体个股名称、涨跌幅百分比、具体新闻事件，不要用概括性语言替换具体数据"
+  },
+  "sector_analysis": {
+    "min_stocks": 3,
+    "min_stocks_in_advice": 2,
+    "description": "板块分析必须覆盖≥3只代表个股，操作建议必须覆盖≥2只个股的支撑位/压力位"
+  },
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "stock_basics",
+      "description": "个股行情、估值和交易活跃度",
+      "fields": [
+        "最新价",
+        "涨跌幅",
+        "成交量",
+        "量比",
+        "换手率",
+        "PE",
+        "PB",
+        "市值"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "technical_data",
+      "description": "技术指标和关键价位",
+      "fields": [
+        "MA5",
+        "MA10",
+        "MA20",
+        "MA60",
+        "MACD",
+        "RSI",
+        "KDJ",
+        "支撑位",
+        "压力位"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "fundamental_data",
+      "description": "核心财务和估值安全边际",
+      "fields": [
+        "净利润",
+        "营业收入",
+        "ROE",
+        "PE历史分位",
+        "PB历史分位"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "valuation"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "news_context",
+      "description": "近期新闻和事件驱动",
+      "fields": [
+        "新闻标题",
+        "日期",
+        "来源",
+        "利好/利空"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "capital_flow",
+      "description": "资金流向",
+      "fields": [
+        "主力净流入",
+        "超大单",
+        "大单",
+        "北向资金"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "audit_opinion",
+      "description": "审计意见和财务报告质量验证",
+      "fields": [
+        "审计意见",
+        "会计师事务所",
+        "审计报告类型"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "qa_rules": [
+    "第一句话必须是一句话方向判断+具体价位。",
+    "技术分析必须包含MA5/MA10/MA20/MA60均线排列状态。",
+    "操作建议必须包含方向、价位区间和确认信号三要素，禁止只给价位不给确认条件。",
+    "各维度交叉验证时，矛盾点必须明确哪个维度占优并给出依据。",
+    "风险提示按严重程度从高到低排序，第一条必须是当前最需要担心的风险。",
+    "多股票财务对比表必须使用同一报告期数据（如同为年报或同为一季报），不得混用不同周期。若某股票缺少该周期数据，必须标注'数据缺失'而非用其他周期替代。",
+    "引用研报和机构观点时，必须标注机构名称和日期。同一观点有多个机构支持时，优先引用摩根士丹利、高盛、花旗等国际投行，其次中信证券、中金公司等国内头部券商。国际投行与国内券商观点矛盾时，必须同时呈现并分析分歧原因。",
+    "必须完整输出全部板块：核心结论/位置判断/技术面/消息面/估值与基本面/资金面/综合研判/关键证据/行动方案/观察清单/投资者适配/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+  ],
+  "analysis_framework": {
+    "summary": "分析顺序：先定位置（历史高低位）→ 再看量价确认（放量/缩量、大阳大阴）→ 资金验证 → 消息/基本面佐证 → 输出条件化动作（建仓/持有/止盈/止损）。每个操作建议必须有触发条件、具体价位和失效条件。",
+    "rules": [
+      "位置优先：先判断标的历史位置。PE/PB历史分位<30%为低位，>70%为高位；同时参考距年内前高/前低的位置。低位是入场的前提条件，高位默认谨慎除非有强催化。",
+      "量价判读（核心）：低位（分位<30%）放量大阳或大阴（量能较20日均量放大1.5倍以上）=资金托底信号，说明开始有资金介入，可分批建仓；上升趋势中出现冲高回落（长上影线+放量）=止盈信号，应逐步兑现；上升后突然放巨量但价格滞涨=出货嫌疑，减仓应对；高位放量长阴=趋势反转风险，离场。",
+      "止损纪律：从介入价亏损超过8%（或用户设定止损线）必须止损，禁止扛单；跌破关键支撑位（前低/关键均线）且放量确认，无条件离场。横盘多日后破新低，视为介入判断失效。",
+      "资金验证：上涨趋势需主力资金净流入持续验证；主力连续净流出+价格滞涨或回落=趋势衰减信号；换手率>20%=游资接力风险，<10%=机构锁仓，作为辅助判断。",
+      "消息面佐证：低位利好+放量=强信号可介入；高位利好但滞涨=利好出尽，警惕反向；利空但缩量下跌=抛压有限。新闻只能佐证，不能替代技术/资金判断。",
+      "基本面/景气度：用PEG（PE/盈利增速）判断估值能否被业绩消化；PE分位>80%且增速放缓=估值回归风险；营收/利润增速与股价走势背离时，以基本面趋势为准。",
+      "输出要求：每个操作建议必须给出 触发条件（什么信号出现）+ 具体价位 + 失效条件（什么信号出现则判断作废），禁止只给方向不给条件。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取个股行情、估值和技术指标"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取个股最新新闻、公告和权威机构研报"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取审计意见和财务报告质量验证（可选，数据可能为空）"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding",
+    "position_based_strategy"
+  ]
+}

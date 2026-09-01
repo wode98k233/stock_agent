@@ -1,0 +1,9 @@
+{
+  "id": "key_debates",
+  "title": "关键分歧",
+  "required": true,
+  "max_words": 520,
+  "prompt": "列出当前结论最依赖的 2-4 个争议点。每个争议点必须同时写多头观点、空头观点、需要验证的数据和触发结论变化的条件，避免单边叙述。",
+  "data_slots": ["news_sentiment", "pe_percentile"],
+  "core_slots": []
+}

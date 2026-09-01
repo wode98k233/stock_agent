@@ -9,7 +9,6 @@ from enum import Enum
 
 
 class ProgressType(str, Enum):
-    """进度事件类型"""
     START = "start"
     STEP_START = "step_start"
     STEP_COMPLETE = "step_complete"
@@ -23,6 +22,15 @@ class ProgressType(str, Enum):
     PLANNER = "planner"
     REPLANNER = "replanner"
     LLM_CALL = "llm_call"
+    STREAM_CHUNK = "stream_chunk"
+    GROUP_PLAN = "group_plan"
+    GROUP_STEP_START = "group_step_start"
+    GROUP_STEP_RESULT = "group_step_result"
+    GROUP_OBSERVE = "group_observe"
+    GROUP_ADJUST = "group_adjust"
+    GROUP_REPLAN = "group_replan"
+    GROUP_RESOLVE = "group_resolve"
+    MEMORY_CONTEXT = "memory_context"
 
 
 # 统一的图标映射常量
@@ -40,6 +48,15 @@ PROGRESS_TYPE_ICONS = {
     ProgressType.PLANNER: "📝",
     ProgressType.REPLANNER: "🔄",
     ProgressType.LLM_CALL: "💬",
+    ProgressType.STREAM_CHUNK: "✍️",
+    ProgressType.GROUP_PLAN: "📋",
+    ProgressType.GROUP_STEP_START: "🚀",
+    ProgressType.GROUP_STEP_RESULT: "📦",
+    ProgressType.GROUP_OBSERVE: "👁️",
+    ProgressType.GROUP_ADJUST: "🔧",
+    ProgressType.GROUP_REPLAN: "🔄",
+    ProgressType.GROUP_RESOLVE: "🔗",
+    ProgressType.MEMORY_CONTEXT: "🧠",
 }
 
 
@@ -124,10 +141,14 @@ class ProgressReporter:
     def error(self, message: str):
         self.report(ProgressType.ERROR, f"❌ {message}")
 
-    def llm_call(self, label: str, duration: float, tokens: str):
-        self.report(ProgressType.LLM_CALL, f"💬 {label} | {duration:.1f}s | {tokens}")
+    def llm_call(self, label: str, duration: float, tokens: str,
+                 reasoning_tokens: int = 0, reasoning_content: str = ""):
+        data = {"reasoning_tokens": reasoning_tokens,
+                "reasoning_content": reasoning_content[:2000]}
+        self.report(ProgressType.LLM_CALL,
+                    f"💬 {label} | {duration:.1f}s | {tokens}", data=data)
 
-    def final(self, message: str):
+    def final(self, message: str = "分析完成"):
         self.report(ProgressType.FINAL, message)
 
 

@@ -1,5 +1,6 @@
 """Baostock 数据源"""
 import logging
+import os
 import pandas as pd
 from datetime import datetime, timedelta
 from .base import DataSource
@@ -10,12 +11,15 @@ logger = logging.getLogger("radar.fetcher")
 
 class BaostockDataSource(DataSource):
     name: str = "baostock"
-    priority: int = 85
+    label: str = "宝存金融"
+    description: str = "历史数据为主，仅 A 股"
+    priority: int = int(os.getenv("BAOSTOCK_PRIORITY", "70"))
     _bs = None
     _login = False
 
     @classmethod
     def _get_bs(cls):
+        """仅用于 is_available() 检查，数据查询请用 _with_connection"""
         if cls._bs is None:
             try:
                 import baostock as bs
@@ -23,13 +27,24 @@ class BaostockDataSource(DataSource):
             except ImportError:
                 cls.enabled = False
                 raise
-        if not cls._login:
-            lg = cls._bs.login()
+        return cls._bs
+
+    @classmethod
+    def _with_connection(cls, fn, *args, **kwargs):
+        """用 login/logout 包裹每次数据查询，防止 socket 泄漏"""
+        bs = cls._get_bs()
+        try:
+            lg = bs.login()
             if lg.error_code != '0':
-                cls.enabled = False
                 raise RuntimeError(f"baostock 登录失败: {lg.error_msg}")
             cls._login = True
-        return cls._bs
+            return fn(bs, *args, **kwargs)
+        finally:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+            cls._login = False
 
     @classmethod
     def is_available(cls) -> bool:
@@ -62,14 +77,13 @@ class BaostockDataSource(DataSource):
         return pd.DataFrame(data, columns=rs.fields)
 
     @classmethod
+    def _fetch_industry_data(cls, bs):
+        rs = bs.query_stock_industry()
+        return cls._query_to_df(rs)
+
+    @classmethod
     def _get_industry_data(cls):
-        """
-        获取行业数据（优先缓存）
-        因为 baostock 的 query_stock_industry() 特别慢，单独缓存
-        """
         cache = get_baostock_cache()
-        
-        # 先尝试从缓存获取
         try:
             cached_df = cache.get_industry_data()
             if cached_df is not None and not cached_df.empty:
@@ -77,22 +91,15 @@ class BaostockDataSource(DataSource):
                 return cached_df
         except Exception as e:
             logger.warning(f"Baostock: 读取缓存失败: {e}")
-        
-        # 缓存不存在或过期，从 API 获取
         logger.info("Baostock: 从 API 获取行业数据（可能需要60-90秒）")
         try:
-            bs = cls._get_bs()
-            rs = bs.query_stock_industry()
-            df = cls._query_to_df(rs)
-            
-            # 缓存结果
+            df = cls._with_connection(cls._fetch_industry_data)
             if not df.empty:
                 try:
                     cache.set_industry_data(df)
                     logger.info(f"Baostock: 行业数据已缓存，共 {len(df)} 条")
                 except Exception as e:
                     logger.warning(f"Baostock: 写入缓存失败: {e}")
-            
             return df
         except Exception as e:
             logger.error(f"Baostock: 获取行业数据失败: {e}")
@@ -101,58 +108,49 @@ class BaostockDataSource(DataSource):
     # ── K线 ──────────────────────────────────────────────
 
     @classmethod
-    def get_stock_hist(cls, symbol, period="daily", start="", end=""):
-        bs = cls._get_bs()
+    def _fetch_stock_hist(cls, bs, symbol, period="daily", start="", end=""):
         bs_sym = cls._convert_symbol(symbol)
-        
-        # 确保日期格式正确（YYYY-MM-DD）
         if not end:
             end = datetime.now().strftime('%Y-%m-%d')
         else:
-            # 尝试标准化日期格式
             try:
-                if len(end) == 8 and end.isdigit():  # YYYYMMDD
+                if len(end) == 8 and end.isdigit():
                     end = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
             except:
                 pass
-        
         if not start:
             start = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
         else:
-            # 尝试标准化日期格式
             try:
-                if len(start) == 8 and start.isdigit():  # YYYYMMDD
+                if len(start) == 8 and start.isdigit():
                     start = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
             except:
                 pass
-        
         freq = {'daily': 'd', 'weekly': 'w', 'monthly': 'm'}.get(period, 'd')
-        
-        try:
-            rs = bs.query_history_k_data_plus(
-                bs_sym, "date,open,high,low,close,volume,amount,pctChg",
-                start_date=start, end_date=end, frequency=freq, adjustflag="3"
-            )
-            
-            if rs is None:
-                raise RuntimeError("baostock: query_history_k_data_plus 返回 None")
-            
-            if rs.error_code != '0':
-                raise RuntimeError(f"baostock: {rs.error_msg}")
-            
-            df = cls._query_to_df(rs)
-            if df.empty:
-                return df
-            
-            col_map = {'code': '代码', 'date': '日期', 'open': '开盘', 'high': '最高', 'low': '最低',
-                       'close': '收盘', 'volume': '成交量', 'amount': '成交额', 'pctChg': '涨跌幅'}
-            df = df.rename(columns=col_map)
-            # 除了日期列，其他列都转成数值
-            numeric_cols = ['开盘', '最高', '最低', '收盘', '成交量', '成交额', '涨跌幅']
-            for c in numeric_cols:
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors='coerce')
+        rs = bs.query_history_k_data_plus(
+            bs_sym, "date,open,high,low,close,volume,amount,pctChg",
+            start_date=start, end_date=end, frequency=freq, adjustflag="3"
+        )
+        if rs is None:
+            raise RuntimeError("baostock: query_history_k_data_plus 返回 None")
+        if rs.error_code != '0':
+            raise RuntimeError(f"baostock: {rs.error_msg}")
+        df = cls._query_to_df(rs)
+        if df.empty:
             return df
+        col_map = {'code': '代码', 'date': '日期', 'open': '开盘', 'high': '最高', 'low': '最低',
+                   'close': '收盘', 'volume': '成交量', 'amount': '成交额', 'pctChg': '涨跌幅'}
+        df = df.rename(columns=col_map)
+        numeric_cols = ['开盘', '最高', '最低', '收盘', '成交量', '成交额', '涨跌幅']
+        for c in numeric_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+        return df
+
+    @classmethod
+    def get_stock_hist(cls, symbol, period="daily", start="", end=""):
+        try:
+            return cls._with_connection(cls._fetch_stock_hist, symbol, period, start, end)
         except Exception as e:
             logger.warning(f"Baostock get_stock_hist 失败: {e}")
             raise
@@ -248,56 +246,27 @@ class BaostockDataSource(DataSource):
     # ── 财务数据 ─────────────────────────────────────────
 
     @classmethod
-    def get_financial_abstract(cls, symbol):
-        bs = cls._get_bs()
+    def _fetch_financial_abstract(cls, bs, symbol):
         bs_sym = cls._convert_symbol(symbol)
         y = datetime.now().year - 1
-
         frames = []
-
-        # 盈利能力
-        try:
-            rs = bs.query_profit_data(code=bs_sym, year=y, quarter=4)
-            df = cls._query_to_df(rs)
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            logger.warning(f"baostock 盈利能力查询失败: {e}")
-
-        # 成长能力
-        try:
-            rs = bs.query_growth_data(code=bs_sym, year=y, quarter=4)
-            df = cls._query_to_df(rs)
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            logger.warning(f"baostock 成长能力查询失败: {e}")
-
-        # 偿债能力
-        try:
-            rs = bs.query_balance_data(code=bs_sym, year=y, quarter=4)
-            df = cls._query_to_df(rs)
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            logger.warning(f"baostock 偿债能力查询失败: {e}")
-
-        # 运营能力
-        try:
-            rs = bs.query_operation_data(code=bs_sym, year=y, quarter=4)
-            df = cls._query_to_df(rs)
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            logger.warning(f"baostock 运营能力查询失败: {e}")
-
+        for query_fn, label in [
+            (bs.query_profit_data, "盈利能力"),
+            (bs.query_growth_data, "成长能力"),
+            (bs.query_balance_data, "偿债能力"),
+            (bs.query_operation_data, "运营能力"),
+        ]:
+            try:
+                rs = query_fn(code=bs_sym, year=y, quarter=4)
+                df = cls._query_to_df(rs)
+                if not df.empty:
+                    frames.append(df)
+            except Exception as e:
+                logger.warning(f"baostock {label}查询失败: {e}")
         if not frames:
             return pd.DataFrame()
-
         if len(frames) == 1:
             return frames[0]
-
-        # 横向拼接（按共同列合并）
         from functools import reduce
         common_cols = set(frames[0].columns)
         for f in frames[1:]:
@@ -305,11 +274,48 @@ class BaostockDataSource(DataSource):
         merge_keys = [c for c in ['code', 'year', 'quarter'] if c in common_cols]
         if not merge_keys:
             merge_keys = list(common_cols)
-
         try:
             merged = reduce(lambda l, r: pd.merge(l, r, on=merge_keys, how='outer'), frames)
             return merged
         except Exception as e:
             logger.warning(f"baostock 财务数据合并失败: {e}")
-            # 回退：直接拼第一个
             return frames[0]
+
+    @classmethod
+    def get_financial_abstract(cls, symbol):
+        try:
+            return cls._with_connection(cls._fetch_financial_abstract, symbol)
+        except Exception as e:
+            logger.warning(f"Baostock get_financial_abstract 失败: {e}")
+            return pd.DataFrame()
+
+    # ── 估值指标 ─────────────────────────────────────────
+
+    @classmethod
+    def _fetch_valuation_indicators(cls, bs, symbol):
+        bs_sym = cls._convert_symbol(symbol)
+        end = datetime.now().strftime('%Y-%m-%d')
+        start = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
+        rs = bs.query_history_k_data_plus(
+            bs_sym, "date,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+            start_date=start, end_date=end, frequency="d", adjustflag="3"
+        )
+        if rs is None or rs.error_code != '0':
+            raise RuntimeError(f"baostock 估值查询失败: {getattr(rs, 'error_msg', 'None')}")
+        df = cls._query_to_df(rs)
+        if df.empty:
+            raise RuntimeError(f"baostock 未获取到 {symbol} 的估值数据")
+        # peTTM/pbMRQ/psTTM → valuation.py 可识别的列名
+        col_map = {'peTTM': '市盈率-动态', 'pbMRQ': '市净率', 'psTTM': '市销率'}
+        df = df.rename(columns=col_map)
+        for c in ('市盈率-动态', '市净率', '市销率', 'pcfNcfTTM'):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+        # 取最近一个有效交易日（peTTM 非空）
+        valid = df[df['市盈率-动态'].notna()] if '市盈率-动态' in df.columns else df
+        return (valid.tail(1) if not valid.empty else df.tail(1)).reset_index(drop=True)
+
+    @classmethod
+    def get_valuation_indicators(cls, symbol):
+        """个股估值指标（PE-TTM/PB/PS），baostock K线接口自带估值字段。"""
+        return cls._with_connection(cls._fetch_valuation_indicators, symbol)

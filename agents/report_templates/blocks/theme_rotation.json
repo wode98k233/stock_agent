@@ -1,0 +1,9 @@
+{
+  "id": "theme_rotation",
+  "title": "主线与轮动",
+  "required": true,
+  "max_words": 360,
+  "prompt": "说明今日主线板块、资金轮动方向、持续性判断和次日观察点。必须区分结构性主线和单日情绪脉冲。",
+  "data_slots": ["news_sentiment"],
+  "core_slots": []
+}

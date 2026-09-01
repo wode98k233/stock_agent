@@ -18,6 +18,43 @@ from output.time_util import format_news_time
 
 logger = logging.getLogger("radar.scenario")
 
+# ── 提示词（从 agents/prompts.py 迁入）────────────────────────
+STOCK_ANALYSIS_PROMPT = """你是专业的股票分析师。根据以下数据，对{stock_name}({stock_code})进行多维度分析。
+
+## 用户问题
+{user_input}
+
+## 行情数据
+{rt_json}
+
+## 技术指标
+{tech_json}
+
+## 机构评级
+{rating_json}
+
+## 近期新闻
+{news_json}
+
+## 新闻情感
+{sentiment_json}
+
+请返回JSON格式：
+{{
+  "tech_analysis": "技术面分析（2-3句话，包含MACD/RSI/均线状态和含义）",
+  "news_summary": "消息面分析（2-3句话，近期新闻要点和情感倾向）",
+  "fundamental": "基本面分析（2-3句话，PE/PB/股息率/机构评级）",
+  "conclusion_short": "短期判断（1-2周，给出方向和关键价位）",
+  "conclusion_mid": "中期判断（1-3月，给出方向和逻辑）",
+  "risk": "风险提示（1-2句话）"
+}}
+
+要求：
+1. 必须基于提供的数据，不要编造数据
+2. 给出明确的方向判断（看多/看空/震荡），不要含糊
+3. 如果某个维度数据缺失，标注"数据不足"并跳过
+4. 技术面要说明指标的具体含义，不要只报数字"""
+
 
 async def handle_stock_analysis(
     user_input: str,
@@ -25,9 +62,9 @@ async def handle_stock_analysis(
     context: dict,
     data_timestamp: str,
     budget=None,
-) -> Optional[str]:
+) -> Optional["ScenarioResult"]:
     """处理个股深度分析场景"""
-    from agents.scenarios.common import resolve_stock, fetch_stock_bundle, BaseScenarioHandler
+    from agents.scenarios.common import resolve_stock, fetch_stock_bundle, BaseScenarioHandler, ScenarioResult
     from tools.sentiment import analyze_sentiment
 
     # 1. 识别股票
@@ -55,8 +92,18 @@ async def handle_stock_analysis(
     )
 
     # 6. 格式化输出
-    return _format_output(
-        stock_name, stock_code, data, tech, sentiment, analysis, data_timestamp
+    return ScenarioResult(
+        text=_format_output(
+            stock_name, stock_code, data, tech, sentiment, analysis, data_timestamp
+        ),
+        data={
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "data": {k: v for k, v in data.items() if k != "history"},
+            "tech": tech,
+            "sentiment": sentiment,
+            "analysis": analysis,
+        },
     )
 
 
@@ -70,7 +117,6 @@ async def _synthesize_analysis(
     budget=None,
 ) -> dict:
     """LLM综合分析，生成各维度解读和综合判断"""
-    from agents.prompts import STOCK_ANALYSIS_PROMPT
     from agents.scenarios.common import BaseScenarioHandler
 
     rt = data.get("realtime", {})

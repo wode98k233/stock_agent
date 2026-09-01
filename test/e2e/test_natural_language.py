@@ -54,7 +54,7 @@ def _run_agent(agent_name: str, user_input: str):
     # 初始化
     skill_register = SkillRegister()
     skill_register.auto_discover()
-    logger, uuid, ctx = get_logger(f"e2e-{agent_name}")
+    logger, uuid, ctx, _ = get_logger(f"e2e-{agent_name}")
     memory = MemoryManager(logger)
     registry = SkillRegistry(logger, memory, skill_register)
 
@@ -120,10 +120,7 @@ def test_react_cambrian(filtered_log_capture, trace_capture):
     # 3. ReAct agent 应该有多步 tool 调用
     # 通过 trace 验证步骤数
     from test.e2e.conftest import assert_trace_has_steps
-    try:
-        assert_trace_has_steps(db_path, "react_stock", min_steps=2)
-    except Exception:
-        pass  # trace 验证失败不阻塞测试
+    assert_trace_has_steps(db_path, "react_stock", min_steps=2)
 
     print(f"  耗时: {elapsed:.1f}s, 响应长度: {len(response)} 字符")
 
@@ -147,10 +144,7 @@ def test_plan_cambrian(filtered_log_capture, trace_capture):
 
     # 3. Plan agent 应该有计划步骤
     from test.e2e.conftest import assert_trace_has_steps
-    try:
-        assert_trace_has_steps(db_path, "plan_solve", min_steps=2)
-    except Exception:
-        pass  # trace 验证失败不阻塞测试
+    assert_trace_has_steps(db_path, "plan_solve", min_steps=2)
 
     print(f"  耗时: {elapsed:.1f}s, 响应长度: {len(response)} 字符")
 
@@ -174,9 +168,6 @@ def test_unified_cambrian(filtered_log_capture, trace_capture):
 
     # 3. Unified agent 应该有执行步骤
     from test.e2e.conftest import assert_trace_has_steps
-    try:
-        assert_trace_has_steps(db_path, "unified_plan", min_steps=1)
-    except Exception:
-        pass  # trace 验证失败不阻塞测试
+    assert_trace_has_steps(db_path, "unified_plan", min_steps=1)
 
     print(f"  耗时: {elapsed:.1f}s, 响应长度: {len(response)} 字符")

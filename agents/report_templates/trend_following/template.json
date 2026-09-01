@@ -1,0 +1,149 @@
+{
+  "id": "trend_following",
+  "schema_version": "2.0",
+  "report_family": "trend_following",
+  "asset_type": "instrument",
+  "intent_type": "timing",
+  "dashboard_type": "stock",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "趋势跟踪",
+  "version": "1.0",
+  "role": "你是一名 A 股趋势跟踪分析师。你的任务是判断当前趋势状态（上升/盘整/下降）、趋势强度、持续性，给出加仓/减仓/持有的信号条件。所有判断必须基于均线系统、MACD和成交量趋势，不得凭主观感觉判断趋势。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "fallback_skills": [
+    "technical_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "position_sizing",
+    "trade_discipline",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "ma_system",
+      "description": "均线系统状态",
+      "fields": [
+        "MA5",
+        "MA10",
+        "MA20",
+        "MA60",
+        "MA120",
+        "均线排列",
+        "均线斜率",
+        "股价与均线关系"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "trend_indicator",
+      "description": "趋势指标",
+      "fields": [
+        "MACD",
+        "MACD信号线",
+        "MACD柱状",
+        "MACD金叉/死叉天数",
+        "趋势持续天数"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "volume_trend",
+      "description": "成交量趋势",
+      "fields": [
+        "成交量",
+        "5日均量",
+        "10日均量",
+        "量能趋势",
+        "量价配合"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "key_levels",
+      "description": "关键价位",
+      "fields": [
+        "近期高点",
+        "近期低点",
+        "支撑位",
+        "压力位",
+        "整数关口"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": true
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "ma_system",
+        "trend_indicator"
+      ],
+      "rule": "均线多头排列+MACD金叉=上升趋势确认。均线空头排列+MACD死叉=下降趋势确认。均线缠绕+MACD在零轴附近=盘整，不宜追涨杀跌。"
+    },
+    {
+      "dimensions": [
+        "trend_indicator",
+        "volume_trend"
+      ],
+      "rule": "上升趋势中缩量回调至均线支撑=健康回调，可加仓。上升趋势中放量滞涨=趋势衰竭预警。下降趋势中放量反弹=可能是诱多，需等均线走平。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "趋势状态必须明确判定为上升/盘整/下降，不能说'震荡偏强'这类模糊表述。",
+    "均线排列必须具体描述（如'MA5>MA10>MA20>MA60，多头排列'）。",
+    "加仓/减仓信号必须包含具体条件（如'回调至MA20且MACD未死叉'）。",
+    "趋势反转预警信号必须具体（如'MACD顶背离+量价背离+跌破MA20'）。",
+    "短线交易建议必须包含竞价、放量、封板、炸板、止损纪律；新手不适合的高风险动作必须明确禁止。",
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取均线、MACD、成交量等趋势数据"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取可能影响趋势的事件"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "趋势跟踪分析顺序：先判断趋势状态（均线排列+MACD）→ 确定趋势级别（日线/周线）→ 找关键支撑压力 → 给出顺势操作条件（加仓/持有/减仓/止损）。",
+    "rules": [
+      "趋势状态判定：MA5>MA10>MA20>MA60 多头排列+MACD金叉=上升趋势；反之空头排列+死叉=下降趋势；均线缠绕=震荡市（趋势策略空仓等待）。",
+      "级别确认：日线趋势看 20/60 日均线，周线趋势看 60/120 周均线；大小级别方向一致=趋势强，级别背离=趋势弱（轻仓）。",
+      "趋势内操作：上升趋势中回调至 MA20/MA60 不破+缩量=加仓点；放量突破前高=加速确认；跌破 MA60 且放量=趋势破坏（减仓）。",
+      "止损纪律：趋势跟踪的核心是止损——跌破趋势线（MA60）或从高点回撤超 8-10% 无条件离场，趋势策略不猜顶。",
+      "事件干扰：重大事件（业绩/政策）可短期偏离趋势，若事件逻辑与趋势方向一致则强化，相反则警惕趋势反转。"
+    ]
+  }
+}

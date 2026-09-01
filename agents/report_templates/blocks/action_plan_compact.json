@@ -1,0 +1,9 @@
+{
+  "id": "action_plan_compact",
+  "title": "行动方案",
+  "required": true,
+  "max_words": 200,
+  "prompt": "用「现在 / 如果 / 失效」三行结构给出行动方案，不超过 6 行。现在：当前应该做什么；如果：出现什么条件时调整操作；失效：什么情况下放弃当前判断。每行必须包含具体价位或量化条件，禁止只写'观望'不给触发条件。",
+  "data_slots": ["trend", "signal_strength", "pe_percentile"],
+  "core_slots": ["trend", "signal_strength"]
+}

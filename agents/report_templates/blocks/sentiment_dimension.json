@@ -1,0 +1,9 @@
+{
+  "id": "sentiment_dimension",
+  "title": "消息面分析",
+  "required": false,
+  "max_words": 300,
+  "prompt": "必须逐条列出近期关键新闻/公告/政策事件，每条写明事件名称、日期、来源、利好/利空方向和对股价的影响路径。区分短期情绪冲击和中长期基本面影响。必须标注新闻时效性——已 price in 的旧闻和尚未反映的新催化要分开。情感分析必须有具体事件支撑，禁止只写'消息面偏暖'这类空话。缺少新闻数据时标注数据缺失，不得用常识或推测填充。",
+  "data_slots": ["news_sentiment"],
+  "core_slots": ["news_sentiment"]
+}

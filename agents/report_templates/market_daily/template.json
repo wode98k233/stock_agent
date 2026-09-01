@@ -1,0 +1,168 @@
+{
+  "id": "market_daily",
+  "schema_version": "2.0",
+  "report_family": "market_daily",
+  "asset_type": "market",
+  "intent_type": "daily_summary",
+  "dashboard_type": "market",
+  "verbosity": "brief",
+  "max_report_words": 2000,
+  "name": "市场日报",
+  "version": "1.2",
+  "role": "你是一名 A 股市场日报分析师。你的任务是用简洁结构总结当日市场温度、主线板块、资金方向和技术面信号。输出应简洁明了，不包含选股推荐、仓位建议或投资者适配分析。",
+  "required_skills": [
+    "mx_data",
+    "mx_search",
+    "mx_xuangu"
+  ],
+  "fallback_skills": [
+    "money_flow",
+    "technical_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "market_breadth",
+    "anomaly_flash",
+    "theme_rotation",
+    "sentiment_dimension",
+    "capital_dimension",
+    "cross_synthesis",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_xuangu",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "index_snapshot",
+      "description": "主要指数表现和成交额",
+      "fields": [
+        "上证指数",
+        "深成指",
+        "创业板指",
+        "科创50",
+        "成交额"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "market_breadth",
+      "description": "市场广度和情绪",
+      "fields": [
+        "上涨家数",
+        "下跌家数",
+        "涨停数量",
+        "跌停数量"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "hot_sectors",
+      "description": "涨幅居前板块和资金流入方向",
+      "fields": [
+        "板块涨跌幅",
+        "成交额",
+        "主力净流入"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "fund_flow"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "technical_snapshot",
+      "description": "主要指数技术指标快照",
+      "fields": [
+        "MACD信号",
+        "RSI",
+        "均线排列",
+        "量比"
+      ],
+      "tool_capabilities": [
+        "technical_indicator"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "fund_flow_snapshot",
+      "description": "主力资金和北向资金流向",
+      "fields": [
+        "主力净流入",
+        "北向净流入"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    }
+  ],
+  "qa_rules": [
+    "市场日报必须包含指数、市场广度、主线和风险，缺一项就标注数据缺失。",
+    "不得把单个新闻事件当成全市场结论。",
+    "如果当日实时数据缺失，必须明确标注'实时数据缺失，仅展示最近历史数据'。",
+    "资金面分析必须包含量能结构：成交额变化、量比、放量/缩量趋势（连续3日放量=趋势加强，连续3日缩量=资金退潮）。",
+    "全文总字数必须控制在2000字以内，各板块严格按字数限制输出，不得超限；宁可精简表述也不省略尾部板块。"
+  ],
+  "analysis_framework": {
+    "summary": "日报核心：量化市场温度 → 识别当日主线 → 判断异动性质 → 提示次日风险和观察点。不输出个股买卖建议。",
+    "rules": [
+      "市场温度：涨跌家数比>2:1且涨停≥50家=情绪偏热；涨跌比<1:2=情绪偏冷；成交额较昨日变化>20%需说明放量/缩量性质及含义。",
+      "量能判读：放量上攻=多头强势；放量滞涨（成交额放大但指数冲高回落/个股普跌）=压力显现，警惕诱多；连续3日放量=趋势加强；连续3日缩量=资金退潮；量比>2.0=异常放量，量比<0.5=极度缩量；低位放量=资金进场（关注），高位放量=筹码交换加剧（警惕）。",
+      "主线识别：领涨板块涨幅>3%+板块内涨停≥3家+成交额居前=当日主线；单日异动但无板块效应的个股行情不视为主线。",
+      "异动性质：事件驱动（政策、公告、数据）的异动可持续性高于情绪驱动；无法从消息面验证的异动（传闻/小作文）按投机处理，必须提示风险。",
+      "背离预警：指数涨但下跌家数更多、高位板块放量滞涨、龙头炸板潮=市场结构转弱信号，必须明确提示。",
+      "观察点：明确给出次日需验证的信号（主线是否延续、量能是否持续、领涨股竞价表现），作为行动参考。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取 A 股主要指数、成交额和涨跌家数"
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取主要指数技术指标（MACD、RSI、均线）",
+      "fallback_skills": [
+        "technical_analysis"
+      ]
+    },
+    {
+      "skill": "mx_data",
+      "purpose": "获取主力资金和北向资金流向",
+      "fallback_skills": [
+        "money_flow"
+      ]
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "获取今日强势板块和代表股"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取今日市场主线和政策新闻"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取今日盘中异动原因分析"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "default_horizon": "short",
+  "supported_horizons": []
+}

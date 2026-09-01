@@ -6,122 +6,48 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 from config import Config
-from utils.cache.market import is_market_closed
+from utils.cache.market_data_db import get_market_data_db, init_market_data_tables
+from utils.cache.fundamental_db import get_fundamental_db, init_fundamental_tables
+from utils.cache.market_cache_db import get_market_cache_db as _get_cache_db, init_market_cache_tables
+from utils.cache.backtest_db import init_backtest_tables
 
 
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(Config.get_db_path())
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+from utils.cache.db_utils import make_db_context
+
+get_db = make_db_context(lambda: Config.get_db_path())
+
+_tables_initialized = False
+
+
+def ensure_cache_tables():
+    """幂等地初始化所有缓存数据库表（线程安全）。
+
+    替代原来模块级的 init_cache_tables() 调用。首次调用时执行 DDL，
+    后续调用为 no-op。由 bootstrap_common 在启动时触发。
+    """
+    global _tables_initialized
+    if _tables_initialized:
+        return
+    _tables_initialized = True
+    init_cache_tables()
 
 
 def init_cache_tables():
-    """初始化所有分类缓存表"""
+    """初始化所有数据库表"""
+    # 初始化 stock_radar.db（现有表）
+    _init_stock_radar_tables()
+
+    # 初始化新数据库
+    init_market_data_tables()
+    init_fundamental_tables()
+    init_market_cache_tables()
+    init_backtest_tables()
+
+
+def _init_stock_radar_tables():
+    """初始化 stock_radar.db 表结构（仅业务表，缓存表已迁至 market_cache.db）"""
     with get_db() as conn:
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_stock_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_board (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_news (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_rating (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_financial (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_board_list (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_realtime (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            trade_date TEXT NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_valuation (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_valuation_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_fund_flow (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_margin (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_block_trade (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_sector_rotation (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_risk_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS dialog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             dialog_uuid TEXT UNIQUE NOT NULL,
@@ -134,22 +60,27 @@ def init_cache_tables():
 # ── 过期判断 ──
 
 def _is_expired(row: sqlite3.Row) -> bool:
-    updated = datetime.strptime(row['updated_at'], '%Y-%m-%d %H:%M:%S')
-    expire = updated + timedelta(hours=row['expire_hours'])
+    expire_at = row['expire_at']
+    if not expire_at:
+        return False
+    expire = datetime.strptime(expire_at, '%Y-%m-%d %H:%M:%S')
     if datetime.now() > expire:
-        if is_market_closed() and updated.date() == datetime.now().date():
-            return False
         return True
     return False
 
 
-# ── 通用读写 ──
+# ── 通用读写（统一走 cache_kv，key 格式 "{table}:{key}"）──
+
+def _cache_key(table: str, key: str) -> str:
+    return f'{table}:{key}'
+
 
 def _get(table: str, key: str):
-    with get_db() as conn:
+    ck = _cache_key(table, key)
+    with _get_cache_db() as conn:
         row = conn.execute(
-            f'SELECT data, updated_at, expire_hours FROM {table} WHERE cache_key = ?',
-            (key,)
+            'SELECT data, expire_at FROM cache_kv WHERE cache_key = ?',
+            (ck,)
         ).fetchone()
     if not row:
         return None
@@ -160,19 +91,22 @@ def _get(table: str, key: str):
 
 
 def _set(table: str, key: str, data, expire_hours: int):
+    ck = _cache_key(table, key)
     serialized = json.dumps(data, ensure_ascii=False, default=str)
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with get_db() as conn:
+    now = datetime.now()
+    expire_at = (now + timedelta(hours=expire_hours)).strftime('%Y-%m-%d %H:%M:%S')
+    created_at = now.strftime('%Y-%m-%d %H:%M:%S')
+    with _get_cache_db() as conn:
         conn.execute(
-            f'''INSERT OR REPLACE INTO {table} (cache_key, data, updated_at, expire_hours)
-                VALUES (?, ?, ?, ?)''',
-            (key, serialized, now_str, expire_hours)
+            'INSERT OR REPLACE INTO cache_kv (cache_key, data, created_at, expire_at) VALUES (?, ?, ?, ?)',
+            (ck, serialized, created_at, expire_at),
         )
 
 
 def _delete(table: str, key: str):
-    with get_db() as conn:
-        conn.execute(f'DELETE FROM {table} WHERE cache_key = ?', (key,))
+    ck = _cache_key(table, key)
+    with _get_cache_db() as conn:
+        conn.execute('DELETE FROM cache_kv WHERE cache_key = ?', (ck,))
 
 
 # ── DataFrame 缓存 ──
@@ -203,10 +137,11 @@ def _cache_to_df(raw: str):
 
 
 def _get_df(table: str, key: str):
-    with get_db() as conn:
+    ck = _cache_key(table, key)
+    with _get_cache_db() as conn:
         row = conn.execute(
-            f'SELECT data, updated_at, expire_hours FROM {table} WHERE cache_key = ?',
-            (key,)
+            'SELECT data, expire_at FROM cache_kv WHERE cache_key = ?',
+            (ck,)
         ).fetchone()
     if not row:
         return None
@@ -217,11 +152,13 @@ def _get_df(table: str, key: str):
 
 
 def _set_df(table: str, key: str, df: pd.DataFrame, expire_hours: int):
+    ck = _cache_key(table, key)
     serialized = _df_to_cache(df)
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with get_db() as conn:
+    now = datetime.now()
+    expire_at = (now + timedelta(hours=expire_hours)).strftime('%Y-%m-%d %H:%M:%S')
+    created_at = now.strftime('%Y-%m-%d %H:%M:%S')
+    with _get_cache_db() as conn:
         conn.execute(
-            f'''INSERT OR REPLACE INTO {table} (cache_key, data, updated_at, expire_hours)
-                VALUES (?, ?, ?, ?)''',
-            (key, serialized, now_str, expire_hours)
+            'INSERT OR REPLACE INTO cache_kv (cache_key, data, created_at, expire_at) VALUES (?, ?, ?, ?)',
+            (ck, serialized, created_at, expire_at),
         )

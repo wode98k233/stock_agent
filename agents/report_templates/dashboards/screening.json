@@ -1,0 +1,24 @@
+{
+  "id": "screening",
+  "display_name": "筛选决策仪表盘",
+  "description": "候选标的排序、筛选维度、风格适配",
+  "scenario_tag": "筛选决策仪表盘",
+  "checklist_dimensions": ["估值面", "基本面", "技术面", "资金面"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "action_items", "renderer": "action_items", "fields": ["action_items"]},
+    {"id": "candidate_stocks", "renderer": "candidate_table", "fields": ["candidate_stocks"]},
+    {"id": "portfolio_action", "renderer": "action_text", "fields": ["portfolio_action"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "candidate_stocks", "type": "list", "description": "候选标的", "example": "[{\"rank\":1,\"name\":\"股票名\",\"ticker\":\"代码\",\"reason\":\"依据\",\"strength\":\"优势\",\"weakness\":\"短板\"}]"},
+    {"name": "portfolio_action", "type": "str", "description": "操作建议"},
+    {"name": "action_items", "type": "list", "description": "行动项"},
+    {"name": "falsification_signal", "type": "str", "description": "证伪条件"}
+  ]
+}

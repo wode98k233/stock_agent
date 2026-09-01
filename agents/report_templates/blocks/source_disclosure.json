@@ -1,0 +1,9 @@
+{
+  "id": "source_disclosure",
+  "title": "来源与限制",
+  "required": true,
+  "max_words": 260,
+  "prompt": "说明本报告使用的数据来源、时间敏感性、缺失字段和主要限制。引用研报或新闻时必须标注机构/媒体名称和日期；无法核实时写「来源不足」。最后保留不构成投资建议的合规声明。",
+  "data_slots": [],
+  "core_slots": []
+}

@@ -1,0 +1,9 @@
+{
+  "id": "technical_dimension",
+  "title": "技术面分析",
+  "required": true,
+  "max_words": 500,
+  "prompt": "必须引用具体技术指标数值（RSI具体值、MACD金叉/死叉第几日、均线排列状态、量比数值）。均线必须包含MA5/MA10/MA20/MA60，用于判断多头/空头排列。分析指标之间的关系：RSI超买+放量=警惕回调；MACD金叉+均线多头=趋势确认。必须给出关键价位：支撑位、压力位的具体数值。不要只说'强势'，要说明强势的量化依据。",
+  "data_slots": ["trend", "macd_signal", "rsi_status"],
+  "core_slots": ["trend", "macd_signal"]
+}

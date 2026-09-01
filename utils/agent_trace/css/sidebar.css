@@ -1,0 +1,37 @@
+/* ── sidebar ── */
+#sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+#sidebar::-webkit-scrollbar { width: 3px; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+.run-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s;
+  position: relative;
+}
+.run-item::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.run-item:hover { background: var(--surface2); }
+.run-item:hover::before { background: var(--muted); }
+.run-item.active { background: var(--surface2); }
+.run-item.active::before { background: var(--accent); }
+.run-item .run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.run-item .run-agent { font-weight: 600; font-size: 11px; color: var(--text); }
+.run-item .run-id { font-size: 9px; color: var(--muted); }
+.run-item .run-meta { font-size: 9px; color: var(--muted); display: flex; gap: 8px; }

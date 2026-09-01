@@ -1,0 +1,14 @@
+/* ── 响应式 ── */
+@media (max-width: 1100px) {
+  .app-shell { grid-template-columns: 240px minmax(0, 1fr); }
+  .detail-pane { display: none; }
+}
+
+@media (max-width: 760px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  .chat-pane { grid-template-rows: auto 1fr auto; }
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .message-list { padding: 16px; }
+  .config-panel { width: 100vw; }
+}

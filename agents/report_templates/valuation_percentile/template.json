@@ -1,0 +1,147 @@
+{
+  "id": "valuation_percentile",
+  "schema_version": "2.0",
+  "report_family": "valuation_percentile",
+  "asset_type": "instrument",
+  "intent_type": "deep_analysis",
+  "dashboard_type": "stock",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "估值分位分析",
+  "version": "1.0",
+  "role": "你是一名 A 股估值分析师。你的任务是分析个股或板块当前估值在历史上的分位位置，判断是否处于低估/合理/高估区间，结合盈利趋势给出估值是否合理的判断。所有分位数据必须标注时间范围。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "position_sizing",
+    "user_profile_fit",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "valuation_current",
+      "description": "当前估值指标",
+      "fields": [
+        "PE(TTM)",
+        "PB",
+        "PS",
+        "市值",
+        "最新价"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "valuation_history",
+      "description": "历史估值分位数据",
+      "fields": [
+        "PE近3年分位",
+        "PE近5年分位",
+        "PB近3年分位",
+        "PB近5年分位",
+        "PE历史最高",
+        "PE历史最低",
+        "PE中位数"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "earnings_trend",
+      "description": "盈利趋势——判断估值是否被增长消化",
+      "fields": [
+        "净利润增速",
+        "营收增速",
+        "ROE趋势",
+        "未来增速预期"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "peer_valuation",
+      "description": "同行业可比估值",
+      "fields": [
+        "同业PE",
+        "同业PB",
+        "同业PE中位数",
+        "行业平均增速"
+      ],
+      "tool_capabilities": [
+        "stock_screening",
+        "market_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "valuation_history",
+        "earnings_trend"
+      ],
+      "rule": "PE分位<30%+净利润增速>20%=低估且有增长支撑，强买入信号。PE分位>80%+增速放缓=高估风险，建议减仓。PE分位低但增速为负=估值陷阱，需谨慎。"
+    },
+    {
+      "dimensions": [
+        "valuation_current",
+        "peer_valuation"
+      ],
+      "rule": "个股PE显著低于行业中位数但增速高于行业平均=相对低估。个股PE高于行业平均但增速低于行业=相对高估。"
+    }
+  ],
+  "common_rules": [
+    "investor_perspective",
+    "position_holding"
+  ],
+  "qa_rules": [
+    "估值分位必须标注时间范围（近3年/近5年/近10年），不得只说'历史低位'。",
+    "必须结合盈利趋势判断估值合理性，不能只看分位数。",
+    "低分位不等于低估——必须排除估值陷阱（业绩下滑导致的被动低估值）。",
+    "同行业对比至少覆盖3家可比公司。",
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "获取个股当前估值和历史估值分位"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取盈利预期和估值相关分析"
+    },
+    {
+      "skill": "mx_xuangu",
+      "purpose": "获取同行业可比公司估值"
+    }
+  ],
+  "analysis_framework": {
+    "summary": "估值分位分析顺序：先获取 PE/PB 历史分位 → 判断低估/合理/高估区间 → 用盈利趋势验证（低估值是否陷阱）→ 与同行比较 → 输出估值视角的操作条件。",
+    "rules": [
+      "分位区间：PE/PB 分位<20%=历史低估，20-60%=合理，60-80%=偏高，>80%=高估；分位取近 3-5 年窗口，注明窗口口径。",
+      "低估验证（防陷阱）：低分位+盈利增速下滑=价值陷阱（不因便宜买入）；低分位+盈利企稳/回升=真低估（可关注）。用 P/E 增速匹配（PEG）验证。",
+      "高估验证（防泡沫）：高分位+盈利高增长=成长溢价（可持有但禁追高）；高分位+增速放缓=估值回归风险（警惕）。",
+      "同行对比：与同行业公司估值横向对比，相对更低的估值有安全边际；行业整体高分位时个股低分位也可能是陷阱（行业逻辑坏了）。",
+      "操作条件：估值视角只给参考区间不给买卖指令——低估区间+其他维度共振（技术/资金）才构成买入条件；高估区间+技术破位=减仓信号。"
+    ]
+  }
+}
