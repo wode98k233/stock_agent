@@ -33,7 +33,6 @@
 | Web 工作台 | FastAPI + 前端面板，支持对话、配置、回测、决策仪表盘 |
 | 通知推送 | 钉钉 / 飞书 / 企业微信 / Telegram / 邮件 / Webhook 等 12 种渠道 |
 
-<<<<<<< HEAD
 ## 界面预览
 
 **Web 工作台 —— 对话分析**
@@ -58,8 +57,6 @@
 | --- | --- | --- |
 | ![报告模板管理](assets/web-template-manager.png) | ![回答溯源](assets/web-trace.png) | ![工具在线测试](assets/web-tool-test.png) |
 
-=======
->>>>>>> 40f79ac43b822a00c433a4e67548cf3c2313df0d
 ## 快速开始
 
 ### 环境要求
