@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="glassmorphism">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="x-content-type" content="presentation" />
+<meta name="x-presentation-version" content="1.0" />
+<meta name="x-presentation-indicator" content="deck-stage .slide" />
+<title>Stock Radar v2.1 · 可验证投研工作台 · 发布介绍</title>
+<link rel="stylesheet" href="./_shared/fonts.css">
+<link rel="stylesheet" href="./_shared/base.css">
+<link id="theme-link" rel="stylesheet" href="./_shared/themes/glassmorphism.css">
+<link rel="stylesheet" href="./_shared/animations/animations.css">
+<link rel="stylesheet" href="./_shared/decorations.css">
+<style>
+  /* ——— 产品截图窗口 ——— */
+  .shot-window{border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow-lg);
+    border:1px solid var(--border);background:#0a0e1f;display:flex;flex-direction:column;height:100%}
+  .shot-bar{display:flex;align-items:center;gap:8px;padding:14px 20px;background:rgba(255,255,255,.05);
+    border-bottom:1px solid var(--border);flex:0 0 auto}
+  .shot-dot{width:12px;height:12px;border-radius:50%}
+  .shot-title{margin-left:12px;font-size:15px;color:var(--text-3);font-family:var(--font-mono)}
+  .shot-window img{flex:1;width:100%;object-fit:contain;object-position:top center;min-height:0}
+
+  /* ——— 图文分栏 ——— */
+  .demo-split{display:grid;grid-template-columns:620px 1fr;gap:56px;height:100%;align-items:center;padding:0 8px}
+  .demo-body h2{font-size:52px;font-weight:800;line-height:1.12;letter-spacing:var(--letter-tight);margin:18px 0 0}
+  .demo-body .desc{font-size:19px;color:var(--text-2);margin:22px 0 0;line-height:1.75;max-width:46ch}
+  .demo-points{list-style:none;padding:0;margin:30px 0 0;display:flex;flex-direction:column;gap:14px}
+  .demo-points li{display:flex;align-items:flex-start;gap:12px;font-size:17px;color:var(--text-2);line-height:1.5}
+  .demo-points .tick{flex:0 0 auto;width:22px;height:22px;border-radius:50%;background:var(--grad);
+    display:grid;place-items:center;font-size:12px;color:#0b1024;font-weight:800;margin-top:2px}
+
+  /* ——— KPI ——— */
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:28px;margin-top:56px}
+  .kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+    padding:40px 32px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .kpi-card::before{content:"";position:absolute;inset:0 0 auto;height:4px;background:var(--grad)}
+  .kpi-label{font-size:17px;color:var(--text-3);letter-spacing:.04em}
+  .kpi-value{font-size:64px;font-weight:800;letter-spacing:var(--letter-tight);margin-top:12px;
+    font-family:var(--font-mono);line-height:1}
+  .kpi-delta{margin-top:14px;font-size:15px;color:var(--good)}
+
+  /* ——— 封面 ——— */
+  .cover-badge{display:inline-flex;align-items:center;gap:10px;padding:12px 26px;border-radius:999px;
+    background:var(--grad-soft);border:1px solid var(--border-strong);font-size:17px;color:var(--text-1);
+    font-family:var(--font-mono);letter-spacing:.06em}
+
+  /* ——— 交互升级列表 ——— */
+  .feat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:26px;margin-top:48px}
+  .feat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:32px 34px;box-shadow:var(--shadow)}
+  .feat-card h3{margin:0;font-size:24px;font-weight:700}
+  .feat-card p{margin:12px 0 0;font-size:16.5px;color:var(--text-2);line-height:1.65}
+  .feat-icon{font-size:30px;margin-bottom:14px;display:block}
+</style>
+</head>
+<body data-themes="glassmorphism,aurora,tokyo-night,ledger-dark" data-theme-base="./_shared/themes/">
+<deck-stage width="1920" height="1080">
+
+  <!-- 1. 封面 -->
+  <section class="slide center tc deco-ambient-purple" data-deck-label="封面">
+    <div style="max-width:1100px;margin:0 auto">
+      <div class="cover-badge anim-zoom-pop" data-anim="zoom-pop">Stock Radar · v2.1 · 2026</div>
+      <h1 class="h1 anim-blur-in" data-anim="blur-in" style="font-size:132px;margin:44px 0 0;letter-spacing:-.04em">
+        <span class="gradient-text">可验证投研工作台</span>
+      </h1>
+      <p class="lede anim-fade-up" data-anim="fade-up" style="font-size:30px;margin-top:36px">
+        结论可验证 · 过程可回溯 · 策略可复盘
+      </p>
+      <p class="anim-fade-up" data-anim="fade-up" style="color:var(--text-3);font-size:19px;margin-top:26px">
+        基于 LLM + LangGraph 的 A 股智能分析 Agent —— v2.1 发布介绍
+      </p>
+    </div>
+    <div class="notes">开场：v2.1 是一次定位升级——从「能回答问题」到「结论可验证、过程可回溯、策略可复盘」。本次介绍全部基于产品真实运行画面。</div>
+    <div data-fx="particle-burst"></div>
+  </section>
+
+  <!-- 2. 目录 -->
+  <section class="slide" data-deck-label="发布导览">
+    <p class="kicker anim-fade-down" data-anim="fade-down">Agenda · 发布导览</p>
+    <h2 class="h2 anim-fade-up" data-anim="fade-up">四幕，看懂 v2.1</h2>
+    <div class="feat-grid" style="margin-top:64px">
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">🖥️</span>
+        <h3>01 · 真实使用</h3>
+        <p>六屏产品实拍：对话分析、全局总览、短线情绪、研究台账、评测系统、策略回测。全部来自真实运行的 Web 工作台。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">🧩</span>
+        <h3>02 · 新增子系统</h3>
+        <p>研究台账、策略研发闭环、评估与对话评审——围绕「研究 → 策略 → 评估」构建完整闭环。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">📊</span>
+        <h3>03 · 更新幅度</h3>
+        <p>技能 12 → 19，报告模板 21 → 24，仪表盘 7 → 10，新增 203 个测试文件。数字说话。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">🚀</span>
+        <h3>04 · 立即体验</h3>
+        <p>一条命令启动 Web 工作台。开源、可复现、可二次开发。</p>
+      </div>
+    </div>
+    <div class="notes">导览页：整支视频分四幕，第一幕用真实产品画面展示能力，后面讲架构与数据。</div>
+  </section>
+
+  <!-- 3. 第一幕标题 -->
+  <section class="slide center tc deco-orbs" data-deck-label="第一幕 · 真实使用">
+    <div class="deco-orb"></div><div class="deco-orb"></div><div class="deco-orb"></div>
+    <div style="max-width:900px;margin:0 auto">
+      <p class="kicker anim-fade-down" data-anim="fade-down">Act 01</p>
+      <h1 class="h1 anim-rise-in" data-anim="rise-in" style="font-size:110px">真实使用，<span class="gradient-text">不是概念图</span></h1>
+      <div class="divider-accent" style="margin:28px auto"></div>
+      <p class="lede anim-fade-up" data-anim="fade-up">以下六屏全部来自正在运行的产品本体 —— 你看到的每一个数字，都是它此刻真实的输出。</p>
+    </div>
+    <div class="notes">第一幕强调：截图来自本机 127.0.0.1:8000 真实运行的 Web 工作台，不是设计稿。</div>
+  </section>
+
+  <!-- 4. 对话分析首页 -->
+  <section class="slide" data-deck-label="对话分析">
+    <div class="demo-split">
+      <div class="demo-body anim-fade-right" data-anim="fade-right">
+        <p class="kicker">Live 01 · 对话分析</p>
+        <h2>用一句话，<br>驱动整条投研链路</h2>
+        <p class="desc">中文提问即可发起完整分析：Agent 自动选择技能、调度数据源、执行推理，右侧实时展示执行链。模糊需求会先澄清再动手，长任务可随时停止。</p>
+        <ul class="demo-points">
+          <li><span class="tick">✓</span> 6 种 Agent 模式按复杂度自动切换</li>
+          <li><span class="tick">✓</span> think / 工具节点全程可回溯</li>
+          <li><span class="tick">✓</span> 澄清反问 · 任务停止 · 技能渐进披露</li>
+        </ul>
+      </div>
+      <div class="shot-window anim-fade-left" data-anim="fade-left">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">127.0.0.1:8000 — 选股雷达 Web 工作台</span>
+        </div>
+        <img src="assets/report.jpg" alt="Stock Radar 对话分析报告实拍">
+      </div>
+    </div>
+    <div class="notes">对话分析实拍（本地真实数据）：用户一句话提问，Agent 产出完整研判报告——记忆上下文、核心结论、关键要点、资产影响矩阵，左侧 80+ 条真实对话历史。</div>
+  </section>
+
+  <!-- 5. 全局总览大屏 -->
+  <section class="slide" data-deck-label="全局总览大屏">
+    <div style="height:100%;display:flex;flex-direction:column;gap:28px">
+      <div class="anim-fade-down" data-anim="fade-down" style="display:flex;align-items:baseline;gap:28px">
+        <div>
+          <p class="kicker">Live 02 · v2.1 新增</p>
+          <h2 class="h2" style="margin:10px 0 0;font-size:48px">全局总览大屏 —— 一屏掌控全局</h2>
+        </div>
+        <p style="color:var(--text-2);font-size:18px;margin:0;max-width:52ch">
+          市场情绪、资金链路、宽基估值、Agent 效果统计与事件日志同屏汇聚，自动刷新待命。
+        </p>
+      </div>
+      <div class="shot-window anim-rise-in" data-anim="rise-in" style="flex:1">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">全局总览 — 研究摘要 / 资金链路 / 市场温度 / 宽基估值</span>
+        </div>
+        <img src="assets/overview.jpg" alt="全局总览大屏实拍">
+      </div>
+    </div>
+    <div class="notes">全局总览：左列系统资源与数据中心产能，中列研究摘要子包评分、资金链路、详细记分板、市场温度，右列宽基估值、Agent 效果统计、快捷入口。</div>
+  </section>
+
+  <!-- 6. 短线情绪观测 -->
+  <section class="slide" data-deck-label="短线情绪观测">
+    <div class="demo-split">
+      <div class="demo-body anim-fade-right" data-anim="fade-right">
+        <p class="kicker">Live 03 · v2.1 新增</p>
+        <h2>短线情绪观测 ——<br>读懂市场的温度</h2>
+        <p class="desc">情绪周期、连板梯队、炸板率、北向资金、赚钱效应……短线选手最关心的情绪指标，聚合一屏实时呈现。</p>
+        <ul class="demo-points">
+          <li><span class="tick">✓</span> 情绪周期定位 · 连板天梯 · 晋级率追踪</li>
+          <li><span class="tick">✓</span> 涨跌分布 / 创新高新低 / 北向资金流向</li>
+          <li><span class="tick">✓</span> 短线温度与赚钱效应量化打分</li>
+        </ul>
+      </div>
+      <div class="shot-window anim-fade-left" data-anim="fade-left">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">短线情绪观测 — 情绪周期 7.5 · 连板梯队 · 炸板率 27.17%</span>
+        </div>
+        <img src="assets/shortline.jpg" alt="短线情绪观测面板实拍">
+      </div>
+    </div>
+    <div class="notes">短线情绪：实拍数据为情绪周期 7.5、炸板率 27.17%、北向净流入 42.97 亿、市场宽度与短线温度 55.88° 等真实聚合结果。</div>
+  </section>
+
+  <!-- 7. 研究台账 -->
+  <section class="slide" data-deck-label="研究台账">
+    <div class="demo-split">
+      <div class="demo-body anim-fade-right" data-anim="fade-right">
+        <p class="kicker">Live 04 · v2.1 新增</p>
+        <h2>研究台账 ——<br>把研究沉淀成资产</h2>
+        <p class="desc">黄金、铜、生猪、债券、红利、恒生科技……每类资产的研判台账持续跟踪，信号逐条对照数据验证，研究过程可积累、可回看。</p>
+        <ul class="demo-points">
+          <li><span class="tick">✓</span> 多资产研判台账 · 评分与结论留痕</li>
+          <li><span class="tick">✓</span> 加仓 / 持有 / 减仓信号逐条数据验证</li>
+          <li><span class="tick">✓</span> 数据口径披露 —— 结论可独立复核</li>
+        </ul>
+      </div>
+      <div class="shot-window anim-fade-left" data-anim="fade-left">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">研究台账 — 债券 / 铜 / 黄金 / 猪周期 · 信号验证</span>
+        </div>
+        <img src="assets/thesis.jpg" alt="研究台账页面实拍">
+      </div>
+    </div>
+    <div class="notes">研究台账：左侧 8 个研判台账（债券基金 +5、铜 -5、红利 +4、黄金 -3 等），右侧信号验证表格逐条给出阈值与当前值对照。</div>
+  </section>
+
+  <!-- 8. 评测系统 -->
+  <section class="slide" data-deck-label="评估与对话评审">
+    <div class="demo-split">
+      <div class="demo-body anim-fade-right" data-anim="fade-right">
+        <p class="kicker">Live 05 · v2.1 新增</p>
+        <h2>评估与对话评审 ——<br>让 AI 输出可打分</h2>
+        <p class="desc">三入口评测矩阵：描述级 / 分解级 / Agent 级逐层下钻，维度注册表驱动评分。Agent 回答得好不好，从此有据可依。</p>
+        <ul class="demo-points">
+          <li><span class="tick">✓</span> 题库回归 · 存量回测 · Agent 研判多入口</li>
+          <li><span class="tick">✓</span> 评测矩阵三级下钻，定位薄弱维度</li>
+          <li><span class="tick">✓</span> 批量重跑，量化每次迭代的质量变化</li>
+        </ul>
+      </div>
+      <div class="shot-window anim-fade-left" data-anim="fade-left">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">评测系统 — 三入口评测矩阵 · 维度注册表驱动</span>
+        </div>
+        <img src="assets/eval.jpg" alt="评测系统页面实拍">
+      </div>
+    </div>
+    <div class="notes">评测系统：A 描述级（打开即评）、B 分解级（seeds 层级）、C Agent 级（全链路）三条评测链路，支持批量重跑与维度下钻。</div>
+  </section>
+
+  <!-- 9. 策略回测 -->
+  <section class="slide" data-deck-label="策略研发闭环">
+    <div class="demo-split">
+      <div class="demo-body anim-fade-right" data-anim="fade-right">
+        <p class="kicker">Live 06 · v2.1 新增</p>
+        <h2>策略研发闭环 ——<br>从想法到可迭代的策略</h2>
+        <p class="desc">内置 6 套经典策略模板，支持批量对比、多周期验证、参数优化与 AI 智能调参。策略构思 → 回测 → 评估 → 迭代，一条链路走完。</p>
+        <ul class="demo-points">
+          <li><span class="tick">✓</span> IPO 打新 / 小市值轮动 / MACD / 均线 / 布林 / 多因子</li>
+          <li><span class="tick">✓</span> 批量对比 · 参数优化 · AI 智能调参</li>
+          <li><span class="tick">✓</span> 信号评估回溯，策略质量持续度量</li>
+        </ul>
+      </div>
+      <div class="shot-window anim-fade-left" data-anim="fade-left">
+        <div class="shot-bar">
+          <span class="shot-dot" style="background:#ff5f57"></span>
+          <span class="shot-dot" style="background:#febc2e"></span>
+          <span class="shot-dot" style="background:#28c840"></span>
+          <span class="shot-title">策略回测 — 策略库 / 批量对比 / 参数优化 / AI 调参</span>
+        </div>
+        <img src="assets/backtest.jpg" alt="策略回测页面实拍">
+      </div>
+    </div>
+    <div class="notes">策略回测：左侧策略库（每个策略带标签），右侧回测结果 / 批量对比 / 多周期验证 / 回测历史 / AI 智能调参五个工作区。</div>
+  </section>
+
+  <!-- 10. 第二幕标题 -->
+  <section class="slide center tc deco-ambient-purple" data-deck-label="第二幕 · 更新幅度">
+    <div style="max-width:900px;margin:0 auto">
+      <p class="kicker anim-fade-down" data-anim="fade-down">Act 02</p>
+      <h1 class="h1 anim-rise-in" data-anim="rise-in" style="font-size:104px">用数字丈量<br><span class="gradient-text">这次更新</span></h1>
+      <div class="divider-accent" style="margin:28px auto"></div>
+      <p class="lede anim-fade-up" data-anim="fade-up">能力面、内容面、工程面，三条线同时跃迁。</p>
+    </div>
+    <div class="notes">第二幕：从数字看 v2.1 的更新幅度。</div>
+  </section>
+
+  <!-- 11. KPI -->
+  <section class="slide" data-deck-label="更新幅度">
+    <p class="kicker anim-fade-down" data-anim="fade-down">By the Numbers · 更新幅度</p>
+    <h2 class="h2 anim-fade-up" data-anim="fade-up">v2.1 相对 v2.0</h2>
+    <div class="kpi-row">
+      <div class="kpi-card anim-fade-up" data-anim="fade-up">
+        <div class="kpi-label">内置技能</div>
+        <div class="kpi-value"><span class="counter" data-anim="counter-up" data-to="19">19</span></div>
+        <div class="kpi-delta">12 → 19 · 新增 7 项分析能力</div>
+      </div>
+      <div class="kpi-card anim-fade-up" data-anim="fade-up">
+        <div class="kpi-label">报告模板</div>
+        <div class="kpi-value"><span class="counter" data-anim="counter-up" data-to="24">24</span></div>
+        <div class="kpi-delta">21 → 24 · 证据下钻可溯源</div>
+      </div>
+      <div class="kpi-card anim-fade-up" data-anim="fade-up">
+        <div class="kpi-label">仪表盘</div>
+        <div class="kpi-value"><span class="counter" data-anim="counter-up" data-to="10">10</span></div>
+        <div class="kpi-delta">7 → 10 · 新增全局总览大屏</div>
+      </div>
+      <div class="kpi-card anim-fade-up" data-anim="fade-up">
+        <div class="kpi-label">新增测试文件</div>
+        <div class="kpi-value">+<span class="counter" data-anim="counter-up" data-to="203">203</span></div>
+        <div class="kpi-delta">全库 463 个 · unit / integration / e2e</div>
+      </div>
+    </div>
+    <div class="feat-grid" style="margin-top:44px">
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <h3>架构开源补全</h3>
+        <p>新增 <code>eval</code> / <code>thesis</code> / <code>crowding</code> / <code>signal_eval</code> 四个顶层包 —— 评测、台账、拥挤度观测、信号评估能力一并开源。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <h3>技能整合提效</h3>
+        <p><code>stock_query</code> + <code>technical_analysis</code> + <code>risk_metrics</code> 合并为 <code>stock_analysis</code>，一次分析给出完整的个股画像。</p>
+      </div>
+    </div>
+    <div class="notes">KPI 数字均为 v2.1 release 实测统计，counter-up 动画滚动展示。</div>
+  </section>
+
+  <!-- 12. 交互升级 -->
+  <section class="slide" data-deck-label="交互与工程升级">
+    <p class="kicker anim-fade-down" data-anim="fade-down">Experience · 交互升级</p>
+    <h2 class="h2 anim-fade-up" data-anim="fade-up">细节里的体验跃迁</h2>
+    <div class="feat-grid">
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">💬</span>
+        <h3>澄清反问</h3>
+        <p>需求模糊时主动澄清，而不是硬猜。理解对了，分析才对。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">⏹️</span>
+        <h3>任务停止</h3>
+        <p>长任务可随时中断，预算可控、节奏由你。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">🔗</span>
+        <h3>对话过程流</h3>
+        <p>think / 工具节点全程可回溯，回答溯源 · 执行归因。</p>
+      </div>
+      <div class="feat-card anim-fade-up" data-anim="fade-up">
+        <span class="feat-icon">📚</span>
+        <h3>报告证据下钻</h3>
+        <p>结论逐级下钻到数据与推理依据，让「可验证」落到实处。</p>
+      </div>
+    </div>
+    <div class="notes">交互升级五项（含技能渐进披露），本页展示其中四项重点。</div>
+  </section>
+
+  <!-- 13. 结尾 -->
+  <section class="slide center tc deco-soft-gradient" data-deck-label="立即体验">
+    <div style="max-width:1000px;margin:0 auto">
+      <h1 class="h1 anim-zoom-pop" data-anim="zoom-pop" style="font-size:104px">
+        <span class="gradient-text">现在，就试试</span>
+      </h1>
+      <p class="lede anim-fade-up" data-anim="fade-up" style="margin-top:40px;font-size:26px">
+        git clone → pip install → python -m server
+      </p>
+      <p class="anim-fade-up" data-anim="fade-up" style="color:var(--text-3);font-size:20px;margin-top:30px">
+        github.com/wode98k233/stock_agent · GPL-3.0 · 仅供学习研究，不构成投资建议
+      </p>
+    </div>
+    <div class="notes">结尾 CTA：给出最快的上手路径与仓库地址，并保留风险提示。</div>
+    <div data-fx="particle-burst"></div>
+  </section>
+
+</deck-stage>
+<script src="./_shared/runtime.js"></script>
+<script src="./_shared/animations/fx-runtime.js"></script>
+<script src="./_shared/animations/fx/particle-burst.js"></script>
+<script>
+// 宣传视频模式：自动播放；任何手动操作（键盘/鼠标）即暂停，交给观众控制
+(function () {
+  var playing = true, DUR = 8000;
+  var timer = setInterval(function () {
+    if (!playing) return;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  }, DUR);
+  function stop() { playing = false; clearInterval(timer); }
+  document.addEventListener('keydown', function (e) { if (e.isTrusted) stop(); }, true);
+  document.addEventListener('mousedown', function (e) { if (e.isTrusted) stop(); }, true);
+})();
+</script>
+</body></html>

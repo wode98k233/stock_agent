@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" font-family="'Microsoft YaHei','PingFang SC',sans-serif">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1424"/>
+      <stop offset="100%" stop-color="#111d34"/>
+    </linearGradient>
+    <linearGradient id="hub" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4c8dff"/>
+      <stop offset="100%" stop-color="#7c5cff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="700" fill="url(#bg2)"/>
+  <circle cx="1130" cy="660" r="170" fill="#7c5cff" opacity="0.06"/>
+
+  <!-- 标题 -->
+  <text x="80" y="76" font-size="34" fill="#ffffff" font-weight="bold">v2.1 新增子系统</text>
+  <text x="80" y="112" font-size="17" fill="#8fb0dc">围绕「研究 → 策略 → 评估」闭环，六个子系统协同工作</text>
+
+  <!-- 中心枢纽 -->
+  <rect x="440" y="322" width="320" height="72" rx="36" fill="url(#hub)"/>
+  <text x="600" y="352" font-size="20" fill="#ffffff" text-anchor="middle" font-weight="bold">可验证投研工作台</text>
+  <text x="600" y="378" font-size="13" fill="#e3ecff" text-anchor="middle">结论可验证 · 过程可回溯 · 策略可复盘</text>
+
+  <!-- 左上：全局总览大屏 -->
+  <rect x="80" y="170" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="80" y="170" width="6" height="132" rx="3" fill="#4c8dff"/>
+  <text x="112" y="208" font-size="19" fill="#ffffff" font-weight="bold">全局总览大屏</text>
+  <text x="112" y="238" font-size="14" fill="#9fb3d1">一屏总览市场、持仓、信号与告警状态</text>
+  <text x="112" y="268" font-size="13" fill="#6f92c2">仪表盘 7 → 10</text>
+
+  <!-- 左中：盯盘告警 -->
+  <rect x="80" y="330" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="80" y="330" width="6" height="132" rx="3" fill="#f2b04c"/>
+  <text x="112" y="368" font-size="19" fill="#ffffff" font-weight="bold">盯盘告警</text>
+  <text x="112" y="398" font-size="14" fill="#9fb3d1">价格 / 指标条件触发，实时监控持仓</text>
+  <text x="112" y="428" font-size="13" fill="#6f92c2">推送 12 种通知渠道</text>
+
+  <!-- 左下：短线情绪观测 -->
+  <rect x="80" y="490" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="80" y="490" width="6" height="132" rx="3" fill="#5fd39a"/>
+  <text x="112" y="528" font-size="19" fill="#ffffff" font-weight="bold">短线情绪观测</text>
+  <text x="112" y="558" font-size="14" fill="#9fb3d1">连板、涨停结构、赚钱效应等情绪指标</text>
+  <text x="112" y="588" font-size="13" fill="#6f92c2">crowding 拥挤度观测</text>
+
+  <!-- 右上：研究台账 -->
+  <rect x="800" y="170" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="800" y="170" width="6" height="132" rx="3" fill="#7c5cff"/>
+  <text x="832" y="208" font-size="19" fill="#ffffff" font-weight="bold">研究台账</text>
+  <text x="832" y="238" font-size="14" fill="#9fb3d1">研究过程与结论沉淀为可积累资产</text>
+  <text x="832" y="268" font-size="13" fill="#6f92c2">thesis 研究库</text>
+
+  <!-- 右中：策略研发闭环 -->
+  <rect x="800" y="330" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="800" y="330" width="6" height="132" rx="3" fill="#4c8dff"/>
+  <text x="832" y="368" font-size="19" fill="#ffffff" font-weight="bold">策略研发闭环</text>
+  <text x="832" y="398" font-size="14" fill="#9fb3d1">策略构思 → 回测 → 评估 → 迭代</text>
+  <text x="832" y="428" font-size="13" fill="#6f92c2">signal_eval 信号评估</text>
+
+  <!-- 右下：评估与对话评审 -->
+  <rect x="800" y="490" width="320" height="132" rx="12" fill="#152238" stroke="#2f5590"/>
+  <rect x="800" y="490" width="6" height="132" rx="3" fill="#f2b04c"/>
+  <text x="832" y="528" font-size="19" fill="#ffffff" font-weight="bold">评估与对话评审</text>
+  <text x="832" y="558" font-size="14" fill="#9fb3d1">对 Agent 回答打分评审，量化输出质量</text>
+  <text x="832" y="588" font-size="13" fill="#6f92c2">eval 评测包</text>
+
+  <!-- 连接线 -->
+  <g stroke="#2f5590" stroke-width="2" fill="none" opacity="0.8">
+    <path d="M 400 236 C 430 236 420 340 440 350"/>
+    <path d="M 400 396 L 440 358"/>
+    <path d="M 400 556 C 430 556 420 380 440 370"/>
+    <path d="M 800 236 C 770 236 780 340 760 350"/>
+    <path d="M 800 396 L 760 358"/>
+    <path d="M 800 556 C 770 556 780 380 760 370"/>
+  </g>
+
+  <!-- 底部注记 -->
+  <text x="600" y="672" font-size="14" fill="#6f92c2" text-anchor="middle">新增顶层包 eval / thesis / crowding / signal_eval —— 评测、台账、拥挤度、信号评估能力一并开源</text>
+</svg>
