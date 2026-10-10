@@ -53,15 +53,44 @@ _REQUIRED_BLOCK_FIELDS = {"id", "title", "required", "prompt"}
 
 # 模板声明的是"数据能力"，不是具体 skill/tool 名。
 # 这里集中维护能力到技能的默认映射，避免各模板硬绑定某个工具名。
+#
+# 单一事实源：`agents/report_templates/index.json` 不再重复声明 capability_mapping，
+# API（server/routes/report_templates.py）通过 get_capability_mapping() 从这里派生。
+# 历史上两处各写一份，已漂移 3 处（macro_data 缺失 / news_search 多 stock_query /
+# stock_screening 少 stock_query），故收敛到此处。
 _CAPABILITY_SKILL_MAP = {
-    "market_data": ["mx_data", "stock_query"],
-    "technical_indicator": ["mx_data", "technical_analysis"],
+    "market_data": ["mx_data", "stock_analysis"],
+    "technical_indicator": ["mx_data", "stock_analysis"],
     "fund_flow": ["mx_data", "money_flow"],
-    "stock_screening": ["mx_xuangu", "stock_query"],
-    "news_search": ["mx_search", "sentiment_analysis"],
+    "stock_screening": ["mx_xuangu", "stock_analysis"],
+    "news_search": ["mx_search", "market_review"],
     "valuation": ["mx_data", "valuation"],
+    "macro_data": ["macro_data", "mx_data"],
     "user_input": [],
 }
+
+# 能力的中文说明（供管理页面展示，与上面的映射同源维护）
+CAPABILITY_DESCRIPTIONS = {
+    "market_data": "行情数据：价格、涨跌幅、成交额、换手率等基础字段",
+    "technical_indicator": "技术指标：MACD、RSI、KDJ、均线系统、布林带等",
+    "fund_flow": "资金流向：主力资金、北向资金、融资融券、龙虎榜",
+    "stock_screening": "选股筛选：多条件筛选、行业筛选、概念股筛选",
+    "news_search": "新闻/公告搜索：最新新闻、研报、公告和情感分析",
+    "valuation": "估值分析：PE/PB历史分位、估值对比、PEG计算",
+    "macro_data": "宏观数据：M2/M1/M0、LPR、CPI、GDP、PMI 及国债收益率时序",
+    "user_input": "用户提供的信息：成本价、仓位、风险偏好等，无需工具调用",
+}
+
+
+def get_capability_mapping() -> dict:
+    """能力 → {"skills": [...], "description": "..."}（由单一事实源派生）。"""
+    return {
+        capability: {
+            "skills": list(skills),
+            "description": CAPABILITY_DESCRIPTIONS.get(capability, ""),
+        }
+        for capability, skills in _CAPABILITY_SKILL_MAP.items()
+    }
 
 
 def _load_route_rules() -> dict:
@@ -95,12 +124,13 @@ def clear_route_rules_cache():
 
 def invalidate_template_caches() -> None:
     """清空模板配置相关的全部运行时缓存。"""
-    global _index_cache, _route_rules_cache
+    global _index_cache, _route_rules_cache, _intent_rules_cache
     _rule_cache.clear()
     _template_cache.clear()
     _block_cache.clear()
     _index_cache = None
     _route_rules_cache = None
+    _intent_rules_cache = None
 
 
 
@@ -170,11 +200,17 @@ def load_template(template_id: Optional[str] = None) -> dict:
 
     # 合并公共 qa_rules
     common_rules = template.pop("common_rules", [])
-    if common_rules:
-        qa = template.get("qa_rules", [])
-        for rule_id in common_rules:
-            qa.extend(_load_common_rule(rule_id))
-        template["qa_rules"] = qa
+    qa = template.get("qa_rules", [])
+    for rule_id in common_rules:
+        qa.extend(_load_common_rule(rule_id))
+    # 全局规则（对所有模板生效，避免逐模板挂载遗漏）：
+    # - multi_intent：多子问题必须逐一作答。背景：用户一句话问「大盘总结 + 电池/医疗/
+    #   黄金买哪个」时，报告只答模板最贴合的那问，其余子问题被静默丢弃（2026-10-08 日志实测）。
+    # - data_gap_brief：数据缺口声明收敛（≤3条、禁写补齐方式）。背景：实测报告里
+    #   「数据缺口声明」写 7 条含补齐方式，占全文 12.8%（2026-10-10）。
+    for rule_id in ("multi_intent", "data_gap_brief"):
+        qa.extend(_load_common_rule(rule_id))
+    template["qa_rules"] = qa
 
     _validate_template(template, tid)
     _template_cache[tid] = template
@@ -246,56 +282,190 @@ def select_template_for_input(user_input: str, history: list = None) -> str:
 
 def _select_template_core(user_input: str) -> str:
     """纯路由打分（不含历史），供追问继承复用。"""
-    text = (user_input or "").lower()
-    enabled_ids = _enabled_template_ids()
-
-    # 构建 family → [(priority, template_id, weighted_keywords)] 映射
-    family_map = _build_family_route_map(enabled_ids)
-
-    # 第一阶段：family 打分
-    best_family = ""
-    best_family_score = 0
-    for family, entries in family_map.items():
-        family_score = 0
-        for _, _, weighted_keywords in entries:
-            family_score += _score_route(text, weighted_keywords)[0]
-        if family_score > best_family_score:
-            best_family = family
-            best_family_score = family_score
-
-    # 第二阶段：在最佳 family 内选模板
-    route_rules = get_template_route_rules()
-    if best_family and best_family_score > 0:
-        best_template = ""
-        best_score = 0
-        best_priority = len(route_rules)
-        for priority, template_id, weighted_keywords in family_map[best_family]:
-            score, _ = _score_route(text, weighted_keywords)
-            if score > best_score or (score == best_score and score > 0 and priority < best_priority):
-                best_template = template_id
-                best_score = score
-                best_priority = priority
-        if best_template:
-            return best_template
-
-    # 回退：全量打分（向后兼容）
-    best_template = ""
-    best_score = 0
-    best_priority = len(route_rules)
-    for priority, (template_id, weighted_keywords) in enumerate(route_rules):
-        if template_id not in enabled_ids:
-            continue
-        score, _ = _score_route(text, weighted_keywords)
-        if score > best_score or (score == best_score and score > 0 and priority < best_priority):
-            best_template = template_id
-            best_score = score
-            best_priority = priority
-
-    if best_template:
-        return best_template
-
+    ranked = _rank_core(user_input)
+    if ranked["winner"]:
+        return ranked["winner"]
     index = _load_index()
     return Config.REPORT_TEMPLATE or index.get("default") or "standard"
+
+
+# ── 意图优先路由（数据驱动）────────────────────────────────────────
+# 词表在 agents/report_templates/intent_rules.json（可运营调参，不必改代码），
+# 这里只保留一个通用求值器。语义：
+#   require_any 为「组列表」：组间 AND、组内 OR —— 全部组各至少命中一词才成立；
+#   block_any  为「平坦词表」：任一命中即否决该意图。
+# 为什么不放 route_rules.json：`get_template_route_rules()` 是 list(rules.items())
+# **不过滤**，特殊键会被当成模板参与打分；route-config UI 也会把它渲染成可编辑的
+# 关键词行、save_route_rules 保存时整文件重写。独立文件 + 独立求值器互不干扰。
+# 现有两条：market_review（修「市场的9月总结」得 0 分）与 quick_lookup（极简取数）。
+_intent_rules_cache: Optional[dict] = None
+
+
+def _load_intent_rules() -> dict:
+    """加载意图规则**原始内容**（只做 I/O + 解析，不做校验）。
+
+    文件缺失/损坏时优雅降级为「无意图」。注意：**校验在消费方**
+    （`_valid_intent_rules`）—— 缓存可能被测试或其他代码直接赋值，
+    把校验放在消费方才能保证求值路径永不因配置畸形抛异常。
+    """
+    global _intent_rules_cache
+    if _intent_rules_cache is not None:
+        return _intent_rules_cache
+    path = os.path.join(get_template_dir(), "intent_rules.json")
+    data = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("意图规则加载失败，按无意图处理: %s (%s)", path, e)
+    _intent_rules_cache = data if isinstance(data, dict) else {"intents": []}
+    return _intent_rules_cache
+
+
+def _valid_intent_rules(rules) -> list:
+    """消毒意图规则：丢弃非法条目（非对象 / 缺 template / boost 不可转 int）。
+
+    require_any 只保留其中的列表组，block_any 只保留字符串 —— 保证
+    `_match_intent` / `_active_intent_boosts` 拿到的每条规则都可直接使用。
+    """
+    out: list = []
+    if not isinstance(rules, list):
+        return out
+    for raw in rules:
+        if not isinstance(raw, dict):
+            continue
+        tid = raw.get("template")
+        if not isinstance(tid, str) or not tid:
+            continue
+        try:
+            boost = max(0, int(raw.get("boost", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "id": str(raw.get("id") or tid),
+            "label": str(raw.get("label") or raw.get("id") or tid),
+            "template": tid,
+            "boost": boost,
+            "require_any": [g for g in raw.get("require_any", []) if isinstance(g, list)],
+            "block_any": [w for w in raw.get("block_any", []) if isinstance(w, str)],
+        })
+    return out
+
+
+def _match_intent(text: str, rule: dict) -> bool:
+    """意图命中判定：require_any 组间 AND / 组内 OR；block_any 任一命中即否决。"""
+    if not text:
+        return False
+    for group in rule.get("require_any", []):
+        if not any(w in text for w in group):
+            return False
+    return not any(w in text for w in rule.get("block_any", []))
+
+
+def _active_intent_boosts(text: str, enabled_ids: set) -> dict:
+    """计算命中的意图加分 → {template_id: (boost, 匹配标签)}。
+
+    经 `_valid_intent_rules` 消毒后再消费；模板未启用的意图被忽略
+    （不会把分加到一个不可用的模板上）。
+    """
+    boosts: dict = {}
+    for rule in _valid_intent_rules(_load_intent_rules().get("intents", [])):
+        tid = rule["template"]
+        if tid not in enabled_ids:
+            continue
+        if _match_intent(text, rule):
+            boosts[tid] = (rule["boost"], f"（意图优先：{rule['label']}）")
+    return boosts
+
+
+def _score_with_intent(tid: str, weighted_keywords, text: str, boosts: dict):
+    """关键词打分 + 意图优先加分。
+
+    ⚠️ 必须在 `_rank_core` 的**全部三处**打分点（family 累计 / family 内选优 /
+    全局兜底）都经由本函数 —— 只改一处会出现"family 赢了但 family 内选不出
+    winner"的分裂结果。
+    """
+    score, matched = _score_route(text, weighted_keywords)
+    hit = boosts.get(tid)
+    if hit:
+        boost, label = hit
+        score += boost
+        matched = list(matched) + [[label, boost]]
+    return score, matched
+
+
+def _rank_core(text: str) -> dict:
+    """按真实路由口径给全部模板打分并排名（family 两阶段）。
+
+    返回 {winner, best_family, family_scores, templates:[{template_id,score,matched_keywords,family}]}。
+    `_select_template_core` 与预览端点共用，保证「所见即所得」。
+    """
+    text = (text or "").lower()
+    enabled_ids = _enabled_template_ids()
+    family_map = _build_family_route_map(enabled_ids)
+    route_rules = get_template_route_rules()
+
+    # 意图优先加分：一次算齐，随后在**三处**打分点统一应用（见 _score_with_intent）。
+    boosts = _active_intent_boosts(text, enabled_ids)
+
+    per, family_scores = [], {}
+    for family, entries in family_map.items():
+        fscore = 0
+        for _, tid, weighted_keywords in entries:
+            score, matched = _score_with_intent(tid, weighted_keywords, text, boosts)
+            fscore += score
+            per.append({"template_id": tid, "score": score,
+                        "matched_keywords": matched, "family": family})
+        family_scores[family] = fscore
+
+    best_family, best_fscore = "", 0
+    for family, fs in family_scores.items():
+        if fs > best_fscore:
+            best_family, best_fscore = family, fs
+
+    winner = ""
+    if best_family and best_fscore > 0:
+        best_score, best_priority = 0, len(route_rules)
+        for priority, tid, weighted_keywords in family_map[best_family]:
+            score, _ = _score_with_intent(tid, weighted_keywords, text, boosts)
+            if score > best_score or (score == best_score and score > 0 and priority < best_priority):
+                winner, best_score, best_priority = tid, score, priority
+
+    if not winner:
+        best_score, best_priority = 0, len(route_rules)
+        for priority, (tid, weighted_keywords) in enumerate(route_rules):
+            if tid not in enabled_ids:
+                continue
+            score, _ = _score_with_intent(tid, weighted_keywords, text, boosts)
+            if score > best_score or (score == best_score and score > 0 and priority < best_priority):
+                winner, best_score, best_priority = tid, score, priority
+
+    return {"winner": winner, "best_family": best_family,
+            "family_scores": family_scores, "templates": per}
+
+
+def rank_templates_for_input(user_input: str, history: list = None, top_n: int = 5) -> dict:
+    """模板路由预览：返回按真实口径排序的 TOP-N（含命中词），供前端展示。
+
+    ⚠️ 不含「追问继承」——追问轮由服务端沿用上一轮模板；前端展示时可自行提示。
+    """
+    base = _rank_core(user_input)
+    index = _load_index()
+    default = Config.REPORT_TEMPLATE or index.get("default") or "standard"
+    names = {tid: (en.get("name") or tid)
+             for tid, en in (index.get("templates") or {}).items()}
+
+    ranked = sorted(base["templates"], key=lambda t: t["score"], reverse=True)
+    for t in ranked:
+        t["name"] = names.get(t["template_id"], t["template_id"])
+        t["family_won"] = bool(base["best_family"] and t["family"] == base["best_family"])
+    return {
+        "q": user_input,
+        "winner": base["winner"] or default,
+        "default": default,
+        "best_family": base["best_family"],
+        "ranked": ranked[:max(1, int(top_n or 5))],
+    }
 
 
 # ── 追问判定（问题3：session 内追问应继承上一轮模板）──
@@ -494,15 +664,19 @@ def evaluate(template: dict, slot_results: dict) -> dict:
     return adjusted
 
 
-def build_guidance(template: dict, user_input: str) -> str:
+def build_guidance(template: dict, user_input: str, include_report_structure: bool = True) -> str:
     """
     构建数据获取指引，注入 system prompt。
     从"建议"升级为"硬约束"：必须获取的技术指标数据。
+
+    include_report_structure=False：只给「数据契约 + 判读框架」，剔除「报告输出结构 + 质量门禁」。
+    供**子步执行器**使用（group 子 Agent、pdor/plan/unified 的 step 执行器）——它们只负责一个维度，
+    报告结构由报告节点统一施加。默认 True，保持主 Agent（react/nodes.py）与规划器行为不变。
     """
     if str(template.get("schema_version", "1.0")) == "2.0":
         if not any(template.get(key) for key in ("data_contract", "skill_plan", "tool_plan", "qa_rules", "data_requirements")):
             return ""
-        return _build_v2_guidance(template, user_input)
+        return _build_v2_guidance(template, user_input, include_report_structure)
 
     data_req = template.get("data_requirements", {})
     if not data_req:
@@ -512,8 +686,8 @@ def build_guidance(template: dict, user_input: str) -> str:
 
     # 硬约束：必须获取的技术指标
     parts.append("\n### 必须获取的数据（缺少这些数据会导致报告质量严重下降）")
-    parts.append("1. **技术指标（第一次调用必须获取）**：优先使用 mx_data skill 获取 RSI、MACD（DIF/DEA/柱状图）、均线排列（MA5/10/20/60）、量比；mx_data 无法满足时使用 technical_analysis skill 补齐。没有这些数据，技术面分析只能是空话。特别注意：均线必须包含 MA5/MA10/MA20/MA60 四条，用于判断多头/空头排列，只有5日均线不足以判断趋势。")
-    parts.append("2. **个股行情**：必须使用 mx_xuangu 或 stock_query skill 获取涨跌幅、换手率、成交额、市盈率。换手率是判断资金性质的关键指标（>20%=游资接力，<10%=机构锁仓）。")
+    parts.append("1. **技术指标（第一次调用必须获取）**：优先使用 mx_data skill 获取 RSI、MACD（DIF/DEA/柱状图）、均线排列（MA5/10/20/60）、量比；mx_data 无法满足时使用 stock_analysis skill 补齐。没有这些数据，技术面分析只能是空话。特别注意：均线必须包含 MA5/MA10/MA20/MA60 四条，用于判断多头/空头排列，只有5日均线不足以判断趋势。")
+    parts.append("2. **个股行情**：必须使用 mx_xuangu 或 stock_analysis skill 获取涨跌幅、换手率、成交额、市盈率。换手率是判断资金性质的关键指标（>20%=游资接力，<10%=机构锁仓）。")
     parts.append("3. **资金流向（必须获取，不可跳过）**：优先使用 mx_data skill 获取主力/散户资金净流入数据；mx_data 无法满足时使用 money_flow skill。禁止用 mx_search 搜索新闻来替代资金面分析——新闻里没有结构化资金数据。资金面是判断主力动向的核心维度，缺失会导致报告专业性严重下降。")
     parts.append("4. **新闻资讯**：必须使用 mx_search skill 获取最新新闻，分析市场情绪。")
 
@@ -539,17 +713,21 @@ def build_guidance(template: dict, user_input: str) -> str:
                 parts.append(f"  - {q_resolved}")
 
     parts.append("\n### 技能使用提醒")
-    parts.append("- 优先使用 mx_data skill（结构化数据查询），其次 technical_analysis skill，最后 mx_search skill（文本搜索）")
+    parts.append("- 优先使用 mx_data skill（结构化数据查询），其次 stock_analysis skill，最后 mx_search skill（文本搜索）")
     parts.append("- 如果某个 skill 调用失败，立即切换到备选 skill，不要跳过该维度")
     parts.append("- 同一维度最多查询2次，避免重复搜索")
     parts.append("- 如果已经通过 mx_xuangu 获取了个股数据，不要再用 mx_data 重复查询相同信息")
-    parts.append("- **禁止用新闻搜索替代结构化数据查询**：资金流向优先用 mx_data，失败时用 money_flow；技术指标优先用 mx_data，失败时用 technical_analysis；新闻搜索只能用于情绪分析")
+    parts.append("- **禁止用新闻搜索替代结构化数据查询**：资金流向优先用 mx_data，失败时用 money_flow；技术指标优先用 mx_data，失败时用 stock_analysis；新闻搜索只能用于情绪分析")
 
     return "\n".join(parts)
 
 
-def _build_v2_guidance(template: dict, user_input: str) -> str:
-    """构建 v2 场景模板的数据契约指引。"""
+def _build_v2_guidance(template: dict, user_input: str, include_report_structure: bool = True) -> str:
+    """构建 v2 场景模板的数据契约指引。
+
+    include_report_structure=False 时剔除「报告输出结构 + 质量门禁」（报告级约束），
+    只保留数据契约 / 板块覆盖要求 / 技能计划 / 判读框架 / 机构引用规范。
+    """
     parts = [
         "\n\n## 场景化数据契约（必须遵守）",
         f"- 场景：{template.get('name', template.get('id', ''))}",
@@ -601,39 +779,51 @@ def _build_v2_guidance(template: dict, user_input: str) -> str:
         parts.append("\n### Fallback 技能")
         parts.append(f"- 仅当 mx_* 无法满足硬性数据契约时，才允许使用：{'、'.join(fallback_skills)}")
 
-    # 输出结构：告诉 LLM 最终报告需要哪些板块，每个板块需要什么数据
-    sections = template.get("sections", [])
-    if sections:
-        parts.append("\n### 报告输出结构（按此结构组织最终报告）")
-        for i, section in enumerate(sections, 1):
-            title = section.get("title", "")
-            required = section.get("required", False)
-            prompt = section.get("prompt", "")
-            max_words = section.get("max_words")
-            data_slots = section.get("data_slots", [])
-            core_slots = section.get("core_slots", [])
-            line = f"- {title}"
-            if max_words:
-                line += f"（{max_words}字以内）"
-            if not required:
-                line += "（数据充分时输出，不足可跳过）"
-            if data_slots:
-                slot_desc = []
-                for s in data_slots:
-                    is_core = s in core_slots
-                    slot_desc.append(f"{s}{'*' if is_core else ''}")
-                line += f"；数据：{'、'.join(slot_desc)}"
-            if prompt:
-                summary = prompt[:80] + ("..." if len(prompt) > 80 else "")
-                line += f"；要求：{summary}"
-            parts.append(line)
-        parts.append("（* 标记为核心数据，缺失时该板块标注'数据不足'）")
+    # ── 报告级内容：只给"最终报告作者"，不给子步执行器 ──────────────────
+    # 2026-10-01 事故：子 Agent（group subagent / pdor / plan / unified 的 step 执行器）
+    # 拿到的指引里含整份报告结构 + 「必须完整输出全部板块…一个都不能少」，于是每个
+    # 只负责一个维度的 Agent 都写了一份完整 10 段报告（实测 4 份同构、5146/5455/5036/4588 字符），
+    # 报告节点"合并增量信息"变成"改写 4 份完整报告"，且各自排的 #1 互相冲突只取一条。
+    # 这些属于**报告级**约束，由报告节点统一施加即可；子 Agent 只需要数据契约 + 判读框架。
+    # 实测：theme_trading 的指引共 2665 字符，其中本块占 1931 字符（72%）。
+    if include_report_structure:
+        # 输出结构：告诉 LLM 最终报告需要哪些板块，每个板块需要什么数据
+        sections = template.get("sections", [])
+        if sections:
+            parts.append("\n### 报告输出结构（按此结构组织最终报告）")
+            for i, section in enumerate(sections, 1):
+                title = section.get("title", "")
+                required = section.get("required", False)
+                prompt = section.get("prompt", "")
+                max_words = section.get("max_words")
+                data_slots = section.get("data_slots", [])
+                core_slots = section.get("core_slots", [])
+                line = f"- {title}"
+                if max_words:
+                    line += f"（{max_words}字以内）"
+                if not required:
+                    # 与 qa_rules「必须完整输出全部板块」对齐：required 约束的是数据硬要求，
+                    # 不是「板块可省略」。原措辞「不足可跳过」会让模型静默丢板块。
+                    # 2026-09-21 收敛：缺失只在本板块留一句，补齐方式统一进末尾「数据缺口声明」。
+                    line += ("（本板块必须输出；数据不足时本板块只写一句「数据缺失：<字段>」，"
+                             "补齐方式统一放报告末尾「数据缺口声明」，不得省略）")
+                if data_slots:
+                    slot_desc = []
+                    for s in data_slots:
+                        is_core = s in core_slots
+                        slot_desc.append(f"{s}{'*' if is_core else ''}")
+                    line += f"；数据：{'、'.join(slot_desc)}"
+                if prompt:
+                    summary = prompt[:80] + ("..." if len(prompt) > 80 else "")
+                    line += f"；要求：{summary}"
+                parts.append(line)
+            parts.append("（* 标记为核心数据，缺失时该板块标注'数据不足'）")
 
-    qa_rules = template.get("qa_rules", [])
-    if qa_rules:
-        parts.append("\n### 质量门禁")
-        for rule in qa_rules:
-            parts.append(f"- {rule}")
+        qa_rules = template.get("qa_rules", [])
+        if qa_rules:
+            parts.append("\n### 质量门禁")
+            for rule in qa_rules:
+                parts.append(f"- {rule}")
 
     # 分析判读框架（模板通过 analysis_framework 提供"数据怎么解读"的方法论，
     # 与数据契约互补：契约决定拿什么数据，框架决定拿到数据后怎么判断）

@@ -19,6 +19,7 @@ import random
 import logging
 import asyncio
 import openai
+from contextvars import ContextVar
 from typing import List, Optional, Any, Sequence, Callable
 from threading import Lock
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from langchain_core.tools import BaseTool
 from langchain_core.messages import AIMessage, BaseMessage
 from config import Config
 from utils.budget import BudgetExceeded
+from utils.cancellation import raise_if_cancelled
 from utils.logger import ensure_radar
 from utils.token_recorder import TokenRecorder, MetricsBackend, BudgetBackend
 
@@ -142,6 +144,11 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
             "_reasoning_content_policy",
             str(reasoning_content_policy or "auto").lower(),
         )
+        # 动态探测：本客户端是否见过带 reasoning_content 的响应。
+        # auto 策略原本只认硬编码的 "mimo"/"xiaomimimo" 名单，导致其它
+        # thinking 模式供应商（如 deepseek 系经 opencode zen 网关）漏掉兜底回传，
+        # 触发 400「The `reasoning_content` in the thinking mode must be passed back」。
+        object.__setattr__(self, "_thinking_mode_seen", False)
         # 非法值归一化为 None（不发送），'none' 是合法值（显式关闭思考）
         object.__setattr__(
             self,
@@ -191,7 +198,15 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
         except Exception:
             return TokenCompatibleChatOpenAI._as_response_dict(parsed_response)
 
-    def _should_echo_reasoning_content(self) -> bool:
+    def _should_echo_reasoning_content(self, messages=None) -> bool:
+        """是否需要回传 reasoning_content。
+
+        auto 的判定（按代价从低到高）：
+          1. provider 名/base_url 命中已知名单（mimo 系）；
+          2. 本客户端见过带 reasoning_content 的响应（动态探测）；
+          3. 待发送的对话里已有消息携带 reasoning_content
+             （跨客户端实例也成立，因为该字段存在 message.additional_kwargs 里）。
+        """
         policy = getattr(self, "_reasoning_content_policy", "auto")
         if policy == "always":
             return True
@@ -201,7 +216,28 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
         model_name = str(getattr(self, "model_name", "") or "").lower()
         base_url = str(getattr(self, "openai_api_base", "") or "").lower()
         provider_hint = f"{model_name} {base_url}"
-        return any(hint in provider_hint for hint in self._REASONING_CONTENT_AUTO_HINTS)
+        if any(hint in provider_hint for hint in self._REASONING_CONTENT_AUTO_HINTS):
+            return True
+
+        if getattr(self, "_thinking_mode_seen", False):
+            return True
+
+        return self._conversation_has_reasoning_content(messages)
+
+    def _conversation_has_reasoning_content(self, messages) -> bool:
+        """对话中是否已有 assistant 消息携带 reasoning_content。"""
+        if not messages:
+            return False
+        try:
+            for m in messages:
+                if not isinstance(m, AIMessage):
+                    continue
+                extra = getattr(m, "additional_kwargs", None) or {}
+                if extra.get(self._REASONING_CONTENT_KEY) is not None:
+                    return True
+        except TypeError:
+            return False
+        return False
 
     def _create_chat_result(self, response, generation_info=None):
         result = super()._create_chat_result(response, generation_info)
@@ -219,12 +255,18 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
                 message.additional_kwargs[self._REASONING_CONTENT_KEY] = raw_message[
                     self._REASONING_CONTENT_KEY
                 ]
-            elif self._should_echo_reasoning_content() and message.tool_calls:
+                # 动态探测：本次响应证明该供应商处于 thinking 模式
+                object.__setattr__(self, "_thinking_mode_seen", True)
+            elif self._should_echo_reasoning_content() and isinstance(message, AIMessage):
+                # 兜底：thinking 模式下**所有** assistant 消息都必须携带该字段。
+                # 原实现只覆盖 message.tool_calls 非空的情况，纯文本回复会漏掉，
+                # 被 replay 进下一轮请求时就触发 400（2026-09-22 实测 1/17 次）。
                 message.additional_kwargs[self._REASONING_CONTENT_KEY] = ""
 
         return result
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise_if_cancelled()
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
         if "response_format" in payload or self._use_responses_api(payload):
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
@@ -249,6 +291,7 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
         return self._create_chat_result(response_dict, generation_info)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise_if_cancelled()
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
         if "response_format" in payload or self._use_responses_api(payload):
             return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
@@ -275,6 +318,11 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        # opencode（Console Go）会话头注入：仅 opencode.ai 端点的请求生效，
+        # 会话内各 LLM 调用共用同一 x-opencode-session（UUID），新题目由 run_context 轮换
+        from utils.opencode_session import add_session_header
+        payload = add_session_header(payload, getattr(self, "openai_api_base", None))
 
         # 思考强度注入（放在 messages 校验之前：非 list 路径也要生效）
         effort = getattr(self, "_reasoning_effort", None)
@@ -308,9 +356,9 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
             reasoning_content = additional_kwargs.get(self._REASONING_CONTENT_KEY)
             if reasoning_content is not None:
                 payload_message[self._REASONING_CONTENT_KEY] = reasoning_content
-            elif self._should_echo_reasoning_content() and (
-                source_message.tool_calls or payload_message.get("tool_calls")
-            ):
+            elif self._should_echo_reasoning_content(messages):
+                # thinking 模式下所有 assistant 消息都要回传（缺失补空串），
+                # 不再要求 source_message.tool_calls（纯文本回复同样需要）。
                 payload_message[self._REASONING_CONTENT_KEY] = ""
 
         return payload
@@ -594,6 +642,23 @@ def _find_token_recorder(callbacks) -> TokenRecorder | None:
     return None
 
 
+def _set_recorder_label(config, label: str) -> None:
+    """更新 config.callbacks 里已有 TokenRecorder 的 label（不新建、不重复计数）。
+
+    用于裸 ``ainvoke``/``ainvoke_with_retry`` 的节点：它们绕过了 ``_build_llm_config``，
+    若不显式刷新，会沿用上一个节点（如 SelectSkillsNode / 上下文压缩）残留的 label，
+    把 agent 的 token 记到别的节点头上。
+    """
+    try:
+        if not config or not label:
+            return
+        rec = _find_token_recorder(config.get("callbacks"))
+        if rec is not None:
+            rec.label = label
+    except Exception:
+        pass
+
+
 def _replace_token_recorder(callbacks, new_recorder: TokenRecorder, debug_cb=None):
     """替换 callbacks 中的 TokenRecorder，保留其他 handler 和 parent_run_id。"""
     handlers = []
@@ -822,14 +887,18 @@ async def atracked_invoke(llm, messages, logger, label: str = "", **kwargs):
 
 
 async def ainvoke_with_retry(llm, messages, config=None, max_retries: Optional[int] = None,
-                             logger=None):
+                             logger=None, label: str = ""):
     """轻量异步重试调用：复用 _is_retryable_error / _retry_delay。
 
     与 ``atracked_invoke`` 的区别：不依赖 budget / TokenRecorder / metadata 上下文
     （React 节点等裸调用场景），只做「重试」一件事。429/5xx/网络错误最多
     ``_LLM_RETRY_MAX`` 次指数退避（默认 10 次）；重试耗尽后抛出最后一个异常，
     由调用方决定终止或降级（配合 ``classify_llm_error`` 给出明确提示）。
+
+    label: 传入时刷新 config 中已有 TokenRecorder 的 label（不新建、不重复计数），
+           避免节点 LLM 调用沿用上一个节点残留的标签。
     """
+    _set_recorder_label(config, label)
     _effective_max = max_retries if max_retries is not None else _LLM_RETRY_MAX
     _std_log = logging.getLogger(__name__)
     last_exc = None
@@ -1061,6 +1130,14 @@ def llm_json_with_retry(llm, messages, logger, label: str = "", max_retries: int
             msgs = messages
 
         resp = tracked_invoke(llm, msgs, logger, label, budget=budget, metadata=metadata, parent_run_id=parent_run_id, run_config=run_config, **kwargs)
+        # 评审 token 计量：仅在捕获开启时累计（ContextVar 默认 None，零开销）
+        _acc = _json_call_usage.get()
+        if _acc is not None:
+            _u = _extract_llm_usage(resp)
+            _acc["input_tokens"] += _u["input_tokens"]
+            _acc["output_tokens"] += _u["output_tokens"]
+            _acc["total_tokens"] += _u["total_tokens"]
+            _acc["calls"] += 1
         raw = resp.content
         parsed = extract_json(raw)
         if parsed is not None:
@@ -1072,3 +1149,41 @@ def llm_json_with_retry(llm, messages, logger, label: str = "", max_retries: int
 
     logger.error("L", f"JSON 提取最终失败，已重试 {max_retries} 次")
     return None
+
+
+# ── 评审 token 计量（ContextVar 选择性捕获；inactive 时零开销）────────
+# 评审引擎在 judge 调用段开启捕获，把每次 llm_json_with_retry 的用量累计起来，
+# 随评审结果落库（reviews.inputs_json.token_usage），供前端展示「这次评审花了多少 token」。
+_json_call_usage: ContextVar = ContextVar("sr_json_call_usage", default=None)
+
+
+def start_json_usage_capture() -> dict:
+    """开启捕获并返回累计器（调用方一般不直接持有，经 drain 取回）。"""
+    acc = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
+    _json_call_usage.set(acc)
+    return acc
+
+
+def drain_json_usage_capture() -> dict:
+    """取回捕获结果并关闭；未开启过时返回全零结构（调用方无需判空）。"""
+    acc = _json_call_usage.get()
+    _json_call_usage.set(None)
+    if not acc:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
+    return dict(acc)
+
+
+def _extract_llm_usage(resp) -> dict:
+    """从 AIMessage 提取 token 用量：优先 usage_metadata，回退 response_metadata.token_usage。"""
+    try:
+        um = getattr(resp, "usage_metadata", None) or {}
+        if not um:
+            tu = (getattr(resp, "response_metadata", None) or {}).get("token_usage") or {}
+            um = {"input_tokens": tu.get("prompt_tokens"),
+                  "output_tokens": tu.get("completion_tokens"),
+                  "total_tokens": tu.get("total_tokens")}
+        return {"input_tokens": int(um.get("input_tokens") or 0),
+                "output_tokens": int(um.get("output_tokens") or 0),
+                "total_tokens": int(um.get("total_tokens") or 0)}
+    except (TypeError, ValueError, AttributeError):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

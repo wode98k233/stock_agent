@@ -1,0 +1,138 @@
+{
+  "id": "cause_attribution",
+  "schema_version": "2.0",
+  "report_family": "cause_attribution",
+  "asset_type": "market",
+  "intent_type": "event",
+  "dashboard_type": "market",
+  "verbosity": "standard",
+  "max_report_words": 2500,
+  "name": "归因解释",
+  "version": "1.0",
+  "role": "你是一名擅长归因分析的市场分析师。你的任务是解释「为什么涨/跌/异动」：先复盘现象，再给出主因排序（主因/次因/非因），讲清传导机制，判断会不会持续，最后说明对用户持仓的影响。必须给出可证伪的判断，不得罗列一堆原因而不排序，不得编造数据。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "fallback_skills": [
+    "money_flow",
+    "market_review"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "evidence_table",
+    "macro_chain",
+    "cross_synthesis",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "market_events",
+      "description": "现象复盘与事件时间线：涨跌幅、成交额、异动时点、关键事件",
+      "fields": [
+        "涨跌幅",
+        "成交额",
+        "量能变化",
+        "异动时点",
+        "事件时间线"
+      ],
+      "tool_capabilities": [
+        "market_data",
+        "news_search"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "capital_flow",
+      "description": "资金流向验证：主力、北向、大单动向",
+      "fields": [
+        "主力净流入",
+        "北向资金",
+        "大单动向",
+        "板块资金流"
+      ],
+      "tool_capabilities": [
+        "fund_flow"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "mechanism_context",
+      "description": "机制与制度背景：政策、指数编制、再融资规则、筹码结构等机械性解释",
+      "fields": [
+        "政策背景",
+        "制度规则",
+        "指数编制",
+        "筹码结构"
+      ],
+      "tool_capabilities": [
+        "news_search",
+        "macro_data"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "market_events",
+        "capital_flow"
+      ],
+      "rule": "消息面与资金面指向不同主因时，必须给出取舍依据并只认一个主因：资金流验证过的消息才是主因，只有传闻没有资金印证的只算次因。"
+    },
+    {
+      "dimensions": [
+        "mechanism_context",
+        "market_events"
+      ],
+      "rule": "机械性因素（指数编制、权重调仓、解禁、再融资、流动性冲击）能解释的现象，必须优先于『情绪/叙事』解释；『情绪』只能在机械性因素解释不了时作主因。"
+    }
+  ],
+  "report_format": {
+    "action_required_fields": [
+      "归因结论",
+      "持续性判断",
+      "证伪信号"
+    ],
+    "action_template": "主因：{一句话} | 持续性：{延续/衰减/证伪中} | 证伪信号：{什么出现则归因作废}"
+  },
+  "qa_rules": [
+    "必须给出主因排序：主因只有一个，其余标为次因或已排除项，每项给判断依据；禁止平铺罗列一堆原因而不排序。",
+    "必须回答『会不会持续』：给持续性判断（延续/衰减）和证伪信号（什么出现则本次归因作废）。",
+    "机制类问题（怎么计算、为什么指数与成分股不一致、政策如何传导、概念何时兑现）必须给传导链或计算口径，不得只下结论。",
+    "上下文中有用户持仓时，必须结合持仓说明影响与应对；没有持仓信息则说明对同类资产的影响。",
+    "引用新闻、研报、政策文件必须标注来源与日期。",
+    "必须完整输出全部板块：核心结论/关键证据/传导链分析/综合研判/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给核心结论与行动方案。"
+  ],
+  "analysis_framework": {
+    "summary": "分析顺序：现象复盘（发生了什么、幅度多大）→ 主因排序（资金/消息/机制/情绪，只认一个主因）→ 传导机制（怎么导致的）→ 持续性判断（会不会继续）→ 对持仓的影响与应对。",
+    "rules": [
+      "先现象后原因：先用数据说清现象（涨跌幅、量能、时点、与谁同步），再谈原因；现象不清禁止直接给归因。",
+      "主因唯一：多因竞争时按『资金印证 > 机制性因素 > 有实锤的消息 > 情绪/叙事』排序取舍，其余降为次因或排除。",
+      "持续性三问：诱因是否还在、资金是否延续、历史上同类诱因的衰减周期多长；三问都答不上来就只给『观察』不给方向。",
+      "输出要求：每个判断必须给 证伪条件（什么出现则归因作废），禁止『预计后市震荡』这类无法证伪的表述。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "复盘现象：涨跌幅、量能、异动时点、资金流"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "检索事件、政策与机制背景，追溯时间线"
+    }
+  ],
+  "common_rules": [
+    "data_sources"
+  ]
+}

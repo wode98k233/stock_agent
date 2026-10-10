@@ -21,4 +21,9 @@ async def classifier_node(state: GroupState, ctx: AgentContext, run_config=None)
         run_config=run_config,
     )
 
-    return result
+    # 只回传 GroupState 已声明的字段（title 的落库/推送已由 classify_input 内部回调完成）
+    if result.get("response"):
+        return {"response": result["response"]}
+    if result.get("clarified_input"):
+        return {"input": result["clarified_input"]}
+    return {}

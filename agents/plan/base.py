@@ -87,6 +87,7 @@ class PlanBasedAgent(BaseAgent):
         user_input = self._enrich_user_input(
             user_input, progress_callback=progress_callback,
             history=memory.get_history() if memory else None,
+            logger=logger,
         )
 
         async with AgentRunContext(self.name, logger, user_input) as run_ctx:

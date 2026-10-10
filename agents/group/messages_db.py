@@ -7,33 +7,13 @@ from datetime import datetime
 from config import Config
 
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS group_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dialog_uuid TEXT NOT NULL,
-    task_id TEXT,
-    step_index INTEGER,
-    role TEXT NOT NULL,
-    agent_name TEXT,
-    msg_type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    extra TEXT,
-    created_at TEXT NOT NULL
-);
-"""
-
-_CREATE_INDEX = """
-CREATE INDEX IF NOT EXISTS idx_group_messages_dialog
-ON group_messages(dialog_uuid, step_index);
-"""
-
-
 def init_group_messages_table():
-    """初始化 group_messages 表"""
+    """初始化 group_messages 表（DDL 统一来源 utils/db_schema）"""
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.tables.stock_radar import TABLES
+    td = next(t for t in TABLES if t.name == "group_messages")
     with get_group_db() as conn:
-        conn.execute(_CREATE_TABLE)
-        conn.execute(_CREATE_INDEX)
-        conn.commit()
+        ensure_schema(conn, [td])
 
 
 @contextmanager
@@ -57,11 +37,9 @@ def save_group_message(
     agent_name: str = None,
     extra: dict = None,
 ):
-    """保存一条 group_message（自动建表）"""
+    """保存一条 group_message（自动建表，DDL 统一来源 utils/db_schema）"""
+    init_group_messages_table()
     with get_group_db() as conn:
-        conn.execute(_CREATE_TABLE)
-        conn.execute(_CREATE_INDEX)
-
         conn.execute(
             "INSERT INTO group_messages (dialog_uuid, task_id, step_index, role, "
             "agent_name, msg_type, content, extra, created_at) "

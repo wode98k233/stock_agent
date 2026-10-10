@@ -9,10 +9,24 @@ if _project_root not in sys.path:
 
 
 @pytest.fixture(autouse=True)
-def _init_fetcher():
-    """触发数据源延迟注册"""
-    from tools.fetcher import _ensure_initialized
+def _init_fetcher(monkeypatch):
+    """触发数据源延迟注册；并**清空用户自定义优先级**，保证断言的是「内置 priority 顺序」。
+
+    本文件断言的是 `DataSource.priority` 内置顺序（mx 110 > sina 100 > hithink 95 > akshare 90）。
+    自 2026-09-21 起，用户可在「系统配置 → 数据 → 数据源优先级」里拖拽覆盖该顺序
+    （持久化到 `.env` 的 `DATASOURCE_PRIORITY_ORDER`）。若不移除自定义顺序，
+    这些断言会随用户配置而失败——那是配置生效，不是内置顺序变了。
+    """
+    from config import Config
+    from tools.fetcher import DataSourceManager, _ensure_initialized
+
+    monkeypatch.setattr(Config, "DATASOURCE_PRIORITY_ORDER", "", raising=False)
+    monkeypatch.setattr(DataSourceManager, "_user_order", [])
     _ensure_initialized()
+    DataSourceManager._resort_sources()
+    yield
+    # 复原：monkeypatch 已还原 _user_order，这里把排序重新应用回去
+    DataSourceManager._resort_sources()
 
 
 def test_datasource_registration_prefers_mx_sina_akshare():

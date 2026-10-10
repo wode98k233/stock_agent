@@ -11,6 +11,7 @@ import sys
 from agents.analysis.dashboard_config import get_dashboard_category
 from agents.analysis.dashboard_generator import generate as dashboard_generate
 from agents.analysis.dashboard_cli import format_dashboard_cli
+from agents.analysis.evidence_view import is_unusable_output
 from config import Config
 from utils.logger import ensure_radar
 
@@ -39,6 +40,12 @@ def _tool_calls_to_slot_results(tool_calls: list) -> dict:
                 ),
             )
         if name:
+            # 同名调用后者覆盖前者（slot 一旦被一条报错盖掉，前面取到的数据就丢了），
+            # 因此让「可用输出」优先：失败/空结果只在同名尚无可用值时才占位。
+            # 失败信息不会丢——仪表盘的 `_tool_items/_build_tool_index` 仍会列出该调用。
+            if is_unusable_output(output) and not is_unusable_output(slot_results.get(name)):
+                slot_results.setdefault(name, output)
+                continue
             slot_results[name] = output
     return slot_results
 
@@ -63,10 +70,12 @@ async def append_dashboard(
     metadata=None,
     run_config=None,
     template: dict = None,
+    tool_calls: list = None,
 ) -> str:
     """生成仪表盘并追加到报告末尾，返回完整文本。
 
     CLI/Web 格式自动判断。供 scenario_agent、graph 节点等统一调用。
+    `tool_calls`（有序、含参数、保留重复调用）用于仪表盘的工具索引/下钻。
     """
     logger = ensure_radar(logger or logging.getLogger(__name__))
 
@@ -89,6 +98,7 @@ async def append_dashboard(
         logger_obj=logger,
         metadata=metadata,
         run_config=run_config,
+        tool_calls=tool_calls,
     )
     if not dashboard_data:
         return report
@@ -176,6 +186,7 @@ async def dashboard_node_impl(state: dict, metadata=None, run_config=None, exec_
             metadata=metadata,
             run_config=run_config or config,
             template=template,
+            tool_calls=tool_calls,
         )
         if enhanced is not report_content:
             if "response" in state and state.get("response"):

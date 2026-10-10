@@ -28,6 +28,14 @@
 | 这只新股发行价合理吗 | ipo_analysis | stock | 个股决策仪表盘 | 同上 |
 | 趋势跟踪信号如何 | trend_following | stock | 个股决策仪表盘 | 同上 |
 | 今天有哪些放量突破的股票 | volume_price_alert | stock | 个股决策仪表盘 | 同上 |
+| **配置类** |  |  |  |  |
+| 现在电池、医疗、黄金，我应该买哪个 | asset_allocation | portfolio | 组合决策仪表盘 | candidate_stocks, portfolio_action, action_items, falsification_signal |
+| 1万元本金怎么分配到这几个方向 | asset_allocation | portfolio | 组合决策仪表盘 | 同上 |
+| 我是买比亚迪、宁德还是矿 | asset_allocation | portfolio | 组合决策仪表盘 | 同上 |
+| **归因类** |  |  |  |  |
+| 港股为什么一直跌 | cause_attribution | market | 市场决策仪表盘 | market_breadth, sector_rotation, falsification_signal |
+| 红利低波为什么跌这么快，怎么计算的 | cause_attribution | market | 市场决策仪表盘 | 同上 |
+| 消费板块怎么集体拉升，什么导致的 | cause_attribution | market | 市场决策仪表盘 | 同上 |
 
 ---
 

@@ -37,8 +37,18 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
   }
 
   close() {
+    // 有未保存变更时先确认，避免点遮罩/关闭把编辑直接丢掉
+    if (this._hasDirtyChanges() && !confirm('放弃未保存的配置变更？')) return;
     this.panelEl.classList.remove('open');
     this.overlayEl.classList.remove('open');
+  }
+
+  _hasDirtyChanges() {
+    try {
+      return Object.keys(this.getChanges()).length > 0;
+    } catch {
+      return false;
+    }
   }
 
   async _reloadFromEnv() {
@@ -101,17 +111,18 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
 
   _tabMapping() {
     return {
-      '模型': ['LLM'],
+      '模型': ['LLM', 'LLM 缓存', '模型路由'],
       'Agent': ['Agent 通用', 'ReAct', '上下文压缩', 'Plan / PDOR / Unified', 'Agent 群模式', '预算'],
       '报告': ['报告'],
       '数据': ['数据源', '缓存', '搜索引擎'],
       '记忆系统': ['长期记忆-基础', '长期记忆-Embedding', '长期记忆-Reranker'],
       '通知': ['通知'],
+      '调度': ['后台巡检', '系统监控', '市场面板', '全局总览'],
       '诊断': ['调试'],
     };
   }
 
-  _tabOrder() { return ['模型', 'Agent', '报告', '数据', '记忆系统', '通知', '诊断']; }
+  _tabOrder() { return ['模型', 'Agent', '报告', '数据', '记忆系统', '通知', '调度', '诊断']; }
 
   renderConfig(items) {
     this.formEl.innerHTML = '';
@@ -167,6 +178,9 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       if (tabName === '通知') {
         tabContent.appendChild(this._renderNotificationPanel());
       }
+      if (tabName === '数据') {
+        tabContent.appendChild(this._renderDatasourcePanel());
+      }
       for (const card of this._renderSections(tabItems)) {
         tabContent.appendChild(card);
       }
@@ -184,6 +198,130 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       this.onParamChange(item.key, item.value, false);
     }
     this._updateSummary();
+  }
+
+  _renderDatasourcePanel() {
+    const panel = document.createElement('section');
+    panel.className = 'config-datasource-panel';
+    panel.innerHTML = `
+      <div class="config-section-title">数据源优先级</div>
+      <div class="config-section-desc">拖动条目调整取数时的尝试顺序（前者优先）。前一个源取不到数据时会自动切换到下一个。</div>
+      <div class="ds-status" data-ds-status>加载中…</div>
+      <ul class="ds-list" data-ds-list></ul>
+      <div class="ds-actions">
+        <button type="button" class="ds-btn ds-btn-primary" data-ds-save>保存顺序</button>
+        <button type="button" class="ds-btn" data-ds-reset>恢复内置优先级</button>
+      </div>`;
+    this._loadDatasourcePanel(panel);
+    return panel;
+  }
+
+  async _loadDatasourcePanel(panel) {
+    const listEl = panel.querySelector('[data-ds-list]');
+    const statusEl = panel.querySelector('[data-ds-status]');
+    let data;
+    try {
+      const resp = await fetch('/api/datasources?refresh=1', { cache: 'no-store' });
+      data = await resp.json();
+    } catch (e) {
+      statusEl.textContent = '加载失败：' + e;
+      return;
+    }
+
+    listEl.innerHTML = '';
+    (data.sources || []).forEach((s, idx) => {
+      const li = document.createElement('li');
+      li.className = 'ds-item';
+      li.draggable = true;
+      li.dataset.name = s.name;
+      li.innerHTML = `
+        <span class="ds-handle" title="拖动调整">⠿</span>
+        <span class="ds-idx">${idx + 1}</span>
+        <span class="ds-name">${this._esc(s.label || s.name)}<small>${this._esc(s.name)}</small></span>
+        <span class="ds-desc">${this._esc(s.description || '')}</span>
+        <span class="ds-badge ${s.available ? 'ok' : 'off'}">${s.available ? '可用' : '不可用'}</span>
+        <span class="ds-move">
+          <button type="button" data-up title="上移">↑</button>
+          <button type="button" data-down title="下移">↓</button>
+        </span>`;
+      listEl.appendChild(li);
+    });
+    statusEl.textContent = data.customized
+      ? '当前：已自定义顺序（保存后立即生效，无需重启）'
+      : '当前：跟随内置优先级';
+
+    // 用属性赋值（而非 addEventListener）避免重复绑定
+    listEl.onclick = (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const li = btn.closest('.ds-item');
+      if (!li) return;
+      if (btn.hasAttribute('data-up') && li.previousElementSibling) {
+        listEl.insertBefore(li, li.previousElementSibling);
+      } else if (btn.hasAttribute('data-down') && li.nextElementSibling) {
+        listEl.insertBefore(li.nextElementSibling, li);
+      }
+      this._renumberDs(listEl);
+    };
+
+    let dragEl = null;
+    listEl.ondragstart = (e) => {
+      dragEl = e.target.closest('.ds-item');
+      if (dragEl) {
+        dragEl.classList.add('dragging');
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+      }
+    };
+    listEl.ondragover = (e) => {
+      e.preventDefault();
+      const target = e.target.closest('.ds-item');
+      if (!target || !dragEl || target === dragEl) return;
+      const rect = target.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      listEl.insertBefore(dragEl, after ? target.nextElementSibling : target);
+    };
+    listEl.ondragend = () => {
+      if (dragEl) dragEl.classList.remove('dragging');
+      dragEl = null;
+      this._renumberDs(listEl);
+    };
+
+    const collect = () => Array.from(listEl.querySelectorAll('.ds-item')).map(li => li.dataset.name);
+
+    panel.querySelector('[data-ds-save]').onclick = async () => {
+      statusEl.textContent = '保存中…';
+      try {
+        const resp = await fetch('/api/datasources/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ names: collect() }),
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.detail || ('HTTP ' + resp.status));
+        statusEl.textContent = '已保存并即时生效';
+      } catch (e) {
+        statusEl.textContent = '保存失败：' + (e.message || e);
+      }
+    };
+
+    panel.querySelector('[data-ds-reset]').onclick = async () => {
+      statusEl.textContent = '恢复中…';
+      try {
+        const resp = await fetch('/api/datasources/order', { method: 'DELETE' });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.detail || ('HTTP ' + resp.status));
+        await this._loadDatasourcePanel(panel);
+      } catch (e) {
+        statusEl.textContent = '恢复失败：' + (e.message || e);
+      }
+    };
+  }
+
+  _renumberDs(listEl) {
+    listEl.querySelectorAll('.ds-item').forEach((li, i) => {
+      const idx = li.querySelector('.ds-idx');
+      if (idx) idx.textContent = String(i + 1);
+    });
   }
 
   _renderSummary() {
@@ -262,6 +400,8 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
   _groupDescription(groupName) {
     const desc = {
       'LLM': '模型接入、推理参数和请求透传。',
+      'LLM 缓存': '语义缓存开关与 TTL 分级（市场观点/板块/方法论/数据查询）。默认关闭灰度。',
+      '模型路由': '按场景将请求路由到 fast/standard/strong 三档模型。默认关闭灰度，映射表热改生效。',
       'Agent 通用': '影响默认执行模式和通用运行边界。',
       'ReAct': '控制思考、工具调用和循环次数。',
       '上下文压缩': '长对话保留、摘要和压缩窗口策略。',
@@ -270,7 +410,7 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       '报告': '报告生成方式、模板和模型配置。',
       '数据源': '行情、新闻和工具数据源优先级。',
       '缓存': '缓存容量、文件大小和过期策略。',
-      '搜索引擎': '联网搜索、新闻检索和外部搜索服务密钥。',
+      '搜索引擎': '通用网络搜索（web_search / search_stock_news）的引擎密钥。密钥为只读展示，请在 .env 中设置（逗号分隔可配多个 Key）；MX 妙想免配置，Tavily 有免费额度。',
       '预算': '单次查询的 token、调用次数和时间边界。',
       '通知策略': '控制通知层是否启用、发送范围、去重、冷却和静默时段。',
       '国内 IM / 聚合推送': '钉钉、飞书、企业微信、PushPlus 和 Server酱等国内常用推送。',
@@ -389,6 +529,11 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       STOCK_MEMORY_API_BASE: 'Embedding 服务接口地址，如 Ollama 的 http://localhost:11434/v1。修改后需重启服务生效。',
       MEMORY_RETRIEVAL_TOP_K: '每次检索返回的最大记忆条数。',
       MEMORY_MAX_PROMPT_TOKENS: '注入 LLM 上下文的记忆最大字符数。',
+      MEMORY_MAX_PROMPT_CHARS: '注入字符预算（优先于 Token 口径；约 2 字符=1 Token）。',
+      MEMORY_MAX_CHUNKS_PER_GROUP: '同一份报告最多注入的记忆片段数（旧硬编码为 3）。',
+      MEMORY_CHUNK_MAX_CHARS: '单个记忆片段展示的字符上限。',
+      MEMORY_MIN_SIMILARITY: '语义相似度绝对下限（自适应门槛 floor；0=关闭）。',
+      MEMORY_SIMILARITY_MARGIN: '语义相似度相对带宽（保留与最高分相差 margin 以内的命中）。',
       MEMORY_EPISODIC_RETENTION_DAYS: '情景记忆保留天数，超过后归档清理。',
       STOCK_MEMORY_EMBEDDING_READY_TIMEOUT: '启动时等待 Embedding 服务就绪的最长秒数，超时降级 FTS5。',
       STOCK_MEMORY_EMBEDDING_READY_INTERVAL: '启动时探测 Embedding 服务的轮询间隔秒数。',
@@ -707,6 +852,19 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
         this.onParamChange(item.key, value);
       });
       controlWrap.appendChild(input);
+    } else if (item.type === 'float') {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = item.value ?? '';
+      input.className = 'config-input';
+      input.dataset.key = item.key;
+      input.addEventListener('input', (e) => {
+        const value = parseFloat(e.target.value);
+        this.currentConfig[item.key] = isNaN(value) ? 0 : value;
+        this.onParamChange(item.key, isNaN(value) ? 0 : value);
+      });
+      controlWrap.appendChild(input);
     } else if (item.choices) {
       const select = document.createElement('select');
       select.className = 'config-select';
@@ -895,6 +1053,7 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     try {
       await window.StockRadar.api.applyConfig(changes);
       alert('配置已保存并应用');
+      this.originalConfig = { ...this.currentConfig }; // 已落盘 → 不再算未保存
       this.close();
     } catch (err) {
       alert('保存失败：' + err.message);
@@ -910,6 +1069,7 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     try {
       await window.StockRadar.api.applyConfig(changes);
       alert('配置已应用');
+      this.originalConfig = { ...this.currentConfig }; // 已落盘 → 不再算未保存
       this.closeDiff();
       this.close();
     } catch (err) {

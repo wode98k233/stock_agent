@@ -27,6 +27,14 @@
           if (tab.dataset.tab === 'dcBrowse') {
             this._loadBrowseTree();
           }
+          // 切换到存储监控时加载数据监控面板
+          if (tab.dataset.tab === 'dcStorage') {
+            window.initStorageMonitor().load();
+          }
+          // 切换到拥挤度排查时加载拥挤度面板
+          if (tab.dataset.tab === 'dcCrowding') {
+            window.initCrowdingScan().load();
+          }
         });
       });
 
@@ -41,10 +49,16 @@
           const sourceOpts = document.getElementById('dcSourceOptions');
           const boardTypeOpts = document.getElementById('dcBoardTypeOptions');
           const boardOpts = document.getElementById('dcBoardOptions');
-          // 股票代码+天数：日K线/指数/复权因子
+          const dumpOpts = document.getElementById('dcDumpOptions');
+          const tailFillOpts = document.getElementById('dcTailFillOptions');
+          // 股票代码+天数：日K线/指数/复权因子/同花顺灌库
           if (klineOpts) klineOpts.style.display = ['daily_kline', 'index_kline', 'adjust_factor', 'hithink_sync'].includes(type) ? 'block' : 'none';
-          // 数据源选择：所有数据采集任务
-          if (sourceOpts) sourceOpts.style.display = !['full_sync', 'hithink_sync'].includes(type) ? 'block' : 'none';
+          // 数据源选择：所有数据采集任务（同花顺官方通道任务不适用；补尾走源自动切换）
+          if (sourceOpts) sourceOpts.style.display = !['full_sync', 'hithink_sync', 'hithink_dump', 'tail_fill'].includes(type) ? 'block' : 'none';
+          // 全市场 Parquet 灌库范围
+          if (dumpOpts) dumpOpts.style.display = type === 'hithink_dump' ? 'block' : 'none';
+          // 标的补尾：可选代码（留空=持仓∪自选）
+          if (tailFillOpts) tailFillOpts.style.display = type === 'tail_fill' ? 'block' : 'none';
           // 板块类型选择：板块列表
           if (boardTypeOpts) boardTypeOpts.style.display = type === 'board_list' ? 'block' : 'none';
           // 板块多选：板块成分/板块K线
@@ -425,7 +439,7 @@
     }
 
     _taskTypeName(type) {
-      const map = { stock_list: '股票列表', daily_kline: '日K线数据', index_kline: '指数日K线', adjust_factor: '复权因子', board_list: '板块列表', board_kline: '板块K线', board_member: '板块成分', full_sync: '全量同步', hithink_sync: '同花顺灌库' };
+      const map = { stock_list: '股票列表', daily_kline: '日K线数据', index_kline: '指数日K线', adjust_factor: '复权因子', board_list: '板块列表', board_kline: '板块K线', board_member: '板块成分', full_sync: '全量同步', hithink_sync: '同花顺灌库', hithink_dump: '全市场灌库', tail_fill: '标的补尾' };
       return map[type] || type;
     }
 
@@ -456,6 +470,17 @@
       // 数据源：所有任务类型
       const source = document.getElementById('dcInputSource')?.value;
       if (source && source !== 'auto') config.source = source;
+      // 全市场 Parquet 灌库范围
+      if (type === 'hithink_dump') {
+        const dumpKind = document.getElementById('dcDumpKind')?.value;
+        if (dumpKind) config.dump_kind = dumpKind;
+      }
+      // 标的补尾：可选代码（留空=持仓∪自选；逗号/换行分隔）
+      if (type === 'tail_fill') {
+        const raw = document.getElementById('dcTailFillCodes')?.value || '';
+        const codes = raw.split(/[\s,，;；]+/).map(s => s.trim()).filter(Boolean);
+        if (codes.length > 0) config.codes = codes;
+      }
       // 强制覆盖
       const force = document.getElementById('dcForceOverwrite')?.checked;
       if (force) config.force = true;

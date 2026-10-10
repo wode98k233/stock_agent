@@ -7,7 +7,7 @@ from config import Config
 
 from server.deps import get_web_state
 from server.schemas import AddWatchlistRequest, QuotesRequest
-from server.watchlist_service import pick_source, df_to_quotes, persist_quotes, sync_from_mx
+from server.watchlist_service import pick_source, df_to_quotes, fetch_quotes_for_symbols, persist_quotes, sync_from_mx
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +56,16 @@ async def sync_watchlist(request: Request):
 
 @router.post("/api/watchlist/quotes")
 async def get_watchlist_quotes(request: Request, payload: QuotesRequest):
-    """批量行情：拉全市场过滤，适合多只股票。"""
+    """批量行情：快通道优先（实现见 watchlist_service.fetch_quotes_for_symbols）。"""
     try:
-        from tools.fetcher import ak_spot_em
-        if not payload.symbols:
-            return {"quotes": {}}
-        target = pick_source(payload.source)
-        df = target.get_spot_em() if target else ak_spot_em()
-        quotes = df_to_quotes(df, set(payload.symbols))
+        quotes = fetch_quotes_for_symbols(payload.symbols, payload.source)
         web = get_web_state(request)
         persist_quotes(web.storage.watchlist, quotes)
         return {"quotes": quotes, "source": payload.source}
     except Exception as e:
         logger.warning("批量行情失败: %s", e)
-        return {"error": str(e), "quotes": {}}
+        # 走 HTTP 错误：前端 fetchJSON 抛异常 → 由面板统一 toast，而不是静默当成空结果
+        raise HTTPException(status_code=502, detail=f"批量行情获取失败：{e}")
 
 
 @router.post("/api/watchlist/quote")
@@ -90,4 +86,4 @@ async def get_watchlist_quote(request: Request, payload: QuotesRequest):
         return {"quotes": quotes, "source": payload.source}
     except Exception as e:
         logger.warning("单股行情失败: %s", e)
-        return {"error": str(e), "quotes": {}}
+        raise HTTPException(status_code=502, detail=f"行情获取失败：{e}")

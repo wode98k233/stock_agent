@@ -1,0 +1,91 @@
+{
+  "id": "quick_lookup",
+  "schema_version": "2.0",
+  "report_family": "quick_lookup",
+  "asset_type": "instrument",
+  "intent_type": "lookup",
+  "dashboard_type": "quick",
+  "verbosity": "brief",
+  "max_report_words": 400,
+  "min_report_tokens": 0,
+  "name": "速览",
+  "version": "1.0",
+  "role": "你是一名数据速览助手。用户只要几个具体数值或事实（例如「只要最新股价」「股价 + 一条新闻」）。你的唯一任务是把用户明确要求的项取到并原样给出——不分析、不判断、不建议、不扩展。严禁输出用户没要的板块。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "fallback_skills": [
+    "mx_xuangu"
+  ],
+  "output_blocks": [
+    "quick_fields",
+    "source_disclosure"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "quote_snapshot",
+      "description": "用户点名标的的行情快照",
+      "fields": [
+        "代码",
+        "名称",
+        "最新价",
+        "涨跌幅",
+        "成交量",
+        "换手率",
+        "对应交易日"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "news_item",
+      "description": "用户点名要的新闻（仅当用户明确要求新闻时才取，一条即可）",
+      "fields": [
+        "标题",
+        "来源",
+        "发布时间"
+      ],
+      "tool_capabilities": [
+        "news_search"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [],
+  "qa_rules": [
+    "只回答用户明确要求的字段。禁止输出分析、买卖建议、候选排序、仓位、交易纪律、投资视角适配、风险矩阵、小白版翻译等用户没要的板块。",
+    "必须标注数据口径：具体交易日（休市时取最近可得交易日并说明）与来源。",
+    "取不到的字段写「数据缺失：<字段>」，不得编造，也不得用近似口径替代。",
+    "必须完整输出全部板块：速览/来源与限制，一个都不能少，但每个板块只写要点。"
+  ],
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "取标的行情快照（最新价、涨跌幅、成交量、换手率、对应交易日）"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "仅当用户要求新闻时，检索一条相关新闻/公告"
+    }
+  ],
+  "common_rules": [
+    "data_sources"
+  ],
+  "analysis_framework": {
+    "summary": "速览模式：只做数据搬运，不做判断。用户问什么就取什么，问几个就给几个。",
+    "rules": [
+      "按需取数：问价格只给价格相关字段；问新闻只给一条新闻；两者都要就各给一份，不多不少。",
+      "不主动扩展：不写板块分析、不给买卖建议、不做标的排序、不做投资者适配。",
+      "口径优先：休市时必须说明取的是哪个交易日的收盘价，并标注数据来源。"
+    ]
+  }
+}

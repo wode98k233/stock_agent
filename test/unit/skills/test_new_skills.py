@@ -43,7 +43,7 @@ def test_skill_tool_building():
     sr.auto_discover()
 
     expected = {
-        'money_flow': ['get_stock_fund_flow', 'get_sector_fund_flow', 'get_north_fund_flow'],
+        'money_flow': ['get_stock_fund_flow', 'get_north_fund_flow'],
     }
 
     for skill_name, expected_tools in expected.items():

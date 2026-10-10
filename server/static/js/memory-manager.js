@@ -492,6 +492,14 @@
             html += `<div class="mem-profile-item"><label>分析风格</label><span>${escHtml(data.analysis_style || '未设置')}</span></div>`;
             html += '</div>';
 
+            if (data.allocation_notes && data.allocation_notes.length > 0) {
+                html += '<div class="mem-profile-tags"><label>自述资产配置</label>';
+                for (const n of data.allocation_notes.slice(-3).reverse()) {
+                    html += `<div class="mem-profile-query">${escHtml(n.text)}</div>`;
+                }
+                html += '</div>';
+            }
+
             if (data.watched_stocks && Object.keys(data.watched_stocks).length > 0) {
                 html += '<div class="mem-profile-tags"><label>关注个股</label>';
                 for (const [k, v] of Object.entries(data.watched_stocks).slice(0, 5)) {

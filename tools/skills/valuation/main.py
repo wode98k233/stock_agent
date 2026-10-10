@@ -140,8 +140,21 @@ class ValuationSkill(SkillBuilder):
 
     @skill_tool
     def get_valuation_percentile(self, symbol: str, years: int = 5) -> dict:
-        """获取个股PE/PB的历史分位数，判断当前估值在近N年中的位置。输入股票代码和年数(默认5)。"""
+        """获取个股PE/PB的历史分位数，判断当前估值在近N年中的位置。输入股票代码和年数(默认5)。
+
+        仅适用于个股：ETF/LOF 等场内基金没有 PE(TTM)/PB 口径，调用会返回「不适用」。
+        """
         from utils.cache import get_valuation_history_cache, set_valuation_history_cache
+
+        from tools.valuation import is_etf_code
+        if is_etf_code(symbol):
+            return {
+                'symbol': symbol,
+                'applicable': False,
+                'note': f'{symbol} 是场内基金（ETF/LOF），没有 PE(TTM)/PB 口径，估值历史分位不适用',
+                'hint': '基金请改为分析其跟踪指数的估值分位（如中证/国证指数）',
+            }
+
         stock_val = self._unwrap(self.get_valuation_indicators(symbol))
         if 'error' in stock_val:
             return stock_val

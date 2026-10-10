@@ -244,8 +244,14 @@ class TestGetStockHist(unittest.TestCase):
 class TestGetBoardIndustryCons(unittest.TestCase):
 
     @patch('tools.fetcher.mx_data_ds.MXDataDataSource._query_mx')
-    def test_normalizes_columns(self, mock_query):
-        """输出列为 代码/名称"""
+    @patch('tools.fetcher.mx_data_ds.MXDataDataSource._query_xuangu', return_value=None)
+    def test_normalizes_columns(self, mock_xuangu, mock_query):
+        """输出列为 代码/名称
+
+        必须同时 patch `_query_xuangu`：`get_board_industry_cons` 先走它，
+        而它内部是 `requests.post` 直连东财选股接口 —— 漏 patch 会真联网
+        （2026-09-22 由 unit 网络闸门抓出）。
+        """
         from tools.fetcher.mx_data_ds import MXDataDataSource
         mock_query.return_value = pd.DataFrame({
             '股票代码': ['600519', '000858'],

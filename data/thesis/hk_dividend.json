@@ -1,0 +1,214 @@
+{
+  "id": "hk_dividend",
+  "name": "港股通红利环境因子包",
+  "version": "1.0",
+  "asset_label": "中证港股通高股息投资指数（930914）",
+  "description": "港股通高股息资产的驱动 × 位置研判。与 dividend_env（A 股红利低波）**口径不通用**，但**可横向比较**：A 股红利低波受益于国内利率下行与险资 OCI 流入，定价锚是国内无风险利率；港股通红利的主标的虽是港股资产，但资金主力是南向（内地）资金，且计价已含汇率因素——两者的共同点是机会成本都是人民币利率，差别在于分母端的美元成分与港股流动性（HIBOR）。",
+
+  "_说明_锚定": "锚定股息率（930914 的股息率1）− 中国 10Y 国债收益率。选中国 10Y 而非美国 10Y：港股通标的主力持有者是内地资金（南向），机会成本是人民币无风险利率。",
+  "_说明_阈值格式": "每张阈值表为 [下限, 上限, 得分]，下限含、上限不含，**必须覆盖 -99~99**；得分范围锁死 [-2, 2]。阈值为结构占位，须按「因子有效性」证据逐步标定。",
+  "_说明_阈值表": "thresholds 块内**不能放注释键**——validate_def 会遍历该块全部键做「非空列表」校验（与 manual 块的 `_` 跳过规则不同）。",
+  "_说明_得分含义": "得分 = 该因子对「港股通红利」的有利程度，+2 很有利 / -2 很不利；总分 = 各因子得分之和。",
+  "_说明_九宫格": "按「权益类直接上九宫格」设计（同类：gold_regime / cu_regime / hog_regime）。drive = 驱动因子之和，pos = 价格位置。与 A 股 dividend_env 保持线性不同——红利类资产「位置高」不一定危险（它生息），故不强行统一。",
+  "_说明_数据源": "主标的用 **930914 中证港股通高股息投资指数**（中证指数公司编制），而非恒生高股息率指数 HSHDYI：① HSHDYI 无股息率数据源（恒生系指数均无），930914 有（走中证指数公司估值接口）；② 港股通口径=内地投资者实际可投范围；③ 与 H30269 同属中证体系，口径可直接对齐。",
+
+  "subject": {
+    "index_code": "930914",
+    "index_name": "中证港股通高股息投资指数",
+    "benchmark_code": "HSI",
+    "benchmark_name": "恒生指数",
+    "context_code": "H30269",
+    "context_name": "中证红利低波动（A 股同策略对照，不参与打分）",
+    "scope_note": "主标的 930914（中证指数公司编制，港股通口径，30 只样本）。行情与股息率均走中证指数公司接口；benchmark 恒生指数（港股宽基）走新浪港股指数通道。context 列 A 股红利低波作同策略对照，不参与打分。"
+  },
+
+  "data": {
+    "hk_dy": {
+      "kind": "index_valuation",
+      "index_code": "930914",
+      "field": "dy",
+      "stale_days": 10
+    },
+    "cn10_y": {"kind": "macro", "code": "cn10_y", "periods": 400},
+    "us10_y": {"kind": "macro", "code": "us10_y", "periods": 400},
+    "hk_hibor_1w": {"kind": "macro", "code": "hk_hibor_1w", "periods": 400},
+    "usdcny": {"kind": "macro", "code": "usdcny", "periods": 400},
+    "red": {
+      "kind": "index_daily",
+      "code": "930914",
+      "name": "中证港股通高股息投资指数",
+      "label": "港股通高股息",
+      "days": 1700
+    },
+    "base": {
+      "kind": "index_daily",
+      "code": "HSI",
+      "name": "恒生指数",
+      "label": "恒生指数",
+      "days": 900
+    }
+  },
+
+  "params": {
+    "trend_lookback_days": 20,
+    "trend_move_bp": 10,
+    "ma_days": 750,
+    "index_hist_days": 1700,
+    "index_stale_days": 5,
+    "min_samples_for_dy_rank": 120
+  },
+
+  "factors": [
+    {
+      "key": "premium",
+      "compute": "rate_premium",
+      "name": "① 股息率溢价",
+      "dy": "hk_dy",
+      "rate": "cn10_y",
+      "metric": "premium",
+      "unit": "pp",
+      "thresholds_key": "premium_pp",
+      "source": "中证指数公司（930914 股息率）/ 中债（国债）",
+      "confidence": {
+        "level": "mid",
+        "why": "源可用；但存在「股息率1 / 股息率2」口径分歧（实测 930914 两者差约 1.0pp，大于 A 股 H30269 的 0.58pp），趋势方向可靠、绝对水平需谨慎"
+      },
+      "note": "红利策略的灵魂因子。实测 2026-09 口径：930914 股息率1 ≈ 5.1%、股息率2 ≈ 6.1%（对照 H30269 为 4.2%/4.8%）。"
+    },
+    {
+      "key": "cn10_y",
+      "compute": "rate_level_trend",
+      "name": "② 中国 10Y 利率锚",
+      "series": "cn10_y",
+      "metric": "cn10_y",
+      "unit": "%",
+      "higher_is_better": false,
+      "thresholds_key": "cn10_level",
+      "source": "中债",
+      "confidence": {"level": "mid", "why": "机制清晰（利率下行 → 股息相对吸引力提升）；阈值待标定"},
+      "note": "利率下行 = 红利资产的机会成本下降 = 利好。与 dividend_env 的 ② 同源，可复用同一宏观指标。"
+    },
+    {
+      "key": "us10_y",
+      "compute": "rate_level_trend",
+      "name": "③ 美债 10Y（分母端）",
+      "series": "us10_y",
+      "metric": "us10_y",
+      "unit": "%",
+      "higher_is_better": false,
+      "thresholds_key": "us10_level",
+      "source": "美债",
+      "confidence": {"level": "mid", "why": "港元与美元挂钩，美债利率是港股估值的分母端；恒科台账实测加息期敏感度为负"},
+      "note": "与恒科台账 ① 同源。"
+    },
+    {
+      "key": "hk_liq",
+      "compute": "rate_level_trend",
+      "name": "④ 港元流动性（HIBOR 1W）",
+      "series": "hk_hibor_1w",
+      "metric": "hk_hibor_1w",
+      "unit": "%",
+      "higher_is_better": false,
+      "thresholds_key": "hibor_level",
+      "source": "香港银行公会",
+      "confidence": {"level": "mid", "why": "联系汇率下 HIBOR 直接决定港股资金成本；阈值可锚自 2017-03 以来分位"},
+      "note": "港股通红利多为高派息标的，对港元资金成本敏感。与恒科台账 ⑤ 同源。"
+    },
+    {
+      "key": "crowding",
+      "compute": "crowding",
+      "name": "⑤ 价格位置（拥挤度）",
+      "red": "red",
+      "metric": "crowding",
+      "unit": "%偏离",
+      "thresholds_key": "crowding_ext_pct",
+      "source": "index_daily 自算（均线口径）",
+      "confidence": {"level": "mid", "why": "位置用「点位对长期均线偏离度」一维；股息率水平由 ① 单独承载，故此处不重复做股息率分位"},
+      "note": "本因子读数进入九宫格的 pos 轴。偏离度越高越拥挤（股息率被价格摊薄）。"
+    },
+    {
+      "key": "fx",
+      "compute": "level_trend_pct",
+      "name": "⑥ 汇率（美元兑人民币）",
+      "series": "usdcny",
+      "metric": "usdcny",
+      "unit": "",
+      "higher_is_better": true,
+      "thresholds_key": "usdcny_level",
+      "source": "中国外汇交易中心",
+      "confidence": {"level": "low", "why": "方向有双向性：人民币走弱 → 港币资产折人民币升值（利好持有）；但同时伴随资金外流压力（利空）。净效应需实测；若方向不稳定应考虑剔除"},
+      "note": "对内地投资者，港币计价资产的本币回报受汇率影响。方向不明确，标低置信度。"
+    }
+  ],
+
+  "stages": {
+    "_说明": "驱动（5 个驱动因子得分之和）× 位置（延伸度分位对应的得分）的 3×3 九宫格。港股通红利是权益类资产，「驱动有利但位置已高」与「驱动有利且位置便宜」含义相反——线性总分给不出这个区分。本块不参与打分。",
+    "drive_keys": ["premium", "cn10_y", "us10_y", "hk_liq", "fx"],
+    "pos_key": "crowding",
+    "drive_full": 10,
+    "pos_full": 2,
+    "drive_bands": [
+      {"name": "顺风", "min": 4},
+      {"name": "中性", "min": -3},
+      {"name": "逆风", "min": -99}
+    ],
+    "pos_bands": [
+      {"name": "低位", "min": 1},
+      {"name": "中性位", "min": -1},
+      {"name": "高位", "min": -99}
+    ],
+    "cells": [
+      {"drive": "顺风", "pos": "低位", "stage": "低位积累期", "tone": "bull", "desc": "环境有利 + 位置便宜 —— 高股息在低位意味着收益率被抬升，历史上最优组合"},
+      {"drive": "顺风", "pos": "中性位", "stage": "顺风上行期", "tone": "bull", "desc": "驱动有利、位置居中，股息 + 资本利得双轮"},
+      {"drive": "顺风", "pos": "高位", "stage": "趋势延伸期", "tone": "warn", "desc": "驱动仍有利但位置已高 —— 股息率被价格压低，持有可以、追高不宜"},
+      {"drive": "中性", "pos": "低位", "stage": "低位磨底期", "tone": "warn", "desc": "环境无明确方向、位置便宜 —— 收息窗口，等驱动拐点"},
+      {"drive": "中性", "pos": "中性位", "stage": "中性震荡期", "tone": "neutral", "desc": "驱动与位置都居中，无明确边际"},
+      {"drive": "中性", "pos": "高位", "stage": "高位滞涨期", "tone": "neutral", "desc": "位置已高但缺乏驱动 —— 容易滞涨"},
+      {"drive": "逆风", "pos": "低位", "stage": "逆风错杀期", "tone": "neutral", "desc": "环境不利但位置便宜 —— 可能是布局窗口，需等驱动转向"},
+      {"drive": "逆风", "pos": "中性位", "stage": "逆风承压期", "tone": "warn", "desc": "环境不利、位置居中 —— 仅剩股息垫子"},
+      {"drive": "逆风", "pos": "高位", "stage": "逆风高位期", "tone": "bear", "desc": "环境不利且位置已高 —— 最差组合，股息垫子不足以对冲估值压缩"}
+    ]
+  },
+
+  "thresholds": {
+    "premium_pp": [[-99, 0, -2], [0, 1, -1], [1, 2, 0], [2, 3, 1], [3, 99, 2]],
+    "cn10_level": [[-99, 1.8, 2], [1.8, 2.2, 1], [2.2, 2.8, 0], [2.8, 3.3, -1], [3.3, 99, -2]],
+    "us10_level": [[-99, 3.0, 2], [3.0, 4.0, 1], [4.0, 4.6, 0], [4.6, 5.2, -1], [5.2, 99, -2]],
+    "hibor_level": [[-99, 0.5, 2], [0.5, 1.5, 1], [1.5, 2.5, 0], [2.5, 3.8, -1], [3.8, 99, -2]],
+    "crowding_ext_pct": [[-99, -15, 2], [-15, -5, 1], [-5, 5, 0], [5, 15, -1], [15, 99, -2]],
+    "usdcny_level": [[-99, 6.9, 1], [6.9, 7.1, 0], [7.1, 7.4, -1], [7.4, 99, 0]]
+  },
+
+  "verdicts": [
+    {"min_total": 7, "verdict": "偏有利", "action": "可分批配置港股通红利"},
+    {"min_total": 3, "verdict": "中性偏有利", "action": "可持有，回调分批介入"},
+    {"min_total": -1, "verdict": "中性", "action": "观望，等利率端或流动性端转松"},
+    {"min_total": -6, "verdict": "中性偏谨慎", "action": "控制权重，仅保留股息垫子仓位"},
+    {"min_total": -99, "verdict": "不利", "action": "不建议买入 / 考虑降低敞口"}
+  ],
+
+  "signals": {
+    "buy": [
+      {"metric": "premium", "op": ">", "value": 2, "label": "股息率溢价 > 2pp（相对国债吸引力显著）"},
+      {"metric": "cn10_y", "op": "<", "value": 2.0, "label": "中国 10Y < 2.0%（机会成本低）"},
+      {"metric": "us10_y", "op": "<", "value": 4.0, "label": "美债 10Y < 4.0%（分母端转松）"},
+      {"metric": "hk_hibor_1w", "op": "<", "value": 1.5, "label": "港元 HIBOR 1W < 1.50%（港元流动性充裕）"},
+      {"metric": "crowding", "op": "<", "value": -15, "label": "价格延伸度 < -15%（明显低于长期均线，股息率被抬升）"}
+    ],
+    "warn": [
+      {"metric": "us10_y", "op": ">", "value": 5.2, "label": "美债 10Y > 5.2%（分母端最直接压制）"},
+      {"metric": "hk_hibor_1w", "op": ">", "value": 3.8, "label": "港元 HIBOR 1W > 3.80%（港元流动性显著收紧）"},
+      {"metric": "crowding", "op": ">", "value": 25, "label": "价格延伸度 > 25%（位置已高，股息率被价格压低）"}
+    ]
+  },
+
+  "invalidation": {
+    "_说明": "结论失效条件：命中任意一条即说明本台账的多头结论不再成立，须重新研究。",
+    "rules": [
+      {"metric": "us10_y", "op": ">", "value": 5.2, "text": "美债 10Y 趋势性站稳 5.2% 以上：港元与美元挂钩，美元流动性收紧直接压缩港股估值"},
+      {"metric": "hk_hibor_1w", "op": ">", "value": 3.8, "text": "港元 HIBOR 1W 升破 3.80%（p90 以上）：联系汇率下港元流动性显著收紧，高派息标的的资金成本抬升"},
+      {"metric": "crowding", "op": ">", "value": 25, "text": "价格延伸度 > 25%：位置过高使股息率被价格摊薄，股息垫子失去保护作用"},
+      {"metric": "premium", "op": "<", "value": 0, "text": "股息率溢价转负（股息率低于中国 10Y 国债）：持有港股通红利相对无风险利率已无补偿，策略前提消失"}
+    ]
+  }
+}

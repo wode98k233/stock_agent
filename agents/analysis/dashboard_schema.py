@@ -77,6 +77,14 @@ class DashboardData(BaseModel):
     sentiment_heat: int | None = None
     capital_behavior: str | None = None
     hot_stocks: list | None = None
+    # ── 宏观类（macro dashboard）──
+    macro_snapshot: list | None = None     # 核心指标卡：[{name,value,prev,change,date}]
+    liquidity_status: str | None = None    # 宽松 / 中性 / 收紧
+    policy_stance: str | None = None       # 政策取向一句话解读
+    # ── 组合/多标的类（portfolio dashboard）──
+    portfolio_snapshot: dict | None = None   # 组合概况：{total_asset, position_value, cash, position_ratio, position_count}
+    positions: list | None = None            # 分标的持仓表：[{code,name,price,pnl_pct,action,condition}]
+    symbol_signals: list | None = None       # 分标的具体信号（信号评测逐标的提取）：[{code,name,decision,confidence,condition}]
     # ── 元数据 ──
     scenario_tag: str = "决策仪表盘"
     dashboard_id: str = ""

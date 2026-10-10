@@ -25,6 +25,9 @@ HK_US_ALLOWED_TOOLS = {
     "mx_data_query",
     "mx_search_news",
     "calc_technical_indicators",
+    # 通用网搜：与市场无关（任何市场的公开信息都能搜），港美股分析同样需要看新闻/公告/背景，
+    # 故放行。2026-10-07 加入——在此之前 `web_search` 技能对港美股问题会被过滤掉。
+    "web_search",
 }
 
 
@@ -208,8 +211,10 @@ def market_constraint_prompt(market: str) -> str:
     label = MARKET_LABELS.get(market, "该市场")
     return (
         f"\n\n## 市场约束\n当前问题识别为{label}标的。"
-        "React 快速模式下仅选择 mx_data、mx_search、technical_analysis；"
-        "不要选择 A 股专用的 money_flow、valuation、stock_query、margin_trading、block_trades 等技能。"
+        "React 快速模式下仅选择 mx_data、mx_search、stock_analysis、web_search"
+        "（stock_analysis 中只有 calc_technical_indicators 适配港美股，其余工具会被市场过滤掉；"
+        "web_search 是通用网搜，与市场无关，可查该市场的新闻/公告/公司背景/行业信息）；"
+        "不要选择 A 股专用的 money_flow、valuation、margin_trading、block_trades 等技能。"
     )
 
 
@@ -221,5 +226,6 @@ def unsupported_tool_message(tool_name: str, market: str, args: dict | None) -> 
     symbol_text = f" {symbol}" if symbol else ""
     return (
         f"工具 {tool_name} 当前不支持{label}{symbol_text}，已跳过；"
-        "请优先使用 mx_data_query / mx_search_news 获取该市场的行情、资金、估值和新闻数据。"
+        "请优先使用 mx_data_query / mx_search_news 获取该市场的行情、资金、估值和新闻数据；"
+        "通用公开信息（政策/公司背景/产业链）可改用 web_search。"
     )

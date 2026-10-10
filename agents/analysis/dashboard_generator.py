@@ -6,12 +6,20 @@
 2. LLM 精炼：基于报告生成完整仪表盘 JSON
 3. 校验兜底：Pydantic 校验 + 规则预提取降级
 """
+import json
 import logging
 import re
 import time
 from typing import Optional
 
 from agents.analysis.dashboard_schema import DashboardCheckItem, DashboardData, DashboardRiskItem
+from agents.analysis.evidence_view import (
+    _build_tool_evidence,
+    _build_tool_index,
+    _text,
+    _tool_items,
+    is_unusable_output,
+)
 from config import Config
 from memory.metadata import extract_dashboard_metadata, set_dashboard_meta
 from utils.budget import BudgetExceeded
@@ -54,9 +62,15 @@ _CHECKLIST_DIMENSIONS = [
 
 
 def _find_slot_values(slot_results: dict, keywords: tuple | list) -> list[tuple[str, str]]:
-    """从 slot_results 中查找包含指定关键词的 slot，返回 (slot_key, slot_value) 列表"""
+    """从 slot_results 中查找包含指定关键词的 slot，返回 (slot_key, slot_value) 列表
+
+    失败/空输出不参与匹配：它们没有证据价值，却会因文案里的普通词被误判成维度命中
+    —— 2026-10-01：一条失败的大宗交易返回因含「机构席位」被判成「资金面」。
+    """
     hits = []
     for key, value in slot_results.items():
+        if is_unusable_output(value):
+            continue
         if any(kw in str(key) for kw in keywords) or any(kw in str(value)[:200] for kw in keywords):
             hits.append((key, str(value)))
     return hits
@@ -201,8 +215,14 @@ def _truncate_report(report: str, max_tokens: int = 2000) -> str:
     return report[:keep_chars] + "\n...\n" + report[-keep_chars:]
 
 
+# 工具证据视图（_text/_tool_items/_build_tool_index/_build_tool_evidence）
+# 已迁至 agents.analysis.evidence_view —— dashboard 与 report 共用，见本模块顶部 import。
+
+
 def _build_prompt(report_text: str, rule_hints: dict, user_input: str,
-                  scenario_tag: str = "决策仪表盘", dashboard_id: str | None = None) -> list:
+                  scenario_tag: str = "决策仪表盘", dashboard_id: str | None = None,
+                  tool_evidence: str = "", tool_index: str = "",
+                  allow_detail_request: bool = False) -> list:
     """构建 LLM prompt。
 
     当 dashboard_id 有对应 JSON 定义时，从 llm_fields 动态构建 schema；
@@ -267,24 +287,56 @@ def _build_prompt(report_text: str, rule_hints: dict, user_input: str,
     else:
         schema_body = universal_schema
 
+    detail_rule = ""
+    if allow_detail_request:
+        detail_rule = (
+            "【可下钻】先判断已有信息是否足够填满仪表盘：\n"
+            "  - 足够 → 直接按下面 schema 输出仪表盘JSON；\n"
+            "  - 某项工具结果缺失/过短导致关键字段填不出 → 只输出 "
+            '{"need_tools": ["工具名", ...], "reason": "为何需要"}（此时不要输出仪表盘JSON）。\n'
+        )
+
     system_msg = (
         f"你是A股分析决策助手。根据分析报告生成【{scenario_tag}】JSON。\n"
-        "要求：\n"
-        "1. 必须与报告正文结论一致，不得自行推断\n"
+        + detail_rule
+        + "要求：\n"
+        "1. 结论/判断必须与报告正文一致，不得自行推断；但报告未展开的结构化字段"
+        "（如持仓明细、逐标信号、成分权重）可依据下方提供的工具结果补全，数值须与之一致\n"
         "2. scenario_tag 字段必须为: " + scenario_tag + "\n"
         "3. 文字字段必须精炼：checklist detail≤50字，risk detail≤50字，key_points/next_watch每项≤40字，不要复制原始数据\n"
         f"4. 内容最多{getattr(Config, 'DASHBOARD_MAX_LLM_TOKENS', 1000)}字\n"
-        "5. 严格输出JSON，符合以下schema:\n"
+        "5. 数据缺失一律用 null，禁止用 0 占位或凭空猜测；market_breadth 的 advance/decline 缺失时置 null\n"
+        "6. 严格输出JSON，符合以下schema:\n"
         "{\n"
         f"{schema_body}\n"
         "}\n"
     )
 
+    evidence_block = ""
+    if tool_index:
+        evidence_block = (
+            "\n工具结果索引（名称 | 参数 | 压缩后长度 | 预览；如需某项完整内容，"
+            "请在 need_tools 里列出其名称）:\n"
+            f"{tool_index}\n"
+        )
+    elif tool_evidence:
+        evidence_block = (
+            "\n工具结果原文（压缩后，用于补全报告未展开的结构化字段；数值须与之一致）:\n"
+            f"{tool_evidence}\n"
+        )
+
+    if allow_detail_request:
+        tail = ('\n请二选一输出：信息足够→直接输出仪表盘JSON；否则→'
+                '{"need_tools":["工具名",...],"reason":"..."}（不要输出仪表盘）:')
+    else:
+        tail = "\n请输出仪表盘JSON:"
+
     user_msg = (
         f"用户问题: {user_input}\n\n"
         f"分析报告:\n{report_text}\n"
-        f"{hints_str}\n\n"
-        "请输出仪表盘JSON:"
+        f"{hints_str}\n"
+        + evidence_block
+        + tail
     )
 
     return [("system", system_msg), ("user", user_msg)]
@@ -316,6 +368,24 @@ async def _call_llm(messages: list, budget, logger_obj, metadata=None, run_confi
         return None
 
 
+def _parse_need_tools(raw_json) -> list[str]:
+    """两阶段下钻判定：`{"need_tools": [...]}` → 清洗去重后的工具名列表；否则 []。"""
+    if not isinstance(raw_json, dict):
+        return []
+    names = raw_json.get("need_tools")
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list):
+        return []
+    seen, out = set(), []
+    for n in names:
+        n = str(n).strip()
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def _normalize_llm_payload(raw_json):
     """兼容 LLM 对扩展字段的轻微类型偏差。"""
     if not isinstance(raw_json, dict):
@@ -328,7 +398,7 @@ def _normalize_llm_payload(raw_json):
         if isinstance(value, str) and value.strip():
             data[field] = {"summary": value.strip()}
 
-    for field in ("sector_rotation", "leading_stocks", "action_items", "index_data", "strong_sectors", "weak_sectors", "candidate_stocks"):
+    for field in ("sector_rotation", "leading_stocks", "action_items", "index_data", "strong_sectors", "weak_sectors", "candidate_stocks", "macro_snapshot"):
         value = data.get(field)
         if isinstance(value, str) and value.strip():
             data[field] = [value.strip()]
@@ -349,6 +419,15 @@ def _normalize_llm_payload(raw_json):
     # 截断过长的 key_points / next_watch
     for field in ("key_points", "next_watch"):
         data[field] = [s[:50] + "..." if len(s) > 50 else s for s in data.get(field, []) if isinstance(s, str)]
+
+    # 涨跌家数缺失防护：advance/decline 同为 0 在实际交易日不可能成立（当日必有涨跌），
+    # 视为 LLM 用 0 占位，置 None 让前端渲染「—」，避免 0 被当成真实数据。
+    breadth = data.get("market_breadth")
+    if isinstance(breadth, dict):
+        for a_key, d_key in (("advance", "decline"), ("up", "down")):
+            if breadth.get(a_key) == 0 and breadth.get(d_key) == 0:
+                breadth[a_key] = None
+                breadth[d_key] = None
 
     return data
 
@@ -393,11 +472,15 @@ async def generate(
     logger_obj=None,
     metadata=None,
     run_config=None,
+    tool_calls: list | None = None,
 ) -> DashboardData | None:
     """
     仪表盘生成主入口。
 
-    三步流程：规则预提取 → LLM 精炼 → 校验兜底
+    三步流程：规则预提取 → LLM 精炼（索引 → 可选下钻）→ 校验兜底
+
+    仪表盘口径 = **总结报告 + 工具结果 + 仪表盘模板**：优先用 tool_calls（有序、含参数、
+    保留重复调用）构建工具索引；缺失时回退 slot_results。
     """
     t0 = time.time()
     logger = ensure_radar(logger_obj or logging.getLogger(__name__))
@@ -417,11 +500,21 @@ async def generate(
         "checklist": checklist,
     }
     if decision_type:
-        verdict_map = {"buy": "综合分析建议买入", "sell": "综合分析建议卖出", "hold": "综合分析建议观望"}
+        # 措辞中性化：原先映射成「综合分析建议买入/卖出」，会在 LLM 不可用的兜底路径
+        # 直接作为 core_verdict 返回给用户（2026-10-01 复审项）。
+        verdict_map = {"buy": "规则参考：偏多", "sell": "规则参考：偏空", "hold": "规则参考：观望"}
         rule_hints["core_verdict"] = verdict_map[decision_type]
 
     extracted_fields = [k for k, v in rule_hints.items() if v is not None and v != []]
     logger.info("D", "dashboard.gen.rule_extract", extracted_fields=extracted_fields, field_count=len(extracted_fields))
+
+    # 方向类结论（decision_type / core_verdict）**只留给 LLM 不可用时的兜底**，
+    # 不进入 LLM 提示词。理由（2026-10-01）：`_extract_decision_type` 是关键词计数，
+    # 而交易纪律类文本必然同时高频出现 buy 词（反弹/加仓）与 sell 词（止损/减仓）——
+    # 同一份事故数据能算出 buy 也能算出 sell，方向不稳定；用它去预置是对强模型的弱偏置。
+    # 事实类提示（情绪分 / 点位 / 清单）仍保留，它们是有据可查的数据。
+    prompt_hints = {k: v for k, v in rule_hints.items()
+                    if k not in ("decision_type", "core_verdict")}
 
     # ── Step 2: LLM 精炼 ──
     llm_data = None
@@ -437,15 +530,39 @@ async def generate(
         if not budget_tight:
             try:
                 truncated = _truncate_report(report_content)
-                messages = _build_prompt(truncated, rule_hints, user_input,
-                                        scenario_tag=scenario_tag,
-                                        dashboard_id=dashboard_id)
+                items = _tool_items(tool_calls, slot_results)
+                tool_index = _build_tool_index(items)
 
-                logger.info("D", "dashboard.gen.llm_call", input_chars=len(truncated))
+                messages = _build_prompt(truncated, prompt_hints, user_input,
+                                        scenario_tag=scenario_tag,
+                                        dashboard_id=dashboard_id,
+                                        tool_index=tool_index,
+                                        allow_detail_request=True)
+
+                logger.info("D", "dashboard.gen.llm_call", phase=1,
+                            input_chars=len(truncated), index_chars=len(tool_index),
+                            tool_count=len(items))
 
                 raw_json = await _call_llm(messages, budget, logger_obj, metadata=metadata, run_config=run_config)
 
-                if raw_json is not None:
+                # 阶段二（最多 1 轮）：LLM 点名需要哪些工具的完整结果 → 带原文再问一次
+                need = _parse_need_tools(raw_json)
+                if need:
+                    try:
+                        evidence = _build_tool_evidence(items, selected_names=need)
+                        messages = _build_prompt(truncated, prompt_hints, user_input,
+                                                 scenario_tag=scenario_tag,
+                                                 dashboard_id=dashboard_id,
+                                                 tool_evidence=evidence)
+                        logger.info("D", "dashboard.gen.drilldown", phase=2,
+                                    need_tools=need, evidence_chars=len(evidence))
+                        raw_json = await _call_llm(messages, budget, logger_obj, metadata=metadata, run_config=run_config)
+                    except BudgetExceeded:
+                        logger.info("D", "dashboard.gen.drilldown_skip", reason="BudgetExceeded")
+                    except Exception as e:
+                        logger.info("D", "dashboard.gen.drilldown_skip", reason=type(e).__name__)
+
+                if raw_json is not None and not _parse_need_tools(raw_json):
                     try:
                         raw_json = _normalize_llm_payload(raw_json)
                         llm_data = DashboardData.model_validate(raw_json)

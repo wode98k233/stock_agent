@@ -27,7 +27,10 @@ async def classify_step(state: PlanExecute, ctx: AgentContext, run_config=None):
     logger.info("C", "属于股票/金融相关，继续规划")
     if progress:
         progress.classifier_result(True)
-    return {"plan": [], "current_step": 0}
+    updates = {"plan": [], "current_step": 0}
+    if result.get("clarified_input"):
+        updates["input"] = result["clarified_input"]
+    return updates
 
 
 def classifier_should_end(state: PlanExecute):

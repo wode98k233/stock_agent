@@ -71,14 +71,11 @@ def load_dialog_days(storage, year: int, month: int) -> dict[str, list]:
 
 
 def load_trace_token_stats(storage, dialog_days: dict[str, list]) -> dict[str, dict]:
-    """查询每个对话的 token 统计（从 trace DB）。"""
+    """查询每个对话的 token 统计（从 trace 月库，经 store 分库路由）。"""
     trace_token_map: dict[str, dict] = {}
     try:
-        from utils.app_paths import get_trace_db_path
+        from utils.agent_trace.store import store
         from utils.token_usage import normalize_token_usage_dict
-        trace_db = get_trace_db_path()
-        if not Path(trace_db).exists():
-            return trace_token_map
 
         all_uuids = []
         for dialogs in dialog_days.values():
@@ -88,31 +85,17 @@ def load_trace_token_stats(storage, dialog_days: dict[str, list]) -> dict[str, d
         if not all_uuids:
             return trace_token_map
 
-        conn = sqlite3.connect(trace_db, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            dialog_run_map = storage.latest_trace_runs_for_dialogs(all_uuids)
-            run_ids = list(set(dialog_run_map.values()))
-            if not run_ids:
-                return trace_token_map
+        dialog_run_map = storage.latest_trace_runs_for_dialogs(all_uuids)
+        run_ids = list(set(dialog_run_map.values()))
+        if not run_ids:
+            return trace_token_map
 
-            ph2 = ",".join("?" * len(run_ids))
-            run_rows = conn.execute(
-                f"SELECT id, duration_ms FROM runs WHERE id IN ({ph2})",
-                run_ids,
-            ).fetchall()
-            run_dur_map = {r["id"]: r["duration_ms"] for r in run_rows}
+        run_dur_map = {r["id"]: r["duration_ms"] for r in store.get_runs_by_ids(run_ids)}
 
-            step_rows = conn.execute(
-                f"SELECT run_id, extra FROM steps "
-                f"WHERE run_id IN ({ph2}) AND step_type='llm'",
-                run_ids,
-            ).fetchall()
-
-            token_map: dict[str, dict] = {}
-            for s in step_rows:
-                rid = s["run_id"]
-                extra_str = s["extra"]
+        token_map: dict[str, dict] = {}
+        for rid, items in store.llm_steps_totals(run_ids).items():
+            for item in items:
+                extra_str = item.get("extra")
                 if not extra_str or not isinstance(extra_str, str):
                     continue
                 try:
@@ -129,19 +112,17 @@ def load_trace_token_stats(storage, dialog_days: dict[str, list]) -> dict[str, d
                 except Exception:
                     continue
 
-            for dlg_uuid, run_id in dialog_run_map.items():
-                tm = token_map.get(run_id, {})
-                trace_token_map[dlg_uuid] = {
-                    "llm_calls": tm.get("llm_calls", 0),
-                    "input_tokens": tm.get("input_tokens", 0),
-                    "output_tokens": tm.get("output_tokens", 0),
-                    "total_tokens": tm.get("total_tokens", 0),
-                    "cached_tokens": tm.get("cached_tokens", 0),
-                    "reasoning_tokens": tm.get("reasoning_tokens", 0),
-                    "duration_ms": run_dur_map.get(run_id),
-                }
-        finally:
-            conn.close()
+        for dlg_uuid, run_id in dialog_run_map.items():
+            tm = token_map.get(run_id, {})
+            trace_token_map[dlg_uuid] = {
+                "llm_calls": tm.get("llm_calls", 0),
+                "input_tokens": tm.get("input_tokens", 0),
+                "output_tokens": tm.get("output_tokens", 0),
+                "total_tokens": tm.get("total_tokens", 0),
+                "cached_tokens": tm.get("cached_tokens", 0),
+                "reasoning_tokens": tm.get("reasoning_tokens", 0),
+                "duration_ms": run_dur_map.get(run_id),
+            }
     except Exception:
         logger.warning("日历: 查询 trace token 统计失败", exc_info=True)
     return trace_token_map

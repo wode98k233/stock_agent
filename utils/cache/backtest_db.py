@@ -17,279 +17,16 @@ get_backtest_db = make_db_context(lambda: Config.get_backtest_db_path())
 
 
 def init_backtest_tables():
-    """初始化 backtest.db 表结构"""
+    """初始化 backtest.db 表结构（DDL 统一来源 utils/db_schema）"""
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.registry import ALL_DBS
     with get_backtest_db() as conn:
         # 启用 WAL 模式：允许并发读写，避免批量回测多线程写 DB 时锁冲突
         conn.execute("PRAGMA journal_mode = WAL")
-        c = conn.cursor()
-
-        # -----------------------------------------------------------
-        # 1. 数据采集任务管理
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS data_tasks (
-            task_id TEXT PRIMARY KEY,
-            task_type TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            config_json TEXT NOT NULL,
-            total_count INTEGER DEFAULT 0,
-            processed_count INTEGER DEFAULT 0,
-            success_count INTEGER DEFAULT 0,
-            failed_count INTEGER DEFAULT 0,
-            current_code TEXT,
-            current_name TEXT,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            error_message TEXT,
-            retry_count INTEGER DEFAULT 0,
-            log_text TEXT,
-            source TEXT,
-            duration_seconds REAL,
-            updated_at TEXT
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_data_tasks_status ON data_tasks(status)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_data_tasks_created ON data_tasks(created_at DESC)')
-
-        # -----------------------------------------------------------
-        # 2. 策略定义
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS strategies (
-            strategy_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            category TEXT NOT NULL,
-            is_builtin INTEGER NOT NULL DEFAULT 1,
-            code TEXT,
-            params_schema TEXT NOT NULL,
-            version TEXT DEFAULT '1.0',
-            engine_version TEXT DEFAULT 'v1.0',
-            author TEXT,
-            tags TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT
-        )''')
-
-        # -----------------------------------------------------------
-        # 3. 回测任务
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_runs (
-            run_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'pending',
-            code TEXT NOT NULL,
-            stock_name TEXT,
-            strategy_id TEXT NOT NULL,
-            strategy_name TEXT NOT NULL,
-            params_json TEXT NOT NULL,
-            config_json TEXT NOT NULL,
-            start_date TEXT NOT NULL,
-            end_date TEXT NOT NULL,
-            initial_cash REAL NOT NULL DEFAULT 100000,
-            commission REAL DEFAULT 0.0003,
-            min_commission REAL DEFAULT 5.0,
-            stamp_tax REAL DEFAULT 0.0005,
-            transfer_fee REAL DEFAULT 0.00001,
-            slippage REAL DEFAULT 0.001,
-            t_plus_1 INTEGER DEFAULT 1,
-            lot_size INTEGER DEFAULT 100,
-            adjust_type TEXT DEFAULT 'qfq',
-            stop_loss REAL DEFAULT 0,
-            take_profit REAL DEFAULT 0,
-            trailing_stop REAL DEFAULT 0,
-            position_mode TEXT DEFAULT 'full',
-            position_size REAL DEFAULT 1.0,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            duration_seconds REAL,
-            error_message TEXT,
-            engine_version TEXT DEFAULT 'v1.0',
-            updated_at TEXT,
-            FOREIGN KEY (strategy_id) REFERENCES strategies(strategy_id)
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_bt_runs_code ON backtest_runs(code)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_bt_runs_strategy ON backtest_runs(strategy_id)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_bt_runs_created ON backtest_runs(created_at DESC)')
-
-        # -----------------------------------------------------------
-        # 4. 回测结果（统计指标）
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_results (
-            run_id TEXT PRIMARY KEY,
-            total_return REAL,
-            annual_return REAL,
-            benchmark_return REAL,
-            excess_return REAL,
-            sharpe_ratio REAL,
-            sortino_ratio REAL,
-            calmar_ratio REAL,
-            max_drawdown REAL,
-            max_drawdown_duration INTEGER,
-            volatility REAL,
-            downside_volatility REAL,
-            trade_count INTEGER,
-            win_count INTEGER,
-            loss_count INTEGER,
-            win_rate REAL,
-            profit_factor REAL,
-            avg_win REAL,
-            avg_loss REAL,
-            avg_holding_days REAL,
-            max_consecutive_wins INTEGER,
-            max_consecutive_losses INTEGER,
-            final_equity REAL,
-            peak_equity REAL,
-            equity_curve_json TEXT,
-            drawdown_curve_json TEXT,
-            monthly_returns_json TEXT,
-            engine_version TEXT DEFAULT 'v1.0',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
-        )''')
-
-        # -----------------------------------------------------------
-        # 5. 交易记录
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT NOT NULL,
-            trade_no INTEGER NOT NULL,
-            direction TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            price REAL NOT NULL,
-            quantity INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            commission REAL DEFAULT 0,
-            stamp_tax REAL DEFAULT 0,
-            transfer_fee REAL DEFAULT 0,
-            slippage_cost REAL DEFAULT 0,
-            total_cost REAL DEFAULT 0,
-            pnl REAL,
-            pnl_pct REAL,
-            holding_days INTEGER,
-            signal_reason TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_bt_trades_run ON backtest_trades(run_id, trade_no)')
-
-        # -----------------------------------------------------------
-        # 6. 批量回测批次主表（新增）
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_batch (
-            batch_id TEXT PRIMARY KEY,
-            strategy_id TEXT NOT NULL,
-            strategy_name TEXT,
-            params_json TEXT,
-            config_json TEXT NOT NULL,
-            codes_json TEXT NOT NULL,
-            code_count INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            avg_total_return REAL,
-            avg_annual_return REAL,
-            avg_sharpe REAL,
-            avg_max_drawdown REAL,
-            avg_win_rate REAL,
-            profit_count INTEGER,
-            loss_count INTEGER,
-            initial_cash REAL,
-            start_date TEXT,
-            end_date TEXT,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            duration_seconds REAL,
-            error_message TEXT
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_batch_status ON backtest_batch(status)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_batch_created ON backtest_batch(created_at DESC)')
-
-        # -----------------------------------------------------------
-        # 7. 批量回测明细表（新增）
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_batch_item (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id TEXT NOT NULL,
-            code TEXT NOT NULL,
-            asset_type TEXT,
-            run_id TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            total_return REAL,
-            annual_return REAL,
-            sharpe_ratio REAL,
-            max_drawdown REAL,
-            win_rate REAL,
-            trade_count INTEGER,
-            final_equity REAL,
-            error_message TEXT,
-            started_at TEXT,
-            completed_at TEXT,
-            UNIQUE(batch_id, code),
-            FOREIGN KEY (batch_id) REFERENCES backtest_batch(batch_id)
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_item_batch ON backtest_batch_item(batch_id)')
-
-        # -----------------------------------------------------------
-        # 8. 常用测试集（新增）
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_test_set (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            description TEXT,
-            codes_json TEXT NOT NULL,
-            tags_json TEXT,
-            code_count INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_test_set_name ON backtest_test_set(name)')
-
-        # -----------------------------------------------------------
-        # 8.5 多策略批量回测聚合表
-        # -----------------------------------------------------------
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_multi (
-            multi_id TEXT PRIMARY KEY,
-            strategy_ids_json TEXT NOT NULL,
-            strategy_names_json TEXT NOT NULL,
-            codes_json TEXT NOT NULL,
-            code_count INTEGER NOT NULL,
-            strategy_count INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            initial_cash REAL,
-            start_date TEXT,
-            end_date TEXT,
-            created_at TEXT NOT NULL,
-            started_at TEXT,
-            completed_at TEXT,
-            duration_seconds REAL,
-            error_message TEXT
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_multi_status ON backtest_multi(status)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_multi_created ON backtest_multi(created_at DESC)')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS backtest_multi_item (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            multi_id TEXT NOT NULL,
-            strategy_id TEXT NOT NULL,
-            code TEXT NOT NULL,
-            batch_id TEXT,
-            run_id TEXT,
-            total_return REAL,
-            annual_return REAL,
-            sharpe_ratio REAL,
-            max_drawdown REAL,
-            win_rate REAL,
-            trade_count INTEGER,
-            max_consecutive_losses INTEGER,
-            status TEXT NOT NULL DEFAULT 'pending',
-            completed_at TEXT,
-            UNIQUE(multi_id, strategy_id, code)
-        )''')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_multi_item_multi ON backtest_multi_item(multi_id)')
-
-        # -----------------------------------------------------------
-        # 9. 注册内置策略
-        # -----------------------------------------------------------
-        _register_builtin_strategies(c)
+        d = ALL_DBS["backtest"]
+        ensure_schema(conn, d.tables, d.special_migrations)
+        for seed in d.seeds:
+            seed(conn)
 
 
 def _register_builtin_strategies(cursor):
@@ -650,7 +387,8 @@ def get_data_stats() -> Dict[str, Any]:
         stats = {}
         for table in ['data_tasks', 'strategies', 'backtest_runs', 'backtest_results', 'backtest_trades',
                        'backtest_batch', 'backtest_batch_item', 'backtest_test_set',
-                       'backtest_multi', 'backtest_multi_item']:
+                       'backtest_multi', 'backtest_multi_item',
+                       'strategy_run', 'strategy_iter']:
             row = conn.execute(f'SELECT COUNT(*) as cnt FROM {table}').fetchone()
             stats[table] = row['cnt'] if row else 0
         return stats
@@ -976,4 +714,142 @@ def mark_interrupted_runs() -> Dict[str, int]:
             "UPDATE backtest_multi_item SET status='failed', completed_at=? "
             "WHERE status IN ('running','pending')", (now,)
         ).rowcount
+        counts['strategy_runs'] = conn.execute(
+            "UPDATE strategy_run SET status='failed', stop_reason='cancelled', "
+            "completed_at=? WHERE status = 'running'", (now,)
+        ).rowcount
     return counts
+
+
+# ============================================================
+# strategy_run / strategy_iter CRUD（A3 策略研发）
+# ============================================================
+
+_ITER_COLS = ('id, run_id, round, hypothesis, strategy_json, strategy_hash, '
+              'strategy_diff, compile_ok, compile_error, is_metrics, oos_metrics, '
+              'overfit_flag, verdict, model, created_at')
+
+
+def create_strategy_run(run_uuid: str, idea: str, universe: str, period: str,
+                        source: str = 'panel',
+                        dialog_uuid: Optional[str] = None) -> Dict[str, Any]:
+    """创建策略研究任务（status=running）"""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with get_backtest_db() as conn:
+        conn.execute('''INSERT INTO strategy_run
+            (run_uuid, idea, universe, period, status, source, dialog_uuid, created_at)
+            VALUES (?, ?, ?, ?, 'running', ?, ?, ?)''',
+            (run_uuid, idea, universe, period, source, dialog_uuid, now))
+    return get_strategy_run(run_uuid)
+
+
+def get_strategy_run(run_uuid: str) -> Optional[Dict[str, Any]]:
+    """按 run_uuid 获取策略研究任务"""
+    with get_backtest_db() as conn:
+        row = conn.execute('SELECT * FROM strategy_run WHERE run_uuid = ?', (run_uuid,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_strategy_run(run_uuid: str, **kwargs) -> None:
+    """更新策略研究任务字段（status/stop_reason/best_iter_id/total_iters/completed_at）"""
+    if not kwargs:
+        return
+    sets = ', '.join(f'{k} = ?' for k in kwargs)
+    values = list(kwargs.values()) + [run_uuid]
+    with get_backtest_db() as conn:
+        conn.execute(f'UPDATE strategy_run SET {sets} WHERE run_uuid = ?', values)
+
+
+def list_strategy_runs(limit: int = 50) -> List[Dict[str, Any]]:
+    """策略研究任务列表（含最优轮次的 OOS 摘要，策略库视图）"""
+    with get_backtest_db() as conn:
+        rows = conn.execute(f'''
+            SELECT r.*, it.round AS best_round, it.hypothesis AS best_hypothesis,
+                   it.oos_metrics AS best_oos_metrics, it.is_metrics AS best_is_metrics,
+                   it.overfit_flag AS best_overfit_flag, it.strategy_json AS best_strategy_json
+            FROM strategy_run r
+            LEFT JOIN strategy_iter it ON it.id = r.best_iter_id
+            ORDER BY r.created_at DESC LIMIT ?
+        ''', (limit,)).fetchall()
+        runs = [dict(r) for r in rows]
+        for r in runs:
+            for f in ('best_oos_metrics', 'best_is_metrics'):
+                if r.get(f):
+                    try:
+                        r[f] = json.loads(r[f])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+        return runs
+
+
+def insert_strategy_iter(run_uuid: str, round_no: int, hypothesis: Optional[str],
+                         strategy_json: Optional[str], strategy_hash: Optional[str],
+                         strategy_diff: Optional[str], compile_ok: int,
+                         compile_error: Optional[str],
+                         is_metrics: Optional[Dict[str, Any]],
+                         oos_metrics: Optional[Dict[str, Any]],
+                         overfit_flag: int = 0, verdict: Optional[str] = None,
+                         model: Optional[str] = None) -> int:
+    """插入一轮迭代记录，返回新记录 id"""
+    run = get_strategy_run(run_uuid)
+    if run is None:
+        raise ValueError(f'策略研究任务不存在: {run_uuid}')
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with get_backtest_db() as conn:
+        cur = conn.execute('''INSERT INTO strategy_iter
+            (run_id, round, hypothesis, strategy_json, strategy_hash, strategy_diff,
+             compile_ok, compile_error, is_metrics, oos_metrics, overfit_flag,
+             verdict, model, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (run['id'], round_no, hypothesis, strategy_json, strategy_hash,
+             strategy_diff, compile_ok, compile_error,
+             json.dumps(is_metrics, ensure_ascii=False) if is_metrics is not None else None,
+             json.dumps(oos_metrics, ensure_ascii=False) if oos_metrics is not None else None,
+             overfit_flag, verdict, model, now))
+        return cur.lastrowid
+
+
+def update_strategy_iter(iter_id: int, **kwargs) -> None:
+    """更新迭代轮次字段（verdict 等）"""
+    if not kwargs:
+        return
+    sets = ', '.join(f'{k} = ?' for k in kwargs)
+    values = list(kwargs.values()) + [iter_id]
+    with get_backtest_db() as conn:
+        conn.execute(f'UPDATE strategy_iter SET {sets} WHERE id = ?', values)
+
+
+def get_strategy_iters(run_uuid: str) -> List[Dict[str, Any]]:
+    """按 run_uuid 获取全部轮次（round 升序），JSON 字段已反序列化"""
+    with get_backtest_db() as conn:
+        rows = conn.execute(f'''
+            SELECT {_ITER_COLS} FROM strategy_iter
+            WHERE run_id = (SELECT id FROM strategy_run WHERE run_uuid = ?)
+            ORDER BY round, id
+        ''', (run_uuid,)).fetchall()
+    iters = [dict(r) for r in rows]
+    for it in iters:
+        for f in ('is_metrics', 'oos_metrics'):
+            if it.get(f):
+                try:
+                    it[f] = json.loads(it[f])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    return iters
+
+
+def get_strategy_iter_by_id(iter_id: int) -> Optional[Dict[str, Any]]:
+    """按 id 获取单轮记录（adopt 时取最优策略 JSON 用）"""
+    with get_backtest_db() as conn:
+        row = conn.execute(f'SELECT {_ITER_COLS} FROM strategy_iter WHERE id = ?',
+                           (iter_id,)).fetchone()
+        if not row:
+            return None
+        it = dict(row)
+        for f in ('is_metrics', 'oos_metrics'):
+            if it.get(f):
+                try:
+                    it[f] = json.loads(it[f])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return it

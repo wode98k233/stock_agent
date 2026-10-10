@@ -334,6 +334,67 @@ def test_executor_uses_plan_step_skill_first():
     assert result["step_results"][0]["status"] == "success"
 
 
+def test_executor_uses_all_step_skills():
+    """E1d: step 声明多技能时，executor 装载全部技能的工具并逐个注入 L1 用法。"""
+    from agents.plan.node.executor import execute_step
+
+    ctx = _make_mock_ctx()
+    plan = [{"step": 1, "skill": "skill_a", "skills": ["skill_a", "skill_b"],
+             "instruction": "执行测试指令", "purpose": "验证多技能装载"}]
+    state = _make_base_state(plan)
+
+    def fake_get_tools(skill_name):
+        return [SimpleNamespace(name=f"{skill_name}_tool", description=f"{skill_name} 工具")]
+
+    captured_tool_names = []
+    detail_skills = []
+
+    async def fake_run_react_subgraph(**kwargs):
+        captured_tool_names.extend([tool.name for tool in kwargs["tools"]])
+        return {
+            "tool_results": [],
+            "final_result": "执行成功，多技能工具已全部装载，返回足够长的结果用于通过异常结果检查。",
+        }
+
+    def fake_detail(registry, skill_name):
+        detail_skills.append(skill_name)
+        return f"{skill_name} 用法"
+
+    ctx.skill_registry.get_tools = MagicMock(side_effect=fake_get_tools)
+
+    with patch("agents.plan.node.executor.run_react_subgraph", new_callable=AsyncMock, side_effect=fake_run_react_subgraph), \
+         patch("utils.llm_factory.get_llm", return_value=MagicMock()), \
+         patch("agents.plan.node.executor.SkillPromptBuilder.build_tools_detail_prompt", side_effect=fake_detail), \
+         patch("agents.utils._generate_step_summary", new_callable=AsyncMock, return_value={}), \
+         patch("agents.utils._confirm_step_execution", return_value=True), \
+         patch("agents.plan.analyze.extract_step_info", return_value={
+             "skill_name": "skill_a", "skills": ["skill_a", "skill_b"],
+             "instruction": "执行测试指令", "step_num": 1, "purpose": "验证多技能装载"
+         }):
+        result = asyncio.run(execute_step(state, ctx))
+
+    called_skills = [call.args[0] for call in ctx.skill_registry.get_tools.call_args_list]
+    assert called_skills == ["skill_a", "skill_b"]
+    assert captured_tool_names == ["skill_a_tool", "skill_b_tool"]
+    assert detail_skills == ["skill_a", "skill_b"]
+    assert result["step_results"][0]["status"] == "success"
+
+
+def test_extract_step_info_returns_all_skills():
+    """多技能步骤：extract_step_info 同时给出主技能与全量技能列表。"""
+    from agents.plan.analyze import extract_step_info
+
+    info = extract_step_info(
+        [{"step": 1, "skill": "skill_a", "skills": ["skill_a", "skill_b"],
+          "instruction": "i", "purpose": "p"}], 0)
+    assert info["skill_name"] == "skill_a"
+    assert info["skills"] == ["skill_a", "skill_b"]
+
+    legacy = extract_step_info([{"step": 1, "skill": "skill_a"}], 0)
+    assert legacy["skill_name"] == "skill_a"
+    assert legacy["skills"] == ["skill_a"]
+
+
 def test_executor_fallback_to_selected_skills_when_plan_skill_empty():
     """E1b-fallback: 当 plan step 的 skill 无工具时，才加载 selected_skills 的工具。"""
     from agents.plan.node.executor import execute_step
@@ -411,6 +472,35 @@ def test_unified_executor_uses_plan_step_skill_first():
     assert called_skills == ["test_skill"]
     assert captured_tool_names == ["test_skill_tool"]
     assert result["response"].startswith("统一执行成功")
+
+
+def test_unified_executor_injects_skill_detail():
+    """unified 模式必须把 plan 技能的 L1 用法详情注入 sub-ReAct 上下文（与 plan_solve 对齐）。"""
+    from agents.plan.node.unified_executor import unified_execute_step
+
+    ctx = _make_mock_ctx()
+    plan = [{"step": 1, "skill": "test_skill", "instruction": "执行测试指令", "purpose": "验证用法注入"}]
+    state = _make_base_state(plan)
+
+    captured = {}
+
+    async def fake_run_react_subgraph(**kwargs):
+        captured["msgs"] = kwargs["context_messages"]
+        return {
+            "tool_results": [],
+            "final_result": "统一执行成功，技能用法详情已经注入，返回足够长的结果用于通过长度检查。",
+        }
+
+    with patch("agents.plan.node.unified_executor.run_react_subgraph", new_callable=AsyncMock, side_effect=fake_run_react_subgraph), \
+         patch("agents.plan.node.unified_executor.SkillPromptBuilder.build_tools_detail_prompt", return_value="### 使用指南\n周K用本地工具") as m, \
+         patch("utils.llm_factory.get_llm", return_value=MagicMock()):
+        asyncio.run(unified_execute_step(state, ctx))
+
+    m.assert_called_once()
+    assert m.call_args.args[1] == "test_skill"
+    sys_msgs = [c for c in captured["msgs"] if c[0] == "system" and "可用工具详情" in c[1]]
+    assert sys_msgs, "应注入技能用法详情 system 消息"
+    assert "周K用本地工具" in sys_msgs[0][1]
 
 
 def test_executor_partial_completion():

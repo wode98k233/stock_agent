@@ -74,7 +74,8 @@ def test_list_batches_order(setup_test_db):
             params={}, config={}, codes=[],
             initial_cash=100000, start_date='2024-01-01', end_date='2024-12-31',
         )
-    batches = list_batches()
+    batches, total = list_batches()
+    assert total == 3
     assert len(batches) == 3
     assert {b['batch_id'] for b in batches} == expected_ids
 
@@ -88,7 +89,8 @@ def test_list_batches_limit(setup_test_db):
             strategy_id='dual_ma_crossover', strategy_name='', params={}, config={},
             codes=[], initial_cash=100000, start_date='', end_date='',
         )
-    batches = list_batches(limit=3)
+    batches, total = list_batches(limit=3)
+    assert total == 5
     assert len(batches) == 3
 
 

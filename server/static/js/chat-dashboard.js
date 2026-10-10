@@ -77,13 +77,26 @@ window.StockRadar.chatDashboard = (() => {
       `<div class="dash-sig-value" style="color:${color}">${DASH_ICONS[dt]} ${DASH_LABELS[dt]}</div>` +
       `<div class="dash-sig-sub">${DASH_SUBS[dt]}</div>`
     ));
-    const confPct = data.confidence_level != null ? Math.round(data.confidence_level * 100) : null;
+    /* A2 置信度徽标：绿 ≥0.75 / 黄 0.55-0.75 / 灰 <0.55（边框+文字，A 股配色不用红绿大色块）；
+       悬停展示 basis 依据；NULL（旧数据）显「未评级」灰字无 tooltip（AC-2） */
+    let confVal = null;
+    if (data.confidence_level != null) {
+      const n = typeof data.confidence_level === "number"
+        ? data.confidence_level : parseFloat(data.confidence_level);
+      if (isFinite(n)) confVal = Math.max(0, Math.min(1, n));
+    }
+    const confPct = confVal != null ? Math.round(confVal * 100) : null;
+    const basis = Array.isArray(data.confidence_basis) ? data.confidence_basis.filter(Boolean) : [];
+    const tip = basis.length ? `依据：${basis.join(" · ")}` : "";
+    const badge = confPct != null
+      ? `<span class="dash-conf-badge ${confVal >= 0.75 ? "hi" : confVal >= 0.55 ? "mid" : "lo"}"${tip ? ` title="${esc(tip)}"` : ""}>置信 ${confPct}</span>`
+      : "";
     row.appendChild(_el("div", "dash-signal-box",
       `<div class="dash-sig-label">置信度</div>` +
       (confPct != null
-        ? `<div class="dash-sig-value" style="color:${color}">${confPct}%</div>` +
+        ? `<div class="dash-sig-value" style="color:${color}">${confPct}%${badge}</div>` +
           `<div class="dash-confidence-bar"><div class="dash-confidence-fill ${dt}" style="width:${confPct}%"></div></div>`
-        : `<div class="dash-sig-value" style="color:#64748b">—</div>`)
+        : `<div class="dash-sig-value dash-conf-unrated">未评级</div>`)
     ));
     const sentScore = data.sentiment_score != null ? data.sentiment_score : null;
     const sentLabelMap = { bullish: "偏积极", neutral: "中性", bearish: "偏消极" };
@@ -480,6 +493,55 @@ window.StockRadar.chatDashboard = (() => {
     return section;
   };
 
+  /* portfolio_snapshot: 组合资产概况卡（组合仪表盘） */
+  SECTION_RENDERERS.portfolio_snapshot = (data) => {
+    const v = data.portfolio_snapshot;
+    if (!v || typeof v !== "object" || Object.keys(v).length === 0) return null;
+    const fmtMoney = (n) => Number(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const cards = [
+      ["账户总资产", v.total_asset != null ? fmtMoney(v.total_asset) : null],
+      ["持仓市值", v.position_value != null ? fmtMoney(v.position_value) : null],
+      ["可用资金", v.cash != null ? fmtMoney(v.cash) : null],
+      ["仓位", v.position_ratio != null ? (v.position_ratio * 100).toFixed(1) + "%" : null],
+      ["持仓数", v.position_count != null ? String(v.position_count) : null],
+    ].filter((c) => c[1] != null);
+    if (!cards.length) return null;
+    const section = _el("div", "dash-section");
+    section.appendChild(_el("div", "dash-section-title", `<span class="dash-section-icon">💼</span> 组合概况`));
+    const grid = _el("div", "dash-portfolio-grid");
+    grid.innerHTML = cards.map(([label, val]) =>
+      `<div class="dash-portfolio-stat"><div class="dash-portfolio-label">${esc(label)}</div><div class="dash-portfolio-value">${esc(val)}</div></div>`
+    ).join("");
+    section.appendChild(grid);
+    return section;
+  };
+
+  /* position_table: 分标的持仓与操作表（组合仪表盘） */
+  SECTION_RENDERERS.position_table = (data) => {
+    const rows = data.positions;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const section = _el("div", "dash-section");
+    section.appendChild(_el("div", "dash-section-title", `<span class="dash-section-icon">📦</span> 分标的持仓与操作`));
+    const tbl = _el("table", "dash-position-table");
+    tbl.innerHTML = `<thead><tr><th>标的</th><th>现价</th><th>盈亏</th><th>操作</th><th>触发条件</th></tr></thead>`;
+    const tbody = _el("tbody");
+    for (const r of rows) {
+      const pnl = r.pnl_pct;
+      const pnlColor = pnl > 0 ? "#059669" : (pnl < 0 ? "#dc2626" : "#1e293b");
+      const tr = _el("tr");
+      tr.innerHTML =
+        `<td class="dash-pos-stock"><b>${esc(r.name || "")}</b><span class="dash-pos-code">${esc(r.code || "")}</span></td>` +
+        `<td>${r.price != null ? esc(String(r.price)) : "—"}</td>` +
+        `<td style="color:${pnlColor}">${pnl != null ? (pnl > 0 ? "+" : "") + pnl.toFixed(1) + "%" : "—"}</td>` +
+        `<td>${esc(r.action || "—")}</td>` +
+        `<td>${esc(r.condition || "—")}</td>`;
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    section.appendChild(tbl);
+    return section;
+  };
+
   /* ── 默认 sections（向后兼容：没有 dashboard_id 时的降级方案） ── */
   const _DEFAULT_SECTIONS = [
     { renderer: "signal_row", required: true },
@@ -498,6 +560,7 @@ window.StockRadar.chatDashboard = (() => {
     "筛选": "screening",
     "热点": "hot_events",
     "个股": "stock",
+    "组合": "portfolio",
   };
 
   /* ── 主渲染函数 ── */

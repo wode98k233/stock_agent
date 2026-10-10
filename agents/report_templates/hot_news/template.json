@@ -120,7 +120,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "data_sources"
   ],
   "analysis_framework": {

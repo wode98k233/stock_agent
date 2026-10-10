@@ -53,6 +53,43 @@ window.StockRadar.chat = (() => {
     return _echartsPromise;
   }
 
+  // 图表数值展示：基准单位（元/点）按量级压缩为 万/亿，避免轴标签与 tooltip 出现长数字
+  function _fmtChartNum(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return String(v == null ? "" : v);
+    const abs = Math.abs(n);
+    if (abs >= 1e8) return (n / 1e8).toFixed(2).replace(/\.?0+$/, "") + "亿";
+    if (abs >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "万";
+    return String(+n.toFixed(2));
+  }
+
+  // 柱状图数值标签：量级差异悬殊时小柱也能直接读到数值（不依赖柱高）；
+  // 正数标柱顶、负数标柱底，格式化复用 _fmtChartNum（万/亿）。
+  function _withBarLabels(series) {
+    return (series || []).map(s => {
+      if (!s || s.type !== "bar") return s;
+      const data = (s.data || []).map(v => {
+        if (v == null) return v;
+        const item = (typeof v === "object") ? Object.assign({}, v) : { value: v };
+        const num = Number(item.value);
+        if (!isFinite(num)) return item;
+        item.label = Object.assign({}, item.label, {
+          position: num < 0 ? "bottom" : "top",
+          distance: 4,
+        });
+        return item;
+      });
+      return Object.assign({}, s, {
+        data,
+        label: Object.assign({
+          show: true,
+          fontSize: 10,
+          formatter: (p) => _fmtChartNum(p.value),
+        }, s.label || {}),
+      });
+    });
+  }
+
   function _buildFragmentOption(dataJson) {
     let data;
     try { data = JSON.parse(dataJson); } catch (e) { return null; }
@@ -60,9 +97,9 @@ window.StockRadar.chat = (() => {
       animation: false,
       grid: { left: 60, right: 30, top: 30, bottom: 40 },
       xAxis: Object.assign({ type: "category" }, (data.xAxis && data.xAxis[0]) || { data: [] }),
-      yAxis: { type: "value", scale: true },
-      tooltip: { trigger: "axis" },
-      series: data.series || [],
+      yAxis: { type: "value", scale: true, axisLabel: { formatter: _fmtChartNum } },
+      tooltip: { trigger: "axis", valueFormatter: _fmtChartNum },
+      series: _withBarLabels(data.series),
     };
     if (data.markLine) {
       option.series = option.series.map(s => Object.assign({}, s, { markLine: { data: data.markLine } }));
@@ -114,6 +151,186 @@ window.StockRadar.chat = (() => {
     return frag.chart_type || "图表";
   }
 
+  /* ── tech_panel：技术面图板（本地 K 线 + 全指标 + 信号标注）──
+     复用 chart-kline.js 的 KlineChart（K线+成交量+副图三联布局），
+     Tab 切换副图指标（MACD/RSI/KDJ/BOLL/DPO），自动叠加金叉死叉/
+     布林带突破信号点。数据来自 /api/chart/kline 与 /api/chart/signals。 */
+  const _TECH_TABS = [
+    { type: "macd", label: "MACD" },
+    { type: "rsi",  label: "RSI" },
+    { type: "kdj",  label: "KDJ" },
+    { type: "boll", label: "BOLL" },
+    { type: "dpo",  label: "DPO" },
+  ];
+
+  function _renderTechPanel(el, frag) {
+    let meta;
+    try { meta = JSON.parse(frag.data_json); } catch (e) { meta = null; }
+    const code = meta && meta.code;
+    const days = (meta && meta.days) || 250;
+    // 标的市场类型由后端显式携带（INDEX/STOCK）。必须透传给数据接口：
+    // 裸 6 位码在不同表里是不同标的（000001 = 上证指数 / 平安银行），
+    // 不传 market 时后端默认按个股取数。
+    const market = (meta && meta.market) || "";
+    const isIndex = market === "INDEX";
+    const marketQ = market ? "&market=" + encodeURIComponent(market) : "";
+    if (!code || !window.StockRadar || !window.StockRadar.KlineChart) {
+      el.textContent = "📊 技术面图板暂不可用";
+      el.dataset.state = "error";
+      return;
+    }
+
+    el.dataset.state = "ok";
+    el.classList.add("tech-panel");
+    el.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "ccf-title";
+    title.textContent = "📈 " + (frag.title || "技术面图板");
+    el.appendChild(title);
+
+    // 副图指标 Tab 行
+    const tabs = document.createElement("div");
+    tabs.className = "ccf-tabs tech-panel-tabs";
+    _TECH_TABS.forEach((t, i) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ccf-tab" + (i === 0 ? " active" : "");
+      btn.textContent = t.label;
+      btn.dataset.sub = t.type;
+      tabs.appendChild(btn);
+    });
+    el.appendChild(tabs);
+
+    const body = document.createElement("div");
+    body.className = "tech-panel-body";
+    el.appendChild(body);
+
+    // 策略扫描行：选择策略 → 扫描买卖点 → 叠加到 K 线（复用 backtest 策略引擎）
+    const scanRow = document.createElement("div");
+    scanRow.className = "tech-panel-scan";
+    scanRow.innerHTML = `
+      <select class="tech-scan-select" title="选择策略">
+        <option value="">选择策略…</option>
+      </select>
+      <button type="button" class="tech-scan-btn" disabled>扫描买卖点</button>
+      <button type="button" class="tech-scan-clear" hidden>清除标记</button>
+      <span class="tech-scan-status"></span>`;
+    const scanSelect = scanRow.querySelector(".tech-scan-select");
+    const scanBtn = scanRow.querySelector(".tech-scan-btn");
+    const clearBtn = scanRow.querySelector(".tech-scan-clear");
+    const scanStatus = scanRow.querySelector(".tech-scan-status");
+    if (isIndex) {
+      // 指数（上证指数等）没有「策略买卖点」语义：策略扫描走个股通道
+      // （backtest/data_adapter._load_stock_daily），对指数会取到同码个股数据
+      scanRow.hidden = true;
+    }
+    el.appendChild(scanRow);
+
+    // 懒加载策略列表（backtest/strategies 的 8 个内置策略）
+    if (!isIndex && window.StockRadar.api && window.StockRadar.api.getBacktestStrategies) {
+      window.StockRadar.api.getBacktestStrategies().then(data => {
+        const strategies = (data && (data.strategies || data.items)) || [];
+        strategies.forEach(s => {
+          const id = s.id || s.strategy_id;
+          if (!id) return;
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = s.name || id;
+          scanSelect.appendChild(opt);
+        });
+      }).catch(() => { scanSelect.disabled = true; });
+    } else {
+      scanSelect.disabled = true;
+    }
+
+    const foot = document.createElement("div");
+    foot.className = "tech-panel-foot";
+    foot.textContent = "信号标注（近60日）：MACD/KDJ/MA 金叉死叉、布林带上下轨突破；点击 K 线可查看任意日期至今的收益";
+    el.appendChild(foot);
+
+    // KlineChart 构造即 echarts.init（需要容器已有尺寸），而本卡片此刻
+    // 可能尚未插入 DOM（_buildFragEl 先返回、调用方后 append），因此延迟
+    // 一帧到 DOM 渲染后再初始化。
+    requestAnimationFrame(() => {
+      const chart = new window.StockRadar.KlineChart(body);
+
+      tabs.addEventListener("click", (e) => {
+        const btn = e.target.closest(".tech-panel-tabs .ccf-tab");
+        if (!btn) return;
+        tabs.querySelectorAll(".ccf-tab").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        chart.setSubIndicator(btn.dataset.sub);
+      });
+
+      // 策略扫描交互
+      scanSelect.addEventListener("change", () => {
+        scanBtn.disabled = !scanSelect.value || scanBtn.classList.contains("running");
+      });
+      scanBtn.addEventListener("click", async () => {
+        const strategyId = scanSelect.value;
+        if (!strategyId || scanBtn.classList.contains("running")) return;
+        if (!window.StockRadar.api || !window.StockRadar.api.scanStrategySignals) {
+          scanStatus.textContent = "扫描接口不可用";
+          return;
+        }
+        scanBtn.classList.add("running");
+        scanBtn.disabled = true;
+        scanBtn.textContent = "扫描中…";
+        scanStatus.textContent = "";
+        try {
+          const result = await window.StockRadar.api.scanStrategySignals({
+            code: code,
+            strategy_id: strategyId,
+            adjust_type: "qfq",
+            days: days,
+          });
+          const signals = result.signals || [];
+          chart.setOverlay({ type: "scan", signals: signals });
+          const buys = signals.filter(s => s.buy).length;
+          const sells = signals.filter(s => s.sell).length;
+          let tip = `${buys} 个买点 / ${sells} 个卖点`;
+          if (result.latest_is_buy) tip += " · 今日出现买点";
+          else if (result.latest_is_sell) tip += " · 今日出现卖点";
+          scanStatus.textContent = tip;
+          scanStatus.classList.remove("err");
+          clearBtn.hidden = false;
+        } catch (e) {
+          scanStatus.textContent = "扫描失败：" + (e.message || e);
+          scanStatus.classList.add("err");
+        } finally {
+          scanBtn.classList.remove("running");
+          scanBtn.textContent = "扫描买卖点";
+          scanBtn.disabled = !scanSelect.value;
+        }
+      });
+      clearBtn.addEventListener("click", () => {
+        chart.clearOverlay();
+        clearBtn.hidden = true;
+        scanStatus.textContent = "";
+      });
+
+      chart.ready.then(async () => {
+        chart.showLoading("K线数据加载中...");
+        const [klineRes, signalsRes] = await Promise.all([
+          fetch(`/api/chart/kline/${encodeURIComponent(code)}?days=${days}${marketQ}`)
+            .then(r => (r.ok ? r.json() : Promise.reject(new Error("kline HTTP " + r.status)))),
+          fetch(`/api/chart/signals/${encodeURIComponent(code)}?days=${days}${marketQ}`)
+            .then(r => (r.ok ? r.json() : null))
+            .catch(() => null),
+        ]);
+        if (!klineRes || !klineRes.kline || !klineRes.kline.length) {
+          throw new Error("empty kline");
+        }
+        klineRes.signals = (signalsRes && signalsRes.signals) || [];
+        await chart.setData(klineRes);
+      }).catch(() => {
+        try { chart.showError("K线数据暂不可用（本地未同步该标的日线）"); }
+        catch (e) { el.textContent = "📊 技术面图板数据加载失败"; }
+      });
+    });
+  }
+
   // 渲染单张图表卡片（frag 已 fetch）
   function _buildFragEl(frag) {
     const el = document.createElement("div");
@@ -121,13 +338,47 @@ window.StockRadar.chat = (() => {
     el.dataset.chartId = frag.id;
     el.dataset.state = "loading";
     el.textContent = "📊 图表加载中...";
+    if (frag.chart_type === "tech_panel") {
+      _renderTechPanel(el, frag);
+      return el;
+    }
     _renderOneFragment(el, frag);
     return el;
   }
 
   // 报告图表区：按类型分组 Tab 展示（多组时 Tab 切换 + 懒加载；单组直接渲染）
   function renderChartFragments(mdDiv) {
-    if (!mdDiv || !mdDiv.innerHTML.includes("@@CHART:")) return;
+    if (!mdDiv) return;
+
+    // 兜底：历史报告可能存有「丢壳」的图表标记（裸 UUID，旧版归集 bug 所致）。
+    // 摘完整标记后，若正文残留独立 UUID，逐个向 /api/chart/{id} 验证，
+    // 是图表则补壳后重走本流程（bareChecked 防递归死循环）。
+    if (!mdDiv.dataset.bareChecked) {
+      const probe = mdDiv.innerHTML.replace(/@@CHART:[0-9a-f-]+@@/g, "");
+      const bareIds = [...new Set(probe.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g) || [])];
+      if (bareIds.length > 0) {
+        mdDiv.dataset.bareChecked = "1";
+        Promise.all(bareIds.map(id =>
+          fetch(`/api/chart/${encodeURIComponent(id)}`)
+            .then(r => (r.ok ? id : null))
+            .catch(() => null)
+        )).then(validIds => {
+          const ok = validIds.filter(Boolean);
+          if (ok.length === 0) return;
+          // 先把完整标记替换为占位符，避免补壳时误改其内部的 id
+          const marks = [];
+          let html = mdDiv.innerHTML;
+          html = html.replace(/@@CHART:[0-9a-f-]+@@/g, m => { marks.push(m); return `\u0000${marks.length - 1}\u0000`; });
+          ok.forEach(id => { html = html.split(id).join(`@@CHART:${id}@@`); });
+          html = html.replace(/\u0000(\d+)\u0000/g, (_, i) => marks[+i]);
+          mdDiv.innerHTML = html;
+          renderChartFragments(mdDiv);
+        });
+        return; // 验证完成后重走本函数，此处不继续
+      }
+    }
+
+    if (!mdDiv.innerHTML.includes("@@CHART:")) return;
     const ids = [];
     mdDiv.innerHTML = mdDiv.innerHTML.replace(/@@CHART:([0-9a-f-]+)@@/g, (m, id) => { ids.push(id); return ""; });
     if (ids.length === 0) return;

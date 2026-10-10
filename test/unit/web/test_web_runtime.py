@@ -66,6 +66,60 @@ def test_task_runtime_records_agent_failure(tmp_path):
     asyncio.run(_task_runtime_records_agent_failure(tmp_path))
 
 
+def test_task_runtime_fires_signal_extract_hook_on_dashboard(monkeypatch, tmp_path):
+    """回答含 dashboard → 落库后 fire-and-forget 触发信号提取；无 dashboard 不触发。"""
+    asyncio.run(_task_runtime_fires_signal_extract_hook(monkeypatch, tmp_path))
+
+
+async def _task_runtime_fires_signal_extract_hook(monkeypatch, tmp_path):
+    from server.agent_runner import AgentRunResult
+    from server.runtime import TaskRuntime
+    from server.storage import WebStorage
+
+    called = []
+
+    def fake_extract_async(message_uuid):
+        called.append(message_uuid)
+
+    # coordinator 内部为惰性 import，patch 源模块属性即可拦截
+    monkeypatch.setattr("signal_eval.extract.extract_async", fake_extract_async)
+
+    storage = WebStorage(tmp_path / "web.db")
+    dialog = storage.create_dialog(title="新对话", mode="react_stock")
+    dashboard = ('正文\n@@DASHBOARD_START@@{"decision_type":"buy"}@@DASHBOARD_END@@')
+
+    async def runner_with_dashboard(*, user_input, mode, context, progress_callback):
+        return AgentRunResult(response=dashboard, log_uuid="l1", log_file="f1", trace_run_id="t1")
+
+    async def runner_plain(*, user_input, mode, context, progress_callback):
+        return AgentRunResult(response="普通回答", log_uuid="l2", log_file="f2", trace_run_id="t2")
+
+    # 含 dashboard 的回答 → hook 触发，uuid = assistant 消息
+    runtime = TaskRuntime(runner_with_dashboard)
+    submitted = await runtime.submit_message(
+        storage=storage, context=SimpleNamespace(),
+        dialog_uuid=dialog["dialog_uuid"], content="分析润泽科技", mode="react_stock",
+    )
+    async for payload in runtime.iter_events(submitted["task_id"], heartbeat_interval=0.01):
+        if payload["event"] in ("final", "task_error"):
+            break
+    messages = storage.list_messages(dialog["dialog_uuid"])
+    assistant_uuid = messages[1]["message_uuid"]
+    assert called == [assistant_uuid]
+
+    # 无 dashboard 的回答 → 不触发
+    dialog2 = storage.create_dialog(title="新对话2", mode="react_stock")
+    runtime2 = TaskRuntime(runner_plain)
+    submitted2 = await runtime2.submit_message(
+        storage=storage, context=SimpleNamespace(),
+        dialog_uuid=dialog2["dialog_uuid"], content="看看大盘", mode="react_stock",
+    )
+    async for payload in runtime2.iter_events(submitted2["task_id"], heartbeat_interval=0.01):
+        if payload["event"] in ("final", "task_error"):
+            break
+    assert called == [assistant_uuid]  # 无新增
+
+
 async def _task_runtime_records_agent_failure(tmp_path):
     from server.runtime import TaskRuntime
     from server.storage import WebStorage
@@ -222,7 +276,9 @@ def test_task_runtime_trace_poll_emits_step_status_updates(monkeypatch):
             }]
 
     conn = FakeConn()
-    monkeypatch.setattr("server.runtime.trace_poller.get_trace_conn", lambda: conn)
+    # 分库后 poller 经 store.conn_for_run 取该 run 所在月库连接
+    monkeypatch.setattr(
+        "utils.agent_trace.store.TraceStore.conn_for_run", lambda self, run_id: conn)
 
     seen_versions = {}
     first = TracePoller._read_changed_steps("trace-1", seen_versions)

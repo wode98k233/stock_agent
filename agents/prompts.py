@@ -63,7 +63,7 @@ def get_skill_selector_prompt(skill_catalog: str, template: dict = None) -> str:
 ## 输出格式
 返回严格 JSON：
 {{
-  "selected_skills": ["stock_query", "technical_analysis"],
+  "selected_skills": ["stock_analysis", "mx_data"],
   "reason": "选择理由"
 }}
 """
@@ -74,7 +74,7 @@ PLAN_OUTPUT_FORMAT = """
   "steps": [
     {{
       "step": 1,
-      "skill": "技能名",
+      "skill": "技能名（单个技能名的字符串，或最多 3 个技能名的数组，如 [\"mx_data\", \"market_review\"]）",
       "instruction": "这一步要执行的具体指令，要包含完整参数",
       "purpose": "这一步的目的（一句话）"
     }}
@@ -92,7 +92,9 @@ PLAN_OUTPUT_FORMAT = """
 7. 每一步 instruction 要足够具体，执行时不需要再理解上下文
 8. **重要**: 仔细分析用户需求，提取所有约束条件（如"不需要查询行业板块"、"只分析新闻"等）
 9. **重要**: 约束条件必须在后续所有步骤中严格遵守，不要添加违反约束的步骤
-10. **重要**: skill 必须从上面的技能目录中选择，不要编造不存在的技能名
+10. **重要**: skill（数组则每一项）必须从上面的技能目录中选择（填 `####` 后的技能名），不要编造不存在的技能名
+11. **重要**: skill 只能填**技能名**（最多 3 个），绝不能填工具名（如 iwc_query、iwc_search、mx_data_query、get_* 等）；工具由系统按技能自动装载
+12. **重要**: 同一维度、可合并的查询尽量放进同一步（一步最多 3 个技能），减少计划总步数
 """
 
 
@@ -115,6 +117,36 @@ CLASSIFIER_PROMPT = """判断用户问题是否属于股票/金融分析范畴�
 
 返回严格 JSON（不要其他文字）：
 {{"is_stock_related": true/false, "response": "如果非相关，直接返回给用户的友好说明或反问, 如果相关不用给出说明"}}
+"""
+
+
+CLASSIFIER_TITLE_INSTRUCTION = """
+
+**附加任务**：为本次会话生成一个简洁的中文标题。
+- 依据（会话首轮提问）：{first_question}
+- 要求：概括主题+意图，不超过 16 个字；不要引号、书名号、换行、结尾标点；不要用"分析/咨询/问题"等泛词
+- 在返回 JSON 中增加 title 字段，例如：
+  {{"is_stock_related": true, "response": "", "title": "红利低波ETF 下跌归因"}}
+  {{"is_stock_related": false, "response": "抱歉，我专注于股票和金融分析。", "title": "闲聊：天气查询"}}
+"""
+
+
+CLARIFY_PROMPT = """你是选股雷达的澄清助手。用户已提出分析请求，在正式开工前，判断是否缺少「不补充就问不清楚」的关键信息。
+
+只有缺失信息会显著改变结论或操作建议时才提问，例如：
+- 资金/仓位规模、投资期限（短线/中线/长线）、风险偏好
+- 具体标的或候选范围、关注维度（技术面/基本面/消息面/资金面）
+- 操作状态歧义（已持仓 vs 计划买入）
+
+禁止：
+- 问背景信息（用户画像、持仓、历史记忆）里已经有的信息
+- 问能从未完问题中直接推断的信息；宁缺勿滥，没有问题就返回空数组
+- 问与投资决策无关的问题
+
+最多生成 {max_q} 个问题；每个问题给 2~4 个选项：label 是给用户看的中文文案；value 是回传标识，**必须使用与 label 相同的中文短语**（禁止 intraday_snapshot 这类英文/拼音 key）；recommended 必须是某个 option 的 value；allow_custom 表示允许用户自由输入（默认 true）。
+
+严格输出 JSON（不要其他文字）：
+{{"questions": [{{"id": "q1", "question": "…", "options": [{{"label": "…", "value": "…"}}], "recommended": "…", "allow_custom": true}}]}}
 """
 
 
@@ -161,7 +193,7 @@ REPLAN_OUTPUT_FORMAT = """
 如果需要继续执行:
 {{
   "action": "continue",
-  "steps": [{{"step": N, "skill": "技能名", "instruction": "具体指令", "purpose": "目的"}}]
+  "steps": [{{"step": N, "skill": "技能名（可填最多 3 个技能名的数组）", "instruction": "具体指令", "purpose": "目的"}}]
 }}
 
 决策原则:
@@ -177,6 +209,7 @@ REPLAN_OUTPUT_FORMAT = """
 4. **重要**: 如果已有核心数据（股票列表、新闻等），优先基于已有数据做分析，不要重复查询
 5. **不要随便生成新步骤**，除非真正需要
 6. **不要替换整个原始计划**，只在必要时追加补充步骤
+7. **重要**: skill（数组则每一项）只能填技能名（目录中 `####` 标题，最多 3 个），不要填工具名（如 iwc_query、mx_data_query、get_* 等）
 
 **禁止重复**:
 - 不要生成与"已完成步骤"中任何步骤相同 skill + 相似 instruction 的新步骤
@@ -297,4 +330,24 @@ REACT_PARTIAL_SUMMARY_PROMPT = """你是选股雷达的总结器。根据已获�
 3. 格式清晰，易于阅读
 
 只返回总结内容，不要其他文字。"""
+
+
+SKILL_ROUTER_PROMPT = """你是技能路由员。根据用户问题、当前执行进展、候选技能与**已装载技能**，决定本轮要给 agent 提供哪些技能的工具。
+
+规则：
+1. `loaded_skills` 必须从候选技能中选择（去重），代表**本轮可用的技能集合**；建议不超过 {max_n} 个。
+2. 判断依据是「当前子目标还缺什么能力」：
+   - 已装载且仍需用的 → 保留；
+   - 已装载但一直用不上的 → **淘汰**；
+   - 候选池里还没装载、但完成子目标需要的（例如判定「W 双底 / M 头」需要看周/月线，就必须装载提供多周期K线的 `fund_query`）→ **补入**。
+3. `active_skill` 从 `loaded_skills` 中选一个作为当前主技能；候选为空时 `loaded_skills` 返回空数组。
+4. `sub_goals` 用 1-3 条短句描述当前未完成的子目标。
+
+返回严格 JSON：{"active_skill": "技能名", "loaded_skills": ["技能名"], "sub_goals": ["子目标"]}
+"""
+
+SKILL_GAP_PROMPT = """当前技能的工具连续失败，需要从可用技能中换一个更合适的技能。
+规则：active_skill 必须从技能目录中选择且不能等于当前技能；没有更合适的返回空字符串。
+返回严格 JSON：{"active_skill": "技能名", "reason": "一句话理由"}
+"""
 

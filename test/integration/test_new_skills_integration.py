@@ -47,14 +47,6 @@ def test_money_flow_stock_fund_flow():
     assert 'error' not in result or result.get('error') is None
 
 
-def test_money_flow_sector_fund_flow():
-    """板块资金流向"""
-    MoneyFlowSkill = _load_skill_module("money_flow", "MoneyFlowSkill")
-    skill = MoneyFlowSkill(logger, None)
-    result = _parse(skill.get_sector_fund_flow("今日", "行业资金流"))
-    assert isinstance(result, list)
-
-
 def test_money_flow_north_fund():
     """北向资金"""
     MoneyFlowSkill = _load_skill_module("money_flow", "MoneyFlowSkill")
@@ -107,12 +99,12 @@ def test_sector_rotation_fund_flow():
     assert isinstance(result, list)
 
 
-# ── risk_metrics ────────────────────────────────────────────
+# ── risk_metrics（已并入 stock_analysis）────────────────────
 
 def test_risk_metrics():
-    """风险指标计算"""
-    RiskMetricsSkill = _load_skill_module("risk_metrics", "RiskMetricsSkill")
-    skill = RiskMetricsSkill(logger, None)
+    """风险指标计算（原 risk_metrics，现属 stock_analysis 技能）"""
+    StockAnalysisSkill = _load_skill_module("stock_analysis", "StockAnalysisSkill")
+    skill = StockAnalysisSkill(logger, None)
     result = _parse(skill.get_risk_metrics("600519", 120, "000300"))
     assert isinstance(result, dict)
 

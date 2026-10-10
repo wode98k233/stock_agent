@@ -1,0 +1,621 @@
+{
+  "id": "dividend_env",
+  "name": "红利环境因子包",
+  "version": "1.2",
+  "asset_label": "中证红利低波动",
+  "description": "把「红利资产还能不能买」拆成 5 个可重复取数的因子。阈值与周期参数可手改，改完重跑即生效（无需重启服务）。",
+  "_说明_阈值格式": "区间打分表，每行 [下限, 上限, 得分]，下限含、上限不含；得分范围 -2 ~ 2。",
+  "_说明_得分含义": "2=很有利 1=有利 0=中性 -1=偏不利 -2=不利",
+  "_说明_factors": "factors 声明用哪些因子计算器（compute 键 → 引擎注册表），data 声明要取哪些数据。新增台账不改引擎。",
+  "subject": {
+    "index_code": "H30269",
+    "index_name": "中证红利低波动",
+    "benchmark_code": "000300",
+    "benchmark_name": "沪深300",
+    "etf_code": "512890"
+  },
+  "data": {
+    "dy": {
+      "kind": "index_valuation",
+      "index_code": "H30269",
+      "field": "dy",
+      "stale_days": 10
+    },
+    "cn10_y": {
+      "kind": "macro",
+      "code": "cn10_y",
+      "periods": 400
+    },
+    "red": {
+      "kind": "index_daily",
+      "code": "H30269",
+      "name": "中证红利低波动",
+      "label": "红利低波指数",
+      "days": 900
+    },
+    "base": {
+      "kind": "index_daily",
+      "code": "000300",
+      "name": "沪深300",
+      "label": "基准指数",
+      "days": 900
+    },
+    "m1_yoy": {
+      "kind": "macro",
+      "code": "m1_yoy",
+      "periods": 400
+    },
+    "m2_yoy": {
+      "kind": "macro",
+      "code": "m2_yoy",
+      "periods": 400
+    }
+  },
+  "factors": [
+    {
+      "key": "premium",
+      "compute": "rate_premium",
+      "name": "① 股息率溢价",
+      "dy": "dy",
+      "rate": "cn10_y",
+      "metric": "premium",
+      "unit": "pp",
+      "thresholds_key": "premium_pp",
+      "source": "中证指数公司（股息率）／中债（国债）",
+      "note": "红利低波标的口径；与中证红利(000922) 股息率 4.42% 的差异属口径差异，非矛盾",
+      "confidence": {
+        "level": "mid",
+        "why": "股息率溢价存在 0.3~0.5pp 口径分歧：趋势方向可靠、绝对水平需谨慎"
+      }
+    },
+    {
+      "key": "cn10_y",
+      "compute": "rate_level_trend",
+      "name": "② 10Y 国债",
+      "series": "cn10_y",
+      "code": "cn10_y",
+      "metric": "cn10_y",
+      "unit": "%",
+      "thresholds_key": "cn10_y_pct",
+      "higher_is_better": false,
+      "source": "中债国债收益率曲线",
+      "confidence": {
+        "level": "high",
+        "why": "中债官方口径，日频"
+      }
+    },
+    {
+      "key": "insurance_gap",
+      "compute": "manual",
+      "name": "③ 险资 / OCI 流入",
+      "manual": "insurance_oci",
+      "value_field": "gap_yi",
+      "metric": "insurance_gap",
+      "stale_metric": "insurance_stale",
+      "unit": "亿元",
+      "thresholds_key": "insurance_gap_yi",
+      "detail_template": "欠配 {gap_yi} 亿元；最近一季增配 {quarter_added_yi} 亿元；FVOCI 股票占比 {fvoci_stock_pct}%",
+      "source": "手动配置（data/thesis/dividend_env.json）",
+      "confidence": {
+        "level": "low",
+        "why": "券商测算值非官方统计；且只有存量欠配，缺险资 ETF 端的边际变化"
+      }
+    },
+    {
+      "key": "style_rel",
+      "compute": "style_relative",
+      "name": "④ 成长风格相对强弱",
+      "red": "red",
+      "base": "base",
+      "metric": "style_rel",
+      "unit": "pp",
+      "thresholds_key": "style_rel_pp",
+      "source": "index_daily 自算",
+      "confidence": {
+        "level": "low",
+        "why": "2026 年红利与沪深300 三月滚动相关由 0.77 降至 0.27（指数编制变化致脱钩），基准可比性下降；60 日窗口易被单月反转主导"
+      }
+    },
+    {
+      "key": "crowding",
+      "compute": "crowding",
+      "name": "⑤ 拥挤度",
+      "red": "red",
+      "dy": "dy",
+      "metric": "crowding",
+      "rank_metric": "dy_rank",
+      "unit": "%偏离",
+      "thresholds_key": "crowding_ext_pct",
+      "source": "index_daily 自算（均线口径）",
+      "note": "代理指标：中证指数公司估值源只提供近 20 个交易日，长期分位靠本地累积",
+      "confidence": {
+        "level": "mid",
+        "why": "回测验证：偏离长均线的分位与未来 20/60 日收益相关 −0.41/−0.55、Q5−Q1 −2.7/−4.9pp（拥挤不利，强验证）。原四维中 ETF 规模/机构占比仍缺源"
+      }
+    },
+    {
+      "key": "m1m2_gap",
+      "compute": "spread_bp",
+      "name": "⑥ M1−M2 剪刀差",
+      "a": "m1_yoy",
+      "b": "m2_yoy",
+      "scale": 1,
+      "label_a": "M1同比",
+      "label_b": "M2同比",
+      "metric": "m1m2_gap",
+      "unit": "pp",
+      "thresholds_key": "m1m2_gap_pp",
+      "source": "央行货币供应量（经 akshare macro_china_money_supply）",
+      "note": "报告结论：剪刀差走扩（M1 增速低于 M2、资金淤积并流向类固收）时红利低波超额收益明显提升；收窄则利于成长。故本因子**越负越有利**——与「剪刀差转正=经济活化利好股票」的常见视角相反，是红利专属口径，阈值符号不可照抄。阈值按 2008-01 以来 224 个月度样本分位设定（p5=−9.7 / p25=−6.9 / p75=−1.1 / p90=+6.0）。",
+      "confidence": {
+        "level": "mid",
+        "why": "月度数据、224 期样本；但「剪刀差→红利超额」出自报告引用的机构结论，非本地实证"
+      }
+    },
+    {
+      "key": "fund_flow",
+      "compute": "volume_percentile",
+      "name": "⑦ 资金活跃度（成交额分位）",
+      "frame": "red",
+      "metric": "vol_pct",
+      "unit": "分位",
+      "thresholds_key": "vol_pct",
+      "volume_ma_days": 20,
+      "source": "index_daily 自算（红利低波指数成交额）",
+      "note": "★ 补上一维「拥挤度的资金维度」：报告的四维拥挤度里 ETF 规模与机构占比两项**源不可用**（东财 fund_etf_spot_em 被本机代理拦截、交易所 fund_etf_scale_* 数据停在 2025-01），改用指数成交额近 20 日均值分位代理「市场关注度」。报告依据：A 股成交额与红利策略负相关——成交疲软时红利相对占优，故分位越高判越不利。",
+      "confidence": {
+        "level": "mid",
+        "why": "回测验证：近20日均额与未来 60 日收益相关 −0.50、Q5−Q1 −6.0pp（放量拥挤不利，强验证）。样本约 2 年"
+      }
+    }
+  ],
+  "params": {
+    "trend_lookback_days": 20,
+    "trend_move_bp": 10,
+    "style_lookback_days": 60,
+    "style_lookback_short_days": 20,
+    "ma_days": 750,
+    "min_samples_for_dy_rank": 120,
+    "index_hist_days": 900,
+    "index_stale_days": 5
+  },
+  "thresholds": {
+    "premium_pp": [
+      [
+        3.5,
+        99,
+        2
+      ],
+      [
+        3.0,
+        3.5,
+        1
+      ],
+      [
+        2.0,
+        3.0,
+        0
+      ],
+      [
+        1.5,
+        2.0,
+        -1
+      ],
+      [
+        -99,
+        1.5,
+        -2
+      ]
+    ],
+    "cn10_y_pct": [
+      [
+        -99,
+        1.5,
+        2
+      ],
+      [
+        1.5,
+        1.7,
+        1
+      ],
+      [
+        1.7,
+        1.9,
+        0
+      ],
+      [
+        1.9,
+        2.1,
+        -1
+      ],
+      [
+        2.1,
+        99,
+        -2
+      ]
+    ],
+    "insurance_gap_yi": [
+      [
+        10000,
+        1000000000.0,
+        1
+      ],
+      [
+        5000,
+        10000,
+        0
+      ],
+      [
+        -99,
+        5000,
+        -1
+      ]
+    ],
+    "style_rel_pp": [
+      [
+        5,
+        999,
+        2
+      ],
+      [
+        1,
+        5,
+        1
+      ],
+      [
+        -5,
+        1,
+        0
+      ],
+      [
+        -15,
+        -5,
+        -1
+      ],
+      [
+        -999,
+        -15,
+        -2
+      ]
+    ],
+    "crowding_ext_pct": [
+      [
+        -999,
+        -10,
+        1
+      ],
+      [
+        -10,
+        5,
+        0
+      ],
+      [
+        5,
+        20,
+        -1
+      ],
+      [
+        20,
+        999,
+        -2
+      ]
+    ],
+    "m1m2_gap_pp": [
+      [
+        -99,
+        -9.0,
+        2
+      ],
+      [
+        -9.0,
+        -6.5,
+        1
+      ],
+      [
+        -6.5,
+        -1.5,
+        0
+      ],
+      [
+        -1.5,
+        6.0,
+        -1
+      ],
+      [
+        6.0,
+        99,
+        -2
+      ]
+    ],
+    "vol_pct": [
+      [
+        -99,
+        20,
+        1
+      ],
+      [
+        20,
+        70,
+        0
+      ],
+      [
+        70,
+        90,
+        -1
+      ],
+      [
+        90,
+        999,
+        -2
+      ]
+    ]
+  },
+  "manual": {
+    "_说明": "没有自动数据源的因子在此手工维护；updated_at 超过 stale_days 会在输出里标 stale，且不计入综合结论的可信区间。",
+    "insurance_oci": {
+      "label": "③ 险资 / OCI 流入",
+      "updated_at": "2026-09-17",
+      "gap_yi": 15000,
+      "quarter_added_yi": 2885,
+      "fvoci_stock_pct": 5.4,
+      "stale_days": 120,
+      "source_note": "华泰证券测算欠配 1.1–1.9 万亿，取中值 1.5 万亿；国金证券测算人身险需增配 1.41 万亿"
+    }
+  },
+  "verdicts": [
+    {
+      "min_total": 7,
+      "verdict": "偏有利",
+      "action": "可分批买入 / 加仓"
+    },
+    {
+      "min_total": 3,
+      "verdict": "中性偏有利",
+      "action": "可持有，回调分批介入"
+    },
+    {
+      "min_total": -1,
+      "verdict": "中性",
+      "action": "观望，等信号明确"
+    },
+    {
+      "min_total": -6,
+      "verdict": "中性偏谨慎",
+      "action": "不追高，控制仓位"
+    },
+    {
+      "min_total": -99,
+      "verdict": "不利",
+      "action": "不建议买入 / 考虑减仓"
+    }
+  ],
+  "signals": {
+    "buy": [
+      {
+        "metric": "premium",
+        "op": ">",
+        "value": 3.0,
+        "label": "股息率溢价 > 3.0pp"
+      },
+      {
+        "metric": "cn10_y",
+        "op": "<",
+        "value": 1.6,
+        "label": "10Y 国债 < 1.60%"
+      },
+      {
+        "metric": "dy",
+        "op": ">",
+        "value": 5.0,
+        "label": "股息率 > 5%"
+      },
+      {
+        "metric": "crowding",
+        "op": "<",
+        "value": -10,
+        "label": "价格延伸度 < -10%（明显低于长期均线）"
+      },
+      {
+        "metric": "style_rel",
+        "op": ">",
+        "value": 5,
+        "label": "红利低波近60日跑赢沪深300 超 5pp"
+      },
+      {
+        "metric": "insurance_gap",
+        "op": ">",
+        "value": 10000,
+        "label": "险资欠配 > 1 万亿元（制度性买盘仍在）"
+      },
+      {
+        "metric": "dy_rank",
+        "op": ">",
+        "value": 70,
+        "optional": true,
+        "label": "股息率历史分位 > 70%（越便宜）"
+      },
+      {
+        "metric": "m1m2_gap",
+        "op": "<=",
+        "value": -6.5,
+        "label": "M1−M2 剪刀差 ≤ −6.5pp（资金淤积，红利相对占优）"
+      },
+      {
+        "metric": "vol_pct",
+        "op": "<",
+        "value": 20,
+        "label": "成交额处历史低位（关注度低，不拥挤）"
+      }
+    ],
+    "warn": [
+      {
+        "metric": "premium",
+        "op": "<",
+        "value": 1.5,
+        "label": "股息率溢价 < 1.5pp（补偿不足）"
+      },
+      {
+        "metric": "cn10_y",
+        "op": ">",
+        "value": 2.0,
+        "label": "10Y 国债 > 2.00%（估值中枢上移）"
+      },
+      {
+        "metric": "dy",
+        "op": "<",
+        "value": 4.0,
+        "label": "股息率 < 4.0%"
+      },
+      {
+        "metric": "crowding",
+        "op": ">",
+        "value": 20,
+        "label": "价格延伸度 > 20%（显著偏离，偏拥挤）"
+      },
+      {
+        "metric": "style_rel",
+        "op": "<",
+        "value": -5,
+        "label": "红利低波近60日跑输沪深300 超 5pp"
+      },
+      {
+        "metric": "insurance_gap",
+        "op": "<",
+        "value": 5000,
+        "label": "险资欠配 < 5 千亿元（买盘接近耗尽）"
+      },
+      {
+        "metric": "insurance_stale",
+        "op": "is_true",
+        "label": "险资数据超过 120 天未更新"
+      },
+      {
+        "metric": "dy_rank",
+        "op": "<",
+        "value": 30,
+        "optional": true,
+        "label": "股息率历史分位 < 30%（偏贵）"
+      },
+      {
+        "metric": "m1m2_gap",
+        "op": ">=",
+        "value": 6.0,
+        "label": "剪刀差转正走高（资金活化，成长占优）"
+      },
+      {
+        "metric": "vol_pct",
+        "op": ">",
+        "value": 90,
+        "label": "成交额处历史高位（资金拥挤）"
+      }
+    ]
+  },
+  "invalidation": {
+    "_说明": "结论失效条件：命中任意一条即说明本台账的多头结论不再成立，须重新研究。1.90%–2.00% 这条线出自 2026-09-17《美联储加息对债基与红利低波基金影响分析》（原 2.10% 偏松，已收紧到 2.00%）。",
+    "rules": [
+      {
+        "metric": "premium",
+        "op": "<",
+        "value": 1.5,
+        "text": "股息率溢价跌破 1.5pp：相对债券的补偿不足，红利性价比基础消失"
+      },
+      {
+        "metric": "cn10_y",
+        "op": ">",
+        "value": 2.0,
+        "text": "10Y 国债升破 2.00%：无风险利率锚上移，红利低波「类债券」定价锚松动，压制红利估值中枢"
+      },
+      {
+        "metric": "style_rel",
+        "op": "<",
+        "value": -15,
+        "text": "红利低波 60 日跑输沪深300 超 15pp：风格切换确立，相对收益逻辑失效"
+      },
+      {
+        "metric": "crowding",
+        "op": ">",
+        "value": 20,
+        "text": "价格延伸度 > 20%：拥挤度进入危险区间，绝对收益风险上升"
+      },
+      {
+        "metric": "insurance_stale",
+        "op": "is_true",
+        "text": "险资数据超 120 天未更新：制度性买盘判断失去数据依据"
+      }
+    ]
+  },
+  "_说明_口径": "指数类读数（④ 成长相对强弱、⑤ 拥挤度）均为**价格指数口径**，不含分红再投资。含分红口径下每年约再 +4~5pp（2022 年 H30269 价格 −1.90% vs 全收益 +3.46%）。跨口径比较前务必确认——这是原始研究反复标注的易错点。",
+  "phases": [
+    {
+      "name": "无人问津期",
+      "from": "2005-01",
+      "to": "2014-12",
+      "feature": "溢价 −0.65 ~ +0.55pp；红利 ETF 规模 <50 亿元；股息率长期不高于国债，「红利」不构成独立策略"
+    },
+    {
+      "name": "价值发现期",
+      "from": "2015-01",
+      "to": "2021-12",
+      "feature": "溢价 0 → +1.65pp；ETF 规模 37 → 250 亿元；分红提升 + 利率下移，红利开始跑出稳定超额"
+    },
+    {
+      "name": "极致低估 + 资金涌入期",
+      "from": "2022-01",
+      "to": "2025-12",
+      "feature": "溢价 +3.05 → +3.40pp；ETF 规模 250 → 2000 亿元；险资制度性增配 + 利率破 2%，红利大牛市"
+    },
+    {
+      "name": "估值修复兑现 / 分歧加大期",
+      "from": "2026-01",
+      "to": "",
+      "feature": "溢价由 3.3~3.6pp 压缩至 2.4~2.6pp；利率极低位、险资欠配仍在、风格刚反转——从「闭眼买」变成「要挑时候买」"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "基准：区间震荡",
+      "probability": 50,
+      "when": [
+        {
+          "metric": "cn10_y",
+          "op": ">",
+          "value": 1.6
+        },
+        {
+          "metric": "cn10_y",
+          "op": "<",
+          "value": 1.9
+        }
+      ],
+      "outcome": "红利低波年度 +6% ~ +8%（含股息）；相对沪深300 超额 −5pp ~ +5pp 小幅正负交替",
+      "factors": "溢价中性 / 利率有利 / 险资有利减速 / 风格中性 / 拥挤偏高"
+    },
+    {
+      "name": "乐观：估值 + 股息双升",
+      "probability": 25,
+      "when": [
+        {
+          "metric": "premium",
+          "op": ">=",
+          "value": 3.0
+        }
+      ],
+      "outcome": "年度 +10% ~ +15%；相对超额 +10pp ~ +20pp",
+      "factors": "五因子全面转有利（除拥挤度）"
+    },
+    {
+      "name": "谨慎：估值回归",
+      "probability": 25,
+      "when": [
+        {
+          "metric": "cn10_y",
+          "op": ">=",
+          "value": 1.9
+        }
+      ],
+      "outcome": "年度 −5% ~ +2%；相对超额 −5pp ~ −15pp",
+      "factors": "利率上行 + 成长主线回归 + 险资欠配收敛"
+    }
+  ],
+  "_说明_研究决策": "2026-09-22 一致性评审后的两条决策：① ④ style_rel **不换基准**——基准反映真实市场，不能因突发情况（牛市崩塌、K 型分化无增量资金被虹吸）就换；极端数据不可避免，市场不可预测，但长期概率可靠（故 confidence 标 low 以示样本期风险，分数照常）。② ⑤ crowding 仅点位偏离一维、报告四维判「偏高」与本台账判「中性」的分歧**保留**——已加 ⑦ 资金活跃度作资金维度代理，原口径继续观察。"
+}

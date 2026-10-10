@@ -46,6 +46,34 @@ def test_web_storage_persists_dialogs_and_messages(tmp_path):
     assert messages[1]["trace_run_id"] == "trace-1"
 
 
+def test_final_answer_sorts_after_clarify_messages(tmp_path):
+    """澄清问答先落库；最终回答复用开跑占位消息时必须按完成时间重排，
+    否则历史顺序会变成 问题→回答→反问→作答（2026-10-09 实测）。"""
+    from server.storage import WebStorage, utc_now
+
+    storage = WebStorage(tmp_path / "web.db")
+    dialog = storage.create_dialog(title="t", mode="react_stock")
+    du = dialog["dialog_uuid"]
+
+    storage.create_message(dialog_uuid=du, role="user", content="问题", status="completed")
+    placeholder = storage.create_message(
+        dialog_uuid=du, role="assistant", content="", status="streaming", task_id="t1")
+    storage.create_message(dialog_uuid=du, role="assistant", content="反问", status="completed")
+    storage.create_message(dialog_uuid=du, role="user", content="作答", status="completed")
+
+    storage.update_message(
+        placeholder["message_uuid"], content="最终回答", status="completed",
+        task_id="t1", created_at=utc_now())
+
+    msgs = storage.list_messages(du)
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("user", "问题"),
+        ("assistant", "反问"),
+        ("user", "作答"),
+        ("assistant", "最终回答"),
+    ]
+
+
 def test_latest_trace_runs_for_dialogs_returns_latest_and_handles_chunks(tmp_path, monkeypatch):
     from server import storage as storage_mod
     from server.storage import WebStorage

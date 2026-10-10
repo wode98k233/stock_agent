@@ -16,23 +16,25 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 
 from utils.budget import BudgetExceeded
 from utils.logger import ensure_radar
+from utils.token_usage import extract_model_name, extract_token_usage
 
 
 class TokenBackend(Protocol):
     """Token 记录后端接口"""
     def record(self, tokens_in: int, tokens_out: int, label: str, cached_tokens: int = 0,
-               reasoning_tokens: int = 0) -> None: ...
+               reasoning_tokens: int = 0, model: str = "") -> None: ...
 
 
 class MetricsBackend(TokenBackend):
     """记录到 RequestContext（metrics 汇总）"""
     def record(self, tokens_in: int, tokens_out: int, label: str, cached_tokens: int = 0,
-               reasoning_tokens: int = 0) -> None:
+               reasoning_tokens: int = 0, model: str = "") -> None:
         try:
             from utils.logger import RequestContext
             ctx = RequestContext.current()
             if ctx:
-                ctx.record_llm(tokens_in, tokens_out, cached_tokens, reasoning_tokens)
+                ctx.record_llm(tokens_in, tokens_out, cached_tokens, reasoning_tokens,
+                               label, model=model)
         except Exception:
             pass
 
@@ -43,7 +45,7 @@ class BudgetBackend(TokenBackend):
         self.budget = budget
 
     def record(self, tokens_in: int, tokens_out: int, label: str, cached_tokens: int = 0,
-               reasoning_tokens: int = 0) -> None:
+               reasoning_tokens: int = 0, model: str = "") -> None:
         # 思考 token 计入总量（思考也是真实消耗，预算不豁免）
         if self.budget:
             self.budget.add_tokens(tokens_in + tokens_out)
@@ -79,16 +81,17 @@ class TokenRecorder(BaseCallbackHandler):
 
     def on_llm_end(self, response, **kwargs):
         dt = time.time() - (self.t0 or time.time())
-        from utils.token_usage import extract_token_usage
         usage = extract_token_usage(response)
         inp = usage["input_tokens"]
         out = usage["output_tokens"]
 
         cached = usage.get("cached_tokens", 0)
         reasoning = usage.get("reasoning_tokens", 0)
+        # 按上游模型区分统计：从响应本身提取（覆盖网关降级/多模型场景）
+        model = extract_model_name(response)
         for backend in self.backends:
             try:
-                backend.record(inp, out, self.label, cached, reasoning)
+                backend.record(inp, out, self.label, cached, reasoning, model=model)
             except BudgetExceeded:
                 self.budget_exceeded = True
             except Exception:
@@ -97,4 +100,5 @@ class TokenRecorder(BaseCallbackHandler):
         self.logger.llm_call(self.label, dt, inp, out,
                              cached_tokens=usage.get("cached_tokens", 0),
                              cache_hit_ratio=usage.get("cache_hit_ratio", 0.0),
-                             reasoning_tokens=reasoning)
+                             reasoning_tokens=reasoning,
+                             **({"model": model} if model else {}))

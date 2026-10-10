@@ -27,6 +27,7 @@ import os
 import json
 import time
 import uuid
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict
 from datetime import datetime
@@ -38,7 +39,9 @@ from utils.app_paths import (
     get_memory_config_path,
 )
 from memory.backend import MemoryBackend, MemoryEntry, create_memory_backend
-from memory.chunking import chunk_report, strip_report_decor, dashboard_to_text
+from memory.chunking import (
+    chunk_report, strip_report_decor, dashboard_to_text, strip_chart_markers,
+)
 from memory.confidence import ConfidenceCalculator
 from memory.freshness import FreshnessManager
 from memory.merge import Merger
@@ -50,6 +53,96 @@ from memory.context import (
 from memory.metadata import collect_metadata, classify_query_subject, reset as _reset_metadata
 
 _log = logging.getLogger(__name__)
+
+# 中文文本 1 token ≈ 1.5~2 字符（保守取 2）。`MEMORY_MAX_PROMPT_TOKENS` 是 token 预算，
+# 而 `retrieve` 拼装的是**字符**，需要换算 —— 原实现直接拿 token 数当字符数截断。
+_PROMPT_CHARS_PER_TOKEN = 2
+
+
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    """按行/句边界截断文本，避免展示片段停在半句话/半行表格上。"""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    pos = max(cut.rfind("\n"), cut.rfind("。"), cut.rfind("；"),
+              cut.rfind("！"), cut.rfind("？"))
+    if pos > limit * 0.5:
+        return cut[:pos + 1].strip()
+    return cut.strip()
+
+
+class _RadarLogAdapter:
+    """把 RadarLogger（结构化 tag 风格）适配成 stdlib logging 风格（msg + % args）。
+
+    ``MemorySDK.retrieve`` 内部按 stdlib 风格调用 ``logger.info(fmt, *args)``；
+    当传入的是请求级 ``RadarLogger`` 时，本适配器转发为 ``radar.info("M", text)``，
+    使 ``[retrieve]`` 统计落进**该请求**的日志文件（此前用模块 logger，看不到）。
+    """
+    def __init__(self, radar):
+        self._r = radar
+
+    @staticmethod
+    def _fmt(msg, args):
+        try:
+            return msg % args if args else msg
+        except Exception:
+            return f"{msg} {args}"
+
+    def info(self, msg, *args, **kv):
+        self._r.info("M", self._fmt(msg, args))
+
+    def debug(self, msg, *args, **kv):
+        self._r.debug("M", self._fmt(msg, args))
+
+    def warning(self, msg, *args, **kv):
+        self._r.warning("M", self._fmt(msg, args))
+
+    warn = warning
+
+    def error(self, msg, *args, **kv):
+        self._r.error("M", self._fmt(msg, args))
+
+    def exception(self, msg, *args, **kv):
+        self._r.error("M", self._fmt(msg, args), exc_info=True)
+
+
+def _as_std_logger(logger):
+    """把可选的 logger 归一为 stdlib 风格：RadarLogger → 适配器；None → 模块 logger。"""
+    if logger is None:
+        return _log
+    try:
+        from utils.logger import RadarLogger
+        if isinstance(logger, RadarLogger):
+            return _RadarLogAdapter(logger)
+    except Exception:
+        pass
+    return logger
+
+
+def _augment_query_with_subject(user_input: str, context: str = None) -> str:
+    """检索用 query 的实体归一（R2，2026-09-23）。
+
+    - 提问本身已含股票实体 → 原样返回；
+    - 提问为代词/追问（如「这个股…」）且**会话上下文**含股票 → 追加「股票名 代码」帮助召回。
+    """
+    ui = (user_input or "").strip()
+    if not ui:
+        return user_input
+    try:
+        from memory.metadata import classify_query_subject
+        subj = classify_query_subject(ui)
+        if subj.get("subject_kind") == "stock":
+            return ui
+        if context:
+            s2 = classify_query_subject(context)
+            if s2.get("subject_kind") == "stock":
+                extra = " ".join(x for x in (s2.get("stock_name"), s2.get("stock_code")) if x)
+                if extra:
+                    return f"{ui} {extra}"
+    except Exception:
+        pass
+    return ui
 
 
 def _is_incomplete_result(text: str) -> bool:
@@ -173,17 +266,22 @@ def _build_embedding_fn():
 # ------------------------------------------------------------
 # 配置
 # ------------------------------------------------------------
-# 语义相似度门槛默认值：低于该余弦相似度的向量结果会被过滤，
-# 避免同质语料（如同日 A 股行情）下无关记忆污染检索/注入上下文。
-MIN_SIMILARITY_DEFAULT = 0.72
+# 语义相似度门槛默认值（自适应）：保留 score >= max(floor, top_score - margin)。
+# 实测（2026-09-23）：固定 0.72 会把 bge-m3 上口语 query 的全部向量命中滤空
+# （最高余弦仅 ~0.60），故改为「低绝对下限 + 相对带宽」。
+MIN_SIMILARITY_DEFAULT = 0.30        # 绝对下限（floor）
+SIMILARITY_MARGIN_DEFAULT = 0.12     # 相对带宽（margin）
 
 
 def load_memory_config() -> dict:
-    """读取记忆系统用户配置（min_similarity 等运行时可调项）。
+    """读取记忆系统用户配置（min_similarity / similarity_margin 等运行时可调项）。
 
     文件不存在或格式错误时返回默认值，不抛异常。
     """
-    defaults = {"min_similarity": MIN_SIMILARITY_DEFAULT}
+    defaults = {
+        "min_similarity": MIN_SIMILARITY_DEFAULT,
+        "similarity_margin": SIMILARITY_MARGIN_DEFAULT,
+    }
     path = get_memory_config_path()
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -212,10 +310,14 @@ class MemoryConfig:
     user_id: str = "default"                      # 用户标识
     retrieval_top_k: int = 5                      # 检索最大条数
     max_prompt_tokens: int = 1500                 # 注入 prompt 的最大字符数
+    max_prompt_chars: int = 6000                  # 注入字符预算（优先；0=回退 max_prompt_tokens×2）
+    max_chunks_per_group: int = 6                 # 同一报告最多注入的 chunk 数
+    chunk_max_chars: int = 1000                   # 单块展示字符上限
     episodic_retention_days: int = 90             # 情景记忆保留天数
     embedding_ready_timeout: float = 30.0         # 初始化时等待 embedding 服务就绪的最长秒数
     embedding_ready_interval: float = 1.5         # 初始化时探针轮询间隔秒数
-    min_similarity: float = MIN_SIMILARITY_DEFAULT  # 语义相似度门槛（0 关闭）
+    min_similarity: float = MIN_SIMILARITY_DEFAULT  # 语义相似度绝对下限（0 关闭）
+    similarity_margin: float = SIMILARITY_MARGIN_DEFAULT  # 相对带宽：保留 top-margin 以内
     confidence_threshold: float = 0.4             # v2: 置信度门槛，低于此值的记忆不注入 prompt
 
 
@@ -242,6 +344,7 @@ class MemorySDK:
             embedding_ready_timeout=self._config.embedding_ready_timeout,
             embedding_ready_interval=self._config.embedding_ready_interval,
             min_similarity=self._config.min_similarity,
+            similarity_margin=self._config.similarity_margin,
         )
         self._initialized = True
 
@@ -281,8 +384,38 @@ class MemorySDK:
         return value
 
     def get_min_similarity(self) -> float:
-        """读取当前语义相似度门槛。"""
+        """读取当前语义相似度下限（floor）。"""
         return self._config.min_similarity
+
+    def set_similarity_margin(self, value: float) -> float:
+        """运行时调整语义相似度相对带宽（margin）并持久化（0 表示纯绝对门槛）。"""
+        value = float(value)
+        if value < 0:
+            raise ValueError("similarity_margin 必须 >= 0")
+        self._ensure_init()
+        self._config.similarity_margin = value
+        backend = self._backend
+        if backend is not None:
+            emb = getattr(backend, "_embedding", None)
+            if emb is not None and hasattr(emb, "set_similarity_margin"):
+                emb.set_similarity_margin(value)
+            elif hasattr(backend, "set_similarity_margin"):
+                backend.set_similarity_margin(value)
+        cfg = load_memory_config()
+        cfg["similarity_margin"] = value
+        save_memory_config(cfg)
+        return value
+
+    def get_similarity_margin(self) -> float:
+        """读取当前语义相似度相对带宽（margin）。"""
+        return self._config.similarity_margin
+
+    def _resolve_max_prompt_chars(self) -> int:
+        """注入字符预算：优先 ``max_prompt_chars``；否则兼容旧 ``max_prompt_tokens × 2``。"""
+        chars = int(getattr(self._config, "max_prompt_chars", 0) or 0)
+        if chars > 0:
+            return chars
+        return max(1, int(self._config.max_prompt_tokens) * _PROMPT_CHARS_PER_TOKEN)
 
     @property
     def backend(self) -> MemoryBackend:
@@ -306,7 +439,7 @@ class MemorySDK:
             context: 方案A（记忆拼接历史）—— session 历史 + 画像主题拼成的文本，
                      传给 backend 做「当前问题 + 历史上下文」两路 RRF 融合召回。
         """
-        _l = logger or _log
+        _l = _as_std_logger(logger)
         if confidence_threshold is None:
             confidence_threshold = self._config.confidence_threshold
         try:
@@ -321,7 +454,9 @@ class MemorySDK:
                     search_kwargs["confidence_threshold"] = confidence_threshold
                 if context and 'context' in sig.parameters:
                     search_kwargs["context"] = context
-            results = self._backend.search(user_input, **search_kwargs)
+            # R2：query 实体归一（代词/追问场景从会话上下文补齐股票实体）
+            search_query = _augment_query_with_subject(user_input, context)
+            results = self._backend.search(search_query, **search_kwargs)
             elapsed_ms = int((time.time() - t0) * 1000)
 
             # 召回门槛已在 backend.search() 内按各自量纲处理（FTS5=BM25 分，
@@ -337,27 +472,50 @@ class MemorySDK:
             if not include_superseded:
                 results = [r for r in results if not getattr(r, "superseded_by", "")]
 
+            # 低置信度记忆默认不注入 prompt（confidence < 0.4），
+            # 避免大量 🔴低信 残片污染上下文。confidence=0.5 为未知（旧数据），放行。
+            if confidence_threshold > 0:
+                results = [r for r in results
+                           if getattr(r, "confidence", 0.5) >= confidence_threshold]
+
             if not results:
                 _l.debug("[retrieve] no results query=%r elapsed=%dms", user_input[:60], elapsed_ms)
                 return ""
 
             lines = ["[相关记忆片段]"]
-            # 按 chunk_group_id 去重合并：同一报告的多个 chunk 合并展示
+            # 按 chunk_group_id 去重合并：同一报告的多个 chunk 合并展示。
+            # 旧数据无 chunk_group_id 时按「日期|问题」兜底分组，避免同源片段重复占位。
             groups: dict = {}
             for r in results:
-                gid = r.metadata.get("chunk_group_id", r.entry_id)
+                gid = r.metadata.get("chunk_group_id") or (
+                    f"{(r.metadata.get('date') or '')[:10]}|{r.metadata.get('source_query', '')}"
+                )
                 if gid not in groups:
                     groups[gid] = {"entry": r, "chunks": []}
                 groups[gid]["chunks"].append(r)
+
+            # 注入预算：优先 MEMORY_MAX_PROMPT_CHARS；否则兼容旧 max_prompt_tokens×2
+            max_chars = self._resolve_max_prompt_chars()
+            per_group_n = max(1, int(getattr(self._config, "max_chunks_per_group", 6) or 6))
+            chunk_limit = max(1, int(getattr(self._config, "chunk_max_chars", 1000) or 1000))
+            used = len(lines[0])
 
             for gid, gdata in groups.items():
                 r = gdata["entry"]
                 date_str = r.metadata.get("date", "")[:19] if r.metadata.get("date") else "未知时间"
                 source = r.metadata.get("source_query", "") or "未知问题"
                 subject = f"{r.stock_name} ({r.stock_code})" if r.stock_code else (r.stock_name or "—")
-                # 合并同组 chunks 的正文（去重后按索引排序）
-                chunks_sorted = sorted(gdata["chunks"], key=lambda x: x.metadata.get("chunk_index", 0))
-                content = "\n  ".join(c.content[:300] for c in chunks_sorted[:3])
+                # 组内按相关性取前 N 块；若 chunk_index 可用则按文档序展示（可读性）
+                picked = sorted(
+                    gdata["chunks"][:per_group_n],
+                    key=lambda x: x.metadata.get("chunk_index", 0),
+                )
+                content = "\n  ".join(
+                    _truncate_at_boundary(c.content, chunk_limit) for c in picked
+                ).strip()
+                # 旧版本写入的脏数据可能正文为空（只剩 tags）→ 整组跳过，不占 prompt
+                if not content:
+                    continue
                 # v2: 信誉分标签
                 conf_tag = ""
                 if r.confidence > 0:
@@ -367,7 +525,7 @@ class MemorySDK:
                         conf_tag = " 🟡中信"
                     else:
                         conf_tag = " 🔴低信"
-                lines.append(
+                block = (
                     f"[{date_str}]{conf_tag}\n"
                     f"用户输入:「{source}」\n"
                     f"分析标的: {subject}\n"
@@ -375,13 +533,18 @@ class MemorySDK:
                 )
                 if r.metadata.get("sentiment"):
                     sentiment_map = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
-                    lines[-1] += f" [{sentiment_map.get(r.metadata['sentiment'], '')}]"
+                    block += f" [{sentiment_map.get(r.metadata['sentiment'], '')}]"
                 if r.metadata.get("tags"):
-                    lines[-1] += f" [{', '.join(r.metadata['tags'][:5])}]"
+                    block += f" [{', '.join(r.metadata['tags'][:5])}]"
+                # 预算耗尽：截断本块到剩余预算后停止（靠后的组按相关性已排序，优先保留靠前）
+                if used + len(block) > max_chars:
+                    remain = max_chars - used - 1  # 预留 1 字符分隔符，严格不超预算
+                    if remain > 100:
+                        lines.append(block[:remain])
+                    break
+                lines.append(block)
+                used += len(block) + 1
             text = "\n".join(lines)
-            max_chars = self._config.max_prompt_tokens
-            if len(text) > max_chars:
-                text = text[:max_chars]
             scores = [f"{r.entry_id[:8]}={r.score:.2f}" for r in results[:5]]
             _l.info(
                 "[retrieve] hits=%d backend=%s scores=[%s] elapsed=%dms chars=%d/%d query=%r",
@@ -510,9 +673,11 @@ class MemorySDK:
                 metadata.get("date", datetime.now().isoformat()), ttl_days
             )
 
-            # ── 内容: 去装饰线保留完整正文，dashboard JSON 提炼成可读文本，切分后逐段存储 ──
+            # ── 内容: 去装饰线保留完整正文，dashboard JSON / CHART 占位符不进向量，
+            #    切分后逐段存储 ──
             summary = strip_report_decor(result_short) if result_short else ""
             summary = dashboard_to_text(summary)  # JSON 噪音不进向量（核心结论等提炼为文本）
+            summary = strip_chart_markers(summary)  # @@CHART:uuid@@ 无检索价值
             chunks = chunk_report(summary)
             chunk_group_id = uuid.uuid4().hex[:8]
             entries = []
@@ -659,6 +824,9 @@ class MemorySDK:
         checked = 0
         for r in rows:
             checked += 1
+            raw_content = r.get("raw_content") or ""
+            # 存量内容清洗：移除 @@CHART:uuid@@ 等无检索价值的装饰符
+            cleaned_content = strip_chart_markers(raw_content)
             subj = classify_query_subject(r.get("source_query", ""))
             if subj["subject_kind"] in ("stock", "sector", "market"):
                 stock_code = subj["stock_code"]
@@ -668,7 +836,9 @@ class MemorySDK:
                 stock_code = r.get("stock_code", "") or ""
                 stock_name = r.get("stock_name", "") or ""
                 sector_l2 = r.get("sector_l2", "") or ""
-            if stock_code == (r.get("stock_code") or "") and stock_name == (r.get("stock_name") or ""):
+            if (stock_code == (r.get("stock_code") or "")
+                    and stock_name == (r.get("stock_name") or "")
+                    and cleaned_content == raw_content):
                 continue
             meta = {
                 "source_query": r.get("source_query", ""),
@@ -682,7 +852,7 @@ class MemorySDK:
             }
             entry = MemoryEntry(
                 entry_id=r["entry_id"], stock_code=stock_code,
-                stock_name=stock_name, content=r.get("raw_content") or "",
+                stock_name=stock_name, content=cleaned_content,
                 metadata=meta,
                 confidence=r.get("confidence", 0.5),
                 provenance=r.get("provenance", {}),
@@ -691,7 +861,56 @@ class MemorySDK:
             repaired += 1
             _l.info("[repair] fixed eid=%s %s -> %s(%s)",
                     str(r["entry_id"])[:12], r.get("stock_name"), stock_name, stock_code)
+        # 顺带回填 chunk 元数据（幂等；旧数据此前未持久化，见 2026-09-23 修复）
+        self.backfill_chunk_metadata(logger=_l, force=False)
         return {"checked": checked, "repaired": repaired}
+
+    def backfill_chunk_metadata(self, logger=None, force: bool = False) -> dict:
+        """为存量语义记忆回填 chunk_index / chunk_count / chunk_group_id。
+
+        背景（2026-09-23）：``archive`` 一直把这三字段写进 ``MemoryEntry.metadata``，
+        但 FTS5 / Chroma 后端此前不持久化 metadata，导致 ``retrieve`` 的「同报告分组合并 +
+        文档序」失效（同源片段错位、只取到低价值块）。新写入已落库；本方法回填旧数据。
+
+        口径：按 ``(date[:10], source_query)`` 分组（与 ``retrieve`` 兜底口径一致），组内按
+        ``rowid`` 升序（≈ 当年 ``add_batch`` 插入顺序 = 文档顺序）赋 ``chunk_index``；
+        ``chunk_group_id`` 取 ``sha1(date|source_query)[:8]``，稳定可重复。
+
+        幂等：已有 ``chunk_group_id`` 的行默认跳过；``force=True`` 全量覆盖。
+
+        Returns:
+            dict: ``{"checked": int, "updated": int}``
+        """
+        _l = logger or _log
+        self._ensure_init()
+        if not hasattr(self._backend, "get_all_raw"):
+            return {"checked": 0, "updated": 0}
+        rows = self._backend.get_all_raw(limit=10_000_000)
+        groups: dict = {}
+        for r in rows:
+            date = r.get("date") or ""
+            sq = r.get("source_query") or ""
+            groups.setdefault(f"{date[:10]}|{sq}", []).append(r)
+
+        records = []
+        for key, items in groups.items():
+            items.sort(key=lambda r: r.get("rowid", 0))
+            n = len(items)
+            gid = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+            for i, r in enumerate(items):
+                if not force and (r.get("chunk_group_id") or ""):
+                    continue
+                records.append((i, n, gid, r["entry_id"]))
+
+        updated = 0
+        if records:
+            if hasattr(self._backend, "backfill_chunk_columns"):
+                updated = self._backend.backfill_chunk_columns(records)
+            elif hasattr(self._backend, "update_chunk_metadata"):
+                updated = self._backend.update_chunk_metadata(records)
+        _l.info("[backfill_chunks] checked=%d groups=%d updated=%d",
+                len(rows), len(groups), updated)
+        return {"checked": len(rows), "updated": updated}
 
     def search(self, query: str, top_k: int = 20,
                memory_type: str = "all") -> List[dict]:
@@ -999,9 +1218,14 @@ def get_sdk() -> MemorySDK:
             embedding_fn=_build_embedding_fn(),
             retrieval_top_k=Config.MEMORY_RETRIEVAL_TOP_K,
             max_prompt_tokens=Config.MEMORY_MAX_PROMPT_TOKENS,
+            max_prompt_chars=getattr(Config, "MEMORY_MAX_PROMPT_CHARS", 6000),
+            max_chunks_per_group=getattr(Config, "MEMORY_MAX_CHUNKS_PER_GROUP", 6),
+            chunk_max_chars=getattr(Config, "MEMORY_CHUNK_MAX_CHARS", 1000),
             episodic_retention_days=Config.MEMORY_EPISODIC_RETENTION_DAYS,
             embedding_ready_timeout=Config.STOCK_MEMORY_EMBEDDING_READY_TIMEOUT,
             embedding_ready_interval=Config.STOCK_MEMORY_EMBEDDING_READY_INTERVAL,
             confidence_threshold=Config.MEMORY_CONFIDENCE_THRESHOLD,
+            min_similarity=getattr(Config, "MEMORY_MIN_SIMILARITY", MIN_SIMILARITY_DEFAULT),
+            similarity_margin=getattr(Config, "MEMORY_SIMILARITY_MARGIN", SIMILARITY_MARGIN_DEFAULT),
         ))
     return _sdk_instance

@@ -102,3 +102,43 @@ def test_retry_success_first_try():
     result = asyncio.run(ainvoke_with_retry(llm, ["m"], max_retries=5))
     assert result == "ok"
     assert llm.calls == 1
+
+
+# ── label 刷新：避免节点 LLM 调用沿用上一个节点的残留 label ──
+
+def test_ainvoke_with_retry_refreshes_recorder_label():
+    """传入 label 时，config 里已有 TokenRecorder 的 label 应被刷新（不新建）。"""
+    from unittest.mock import MagicMock
+    from utils.token_recorder import TokenRecorder
+    from utils.llm_factory import _find_token_recorder
+
+    recorder = TokenRecorder(MagicMock(), "skill-selector", [])
+    config = {"callbacks": [recorder]}
+    llm = _FlakyLLM(fail_count=0)
+
+    asyncio.run(ainvoke_with_retry(llm, ["m"], config=config, label="agent"))
+
+    assert recorder.label == "agent"
+    # 必须是同一个 recorder（未新建、不重复计数）
+    assert _find_token_recorder(config["callbacks"]) is recorder
+
+
+def test_ainvoke_with_retry_without_label_keeps_recorder():
+    """不传 label 时不改动已有 recorder 的 label。"""
+    from unittest.mock import MagicMock
+    from utils.token_recorder import TokenRecorder
+
+    recorder = TokenRecorder(MagicMock(), "skill-selector", [])
+    llm = _FlakyLLM(fail_count=0)
+    asyncio.run(ainvoke_with_retry(llm, ["m"], config={"callbacks": [recorder]}))
+    assert recorder.label == "skill-selector"
+
+
+def test_agent_node_declares_llm_label():
+    """主 ReAct agent 与子 ReAct agent 必须显式声明各自的 LLM label。"""
+    from agents.react.nodes import AgentNode, BaseAgentNode
+    from agents.common_react.nodes import SubAgentNode
+
+    assert BaseAgentNode.llm_label == "agent"
+    assert AgentNode.llm_label == "agent"
+    assert SubAgentNode.llm_label == "react-sub"

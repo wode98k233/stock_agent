@@ -1,0 +1,114 @@
+{
+  "id": "portfolio",
+  "display_name": "组合决策仪表盘",
+  "description": "多标的持仓组合分析：组合概况、持仓分布、集中度风险、分标的操作与信号",
+  "scenario_tag": "组合决策仪表盘",
+  "checklist_dimensions": [
+    "组合结构",
+    "技术面",
+    "基本面",
+    "资金面"
+  ],
+  "sections": [
+    {
+      "id": "signal_row",
+      "renderer": "signal_row",
+      "required": true,
+      "fields": [
+        "decision_type",
+        "confidence_level",
+        "sentiment_score"
+      ]
+    },
+    {
+      "id": "core_verdict",
+      "renderer": "verdict_text",
+      "required": true,
+      "fields": [
+        "core_verdict"
+      ]
+    },
+    {
+      "id": "portfolio_snapshot",
+      "renderer": "portfolio_snapshot",
+      "fields": [
+        "portfolio_snapshot"
+      ]
+    },
+    {
+      "id": "positions",
+      "renderer": "position_table",
+      "fields": [
+        "positions"
+      ]
+    },
+    {
+      "id": "key_points",
+      "renderer": "key_points",
+      "fields": [
+        "key_points"
+      ]
+    },
+    {
+      "id": "action_items",
+      "renderer": "action_items",
+      "fields": [
+        "action_items"
+      ]
+    },
+    {
+      "id": "checklist",
+      "renderer": "checklist",
+      "fields": [
+        "checklist"
+      ]
+    },
+    {
+      "id": "risk_priority",
+      "renderer": "risk_list",
+      "fields": [
+        "risk_priority"
+      ]
+    },
+    {
+      "id": "next_watch",
+      "renderer": "watch_chips",
+      "fields": [
+        "next_watch"
+      ]
+    },
+    {
+      "id": "falsification_signal",
+      "renderer": "falsification_signal",
+      "fields": [
+        "falsification_signal"
+      ]
+    }
+  ],
+  "llm_fields": [
+    {
+      "name": "portfolio_snapshot",
+      "type": "dict",
+      "description": "组合资产概况（从报告提取具体数字）：总资产、持仓市值、可用现金、仓位比例、持仓数量",
+      "example": "{\"total_asset\":100000.00,\"position_value\":65000.00,\"cash\":35000.00,\"position_ratio\":0.65,\"position_count\":5}"
+    },
+    {
+      "name": "positions",
+      "type": "list",
+      "description": "分标的持仓明细（覆盖组合内报告提及的主要持仓）：每只的代码/名称/现价/盈亏率/操作建议/触发条件；操作建议尽量用「持有/减仓/加仓/止盈/止损/清仓/观望」等短语",
+      "example": "[{\"code\":\"510300\",\"name\":\"沪深300ETF\",\"price\":3.85,\"pnl_pct\":-5.2,\"action\":\"减仓\",\"condition\":\"跌破3.70减1/3\"},{\"code\":\"600519\",\"name\":\"贵州茅台\",\"price\":1450.00,\"pnl_pct\":12.5,\"action\":\"持有\",\"condition\":\"放量跌破1380止损\"}]"
+    },
+    {
+      "name": "symbol_signals",
+      "type": "list",
+      "description": "分标的具体买卖信号（供信号评测逐标的提取，必须与报告结论一致）：每项给出标的代码/名称、决策（buy/sell/hold，组合中每只标的只允许一个）、置信度、触发条件",
+      "example": "[{\"code\":\"510300\",\"name\":\"沪深300ETF\",\"decision\":\"sell\",\"confidence\":0.6,\"condition\":\"跌破3.70减1/3\"},{\"code\":\"600519\",\"name\":\"贵州茅台\",\"decision\":\"hold\",\"confidence\":0.65,\"condition\":\"放量跌破1380止损\"}]"
+    },
+    {
+      "name": "falsification_signal",
+      "type": "str",
+      "description": "组合判断证伪条件：什么情况下持有底仓的判断失效（≤50字）",
+      "example": "银行连续3日主力净流出超50亿或沪深300ETF跌破3.70，则价值底仓判断失效"
+    }
+  ]
+}

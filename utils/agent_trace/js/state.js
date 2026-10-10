@@ -5,6 +5,7 @@ const TYPE_ICONS = {
   agent:'🤖', tools:'🔧', planner:'📋', executor:'⚡',
   replanner:'🔄', classifier:'🏷️', graph:'🌳',
   unified_executor:'🚀', observer:'👁️', adjuster:'🔧', reviewer:'📝',
+  clarify:'💬', skill:'⚡',
   undefined:'❓',
 };
 

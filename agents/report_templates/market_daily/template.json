@@ -17,7 +17,7 @@
   ],
   "fallback_skills": [
     "money_flow",
-    "technical_analysis"
+    "stock_analysis"
   ],
   "output_blocks": [
     "core_summary",
@@ -136,7 +136,7 @@
       "skill": "mx_data",
       "purpose": "获取主要指数技术指标（MACD、RSI、均线）",
       "fallback_skills": [
-        "technical_analysis"
+        "stock_analysis"
       ]
     },
     {
@@ -160,7 +160,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "position_holding"
   ],
   "default_horizon": "short",

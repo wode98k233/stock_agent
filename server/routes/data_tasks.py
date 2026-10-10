@@ -36,11 +36,12 @@ def _get_collector():
 # ============================================================
 
 class CreateTaskRequest(BaseModel):
-    type: str                           # stock_list / daily_kline / index_kline / adjust_factor / board_list / board_member / board_kline / full_sync
+    type: str                           # stock_list / daily_kline / index_kline / adjust_factor / board_list / board_member / board_kline / full_sync / hithink_sync / hithink_dump / etf_list / tail_fill
     codes: Optional[List[str]] = None   # 股票代码列表
     days: int = 500                     # 采集天数
     source: str = 'auto'               # 数据源
     boards: Optional[List[List[str]]] = None  # 板块列表 [["名称","类型"], ...]
+    dump_kind: str = 'daily-k-10d'      # hithink_dump 用：daily-k（全量10年）/ daily-k-10d（近10交易日）
     board_type: Optional[str] = None    # 板块类型: industry / concept / all
     force: bool = False                 # 强制全量覆盖
 
@@ -64,6 +65,8 @@ async def create_task(req: CreateTaskRequest):
         config['board_type'] = req.board_type
     if req.force:
         config['force'] = True
+    if req.dump_kind:
+        config['dump_kind'] = req.dump_kind
     task_id = collector.create_and_run(req.type, config)
     task = get_data_task(task_id)
     return {'task_id': task_id, 'task': task}

@@ -1,11 +1,13 @@
 """ReAct Agent Graph 构建
 
-9 节点完整流程图：
+11 节点完整流程图：
     START → classify → [_route_after_classify]
       ├── "end"            → END（非股票问题）
-      └── "select_template" → select_template → select_skills → prepare → agent
+      └── "select_template" → select_template → select_skills → sub_goal_router → prepare → agent
                                    → [_route_after_agent]
-                                     ├── "tools"         → tool_node → agent (循环)
+                                     ├── "tools"         → tool_node → [_route_after_tools]
+                                     │                      ├── "gap"   → skill_gap → sub_goal_router
+                                     │                      └── "agent" → agent (循环)
                                      ├── "force_summary" → partial_summary → END
                                      ├── "report"        → template_report → dashboard → END
                                      └── "end"           → END
@@ -37,7 +39,7 @@ from config import Config
 class ReactGraph:
     """自定义 ReAct Graph
 
-    9 节点完整流程图，覆盖从分类到报告的全流程。
+    11 节点完整流程图，覆盖从分类到报告的全流程。
     节点创建委托给 ReactDIContainer，Graph 只负责图结构定义。
     budget/exec_state/logger 通过节点闭包传递，不存入 state。
     """
@@ -89,7 +91,8 @@ class ReactGraph:
         )
 
         workflow.add_edge("select_template", "select_skills")
-        workflow.add_edge("select_skills", "prepare")
+        workflow.add_edge("select_skills", "sub_goal_router")
+        workflow.add_edge("sub_goal_router", "prepare")
         workflow.add_edge("prepare", "agent")
 
         route_after_agent = make_route_after_agent(self.exec_state)
@@ -104,7 +107,14 @@ class ReactGraph:
             },
         )
 
-        workflow.add_edge("tools", "agent")
+        from agents.react.skill_nodes import make_route_after_tools
+        workflow.add_conditional_edges(
+            "tools",
+            make_route_after_tools(self.exec_state),
+            {"gap": "skill_gap", "reselect": "reselect", "agent": "agent"},
+        )
+        workflow.add_edge("skill_gap", "sub_goal_router")
+        workflow.add_edge("reselect", "agent")
 
         workflow.add_edge("partial_summary", END)
         workflow.add_edge("template_report", "dashboard")
@@ -116,6 +126,7 @@ class ReactGraph:
         self,
         user_input: str | None,
         config: RunnableConfig | None = None,
+        raw_user_input: str | None = None,
     ) -> dict:
         if user_input is None:
             # 从 checkpoint 恢复：不传 initial_state，LangGraph 自动加载上次 checkpoint
@@ -132,6 +143,7 @@ class ReactGraph:
                 "final_result": None,
                 "should_stop": False,
                 "user_input": user_input,
+                "raw_user_input": raw_user_input or user_input,
                 "is_stock_related": True,
                 "classify_response": None,
                 "selected_template_id": Config.REPORT_TEMPLATE,
@@ -140,6 +152,11 @@ class ReactGraph:
                 "all_tool_names": [],
                 "limit_reason": None,
                 "cache_hit_tools": [],
+                "active_skill": "",
+                "candidate_skills": [],
+                "loaded_skills": [],
+                "sub_goals": [],
+                "skill_gap_count": 0,
             }
 
             invoke_config = dict(config or {})

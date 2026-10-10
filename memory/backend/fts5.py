@@ -5,12 +5,14 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import uuid
 from datetime import datetime
 from typing import List, Optional
 
 from memory.backend.base import MemoryEntry, MemoryBackend
 from utils.app_paths import get_jieba_cache_dir
+from utils import sqlite_guard
 
 _log = logging.getLogger(__name__)
 
@@ -83,7 +85,20 @@ class FTS5Backend(MemoryBackend):
 
     def __init__(self, db_path: str):
         self._db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
+        # ── 每线程一个连接（2026-09-21）────────────────────────────
+        # 本后端是单例，但会被「事件循环线程 / asyncio worker 线程 / 记忆预热
+        # 线程 / 定时清理协程」同时使用。原先共用一个
+        # `sqlite3.connect(..., check_same_thread=False)`，`check_same_thread=False`
+        # 只关掉了 Python 层校验、**并不会让连接变线程安全**：并发 execute/reset
+        # 会互相踩（实测产出 `another row available` / `cannot commit - no
+        # transaction is active` 这类脏错误），也是同类 native 崩溃的风险面。
+        # 改为一连接一线程（与 server/monitoring/store.py、signal_eval/db.py
+        # 的既有写法一致），从构造上消除共享。
+        self._local = threading.local()
+        self._conns_lock = threading.Lock()
+        self._conns: List[sqlite3.Connection] = []
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
         self._init_db()
 
     def name(self) -> str:
@@ -93,127 +108,43 @@ class FTS5Backend(MemoryBackend):
         return True
 
     def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(
-                self._db_path, check_same_thread=False
-            )
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-        return self._conn
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite_guard.connect(self._db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            with self._conns_lock:
+                self._conns.append(conn)
+            self._local.conn = conn
+        if not self._schema_ready:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    self._init_db(conn)
+                    self._schema_ready = True
+        return conn
 
-    def _init_db(self):
-        conn = self._get_conn()
-        # FTS5 虚拟表 — 倒排索引，自动维护
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS semantic_memory_fts
-            USING fts5(
-                entry_id,
-                stock_code,
-                stock_name,
-                content_seg,
-                raw_content,
-                date,
-                tokenize='unicode61'
-            )
-        """)
-        # 元数据表 — 结构化字段，支持精确 SQL 查询
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS semantic_memory_meta (
-                entry_id        TEXT PRIMARY KEY,
-                stock_code      TEXT NOT NULL,
-                stock_name      TEXT NOT NULL,
-                sector_l1       TEXT,
-                sector_l2       TEXT,
-                pe              REAL,
-                roe             REAL,
-                volatility      TEXT,
-                tags            TEXT,
-                sentiment       TEXT,
-                source_query    TEXT,
-                date            TEXT NOT NULL,
-                access_count    INTEGER DEFAULT 0,
-                created_at      TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        # 情景记忆表
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS episode_log (
-                id              TEXT PRIMARY KEY,
-                session_id      TEXT,
-                dialog_uuid     TEXT,
-                date            TEXT NOT NULL,
-                query           TEXT NOT NULL,
-                topics          TEXT,
-                key_findings    TEXT,
-                conclusion      TEXT,
-                stocks_mentioned TEXT,
-                sectors_mentioned TEXT,
-                tags            TEXT,
-                trace_run_id    TEXT,
-                created_at      TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        # — v2 迁移：confidence / provenance / trace_run_id（幂等 ALTER TABLE）—
-        for col_sql in [
-            "ALTER TABLE semantic_memory_meta ADD COLUMN confidence REAL DEFAULT 0.5",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN confidence_factors TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN provenance TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN trace_run_id TEXT",
-            "ALTER TABLE episode_log ADD COLUMN confidence REAL DEFAULT 0.5",
-            # v2 M2：时效性/TTL
-            "ALTER TABLE semantic_memory_meta ADD COLUMN memory_category TEXT DEFAULT 'general'",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN ttl_days INTEGER DEFAULT 30",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN expires_at TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN last_validated_at TEXT",
-            # v2 M3：合并/冲突消解
-            "ALTER TABLE semantic_memory_meta ADD COLUMN superseded_by TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN superseded_at TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN supersede_reason TEXT",
-            "ALTER TABLE semantic_memory_meta ADD COLUMN subject_kind TEXT",
-        ]:
+    def close(self) -> None:
+        """关闭本后端创建过的全部连接（幂等；进程收尾用）。"""
+        with self._conns_lock:
+            conns, self._conns = list(self._conns), []
+        for conn in conns:
             try:
-                conn.execute(col_sql)
-            except sqlite3.OperationalError:
-                pass  # 列已存在
-
-        conn.execute(
-            "UPDATE semantic_memory_meta "
-            "SET superseded_by = NULL, superseded_at = NULL, supersede_reason = NULL "
-            "WHERE superseded_by = entry_id"
-        )
-
-        # v2 M3：冲突日志表
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conflict_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                new_entry_id    TEXT NOT NULL,
-                old_entry_id    TEXT NOT NULL,
-                conflict_type   TEXT NOT NULL,
-                old_value       TEXT,
-                new_value       TEXT,
-                detected_at     TEXT DEFAULT (datetime('now'))
-            )
-        """)
-
-        # 索引
-        for idx_sql in [
-            "CREATE INDEX IF NOT EXISTS idx_sem_stock ON semantic_memory_meta(stock_code)",
-            "CREATE INDEX IF NOT EXISTS idx_sem_date ON semantic_memory_meta(date)",
-            "CREATE INDEX IF NOT EXISTS idx_sem_sector ON semantic_memory_meta(sector_l2)",
-            "CREATE INDEX IF NOT EXISTS idx_sem_pe ON semantic_memory_meta(pe)",
-            "CREATE INDEX IF NOT EXISTS idx_epi_date ON episode_log(date)",
-            "CREATE INDEX IF NOT EXISTS idx_epi_session ON episode_log(session_id)",
-            # v2 新增索引
-            "CREATE INDEX IF NOT EXISTS idx_meta_confidence ON semantic_memory_meta(confidence DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_meta_trace ON semantic_memory_meta(trace_run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_meta_expires ON semantic_memory_meta(expires_at)",
-            "CREATE INDEX IF NOT EXISTS idx_meta_superseded ON semantic_memory_meta(superseded_by)",
-        ]:
-            try:
-                conn.execute(idx_sql)
-            except sqlite3.OperationalError:
+                conn.close()
+            except Exception:
                 pass
-        conn.commit()
+        self._local = threading.local()
+        self._schema_ready = False
+
+    def _init_db(self, conn: Optional[sqlite3.Connection] = None):
+        """建表/迁移走统一 schema（stock_memory 组，幂等加性）。
+
+        FTS5 虚拟表、元数据/情景/冲突日志表、v2 列迁移与依赖索引的单一事实源在
+        utils/db_schema/tables/memory.py。
+        """
+        from utils.db_schema.migrator import ensure_schema
+        from utils.db_schema.registry import ALL_DBS
+        d = ALL_DBS["stock_memory"]
+        ensure_schema(conn or self._get_conn(), d.tables, d.special_migrations)
 
     @staticmethod
     def _segment(text: str) -> str:
@@ -285,16 +216,20 @@ class FTS5Backend(MemoryBackend):
             "INSERT OR REPLACE INTO semantic_memory_meta "
             "(entry_id, stock_code, stock_name, sector_l1, sector_l2, "
             "pe, roe, volatility, tags, sentiment, source_query, date, "
+            "chunk_index, chunk_count, chunk_group_id, "
             "confidence, confidence_factors, provenance, trace_run_id, "
             "memory_category, ttl_days, expires_at, last_validated_at, "
             "superseded_by, superseded_at, supersede_reason, subject_kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (entry.entry_id, entry.stock_code, entry.stock_name,
              meta.get("sector_l1"), meta.get("sector_l2"),
              meta.get("pe"), meta.get("roe"),
              meta.get("volatility"), json.dumps(meta.get("tags", []), ensure_ascii=False),
              meta.get("sentiment"), meta.get("source_query"),
              meta.get("date", datetime.now().isoformat()),
+             int(meta.get("chunk_index") or 0),
+             int(meta.get("chunk_count") or 1),
+             meta.get("chunk_group_id") or None,
              entry.confidence,
              json.dumps(entry.confidence_factors, ensure_ascii=False) if entry.confidence_factors else None,
              json.dumps(entry.provenance, ensure_ascii=False) if entry.provenance else None,
@@ -324,7 +259,8 @@ class FTS5Backend(MemoryBackend):
                 "m.sector_l1, m.sector_l2, m.pe, m.roe, m.volatility, m.tags, m.sentiment, "
                 "m.source_query, m.confidence, m.confidence_factors, m.provenance, "
                 "m.memory_category, m.ttl_days, m.expires_at, m.last_validated_at, "
-                "m.superseded_by, m.subject_kind, m.superseded_at, m.supersede_reason "
+                "m.superseded_by, m.subject_kind, m.superseded_at, m.supersede_reason, "
+                "m.chunk_index, m.chunk_count, m.chunk_group_id "
                 "FROM semantic_memory_fts f "
                 "LEFT JOIN semantic_memory_meta m ON f.entry_id = m.entry_id "
                 "WHERE semantic_memory_fts MATCH ? "
@@ -345,6 +281,9 @@ class FTS5Backend(MemoryBackend):
                 "volatility": r[10], "sentiment": r[12],
                 "source_query": r[13] or "",
                 "subject_kind": r[22] if len(r) > 22 and r[22] else "",
+                "chunk_index": int(r[25] or 0) if len(r) > 25 else 0,
+                "chunk_count": int(r[26] or 1) if len(r) > 26 else 1,
+                "chunk_group_id": (r[27] if len(r) > 27 else "") or "",
             }
             try:
                 meta["tags"] = json.loads(r[11]) if r[11] else []
@@ -606,7 +545,8 @@ class FTS5Backend(MemoryBackend):
         rows = conn.execute(
             "SELECT f.entry_id, f.stock_code, f.stock_name, f.raw_content, f.date, "
             "m.sector_l1, m.sector_l2, m.pe, m.roe, m.tags, m.sentiment, m.source_query, "
-            "m.confidence, m.confidence_factors, m.provenance "
+            "m.confidence, m.confidence_factors, m.provenance, "
+            "m.chunk_index, m.chunk_count, m.chunk_group_id "
             "FROM semantic_memory_fts f "
             "LEFT JOIN semantic_memory_meta m ON f.entry_id = m.entry_id "
             "ORDER BY f.date DESC LIMIT ? OFFSET ?",
@@ -618,6 +558,9 @@ class FTS5Backend(MemoryBackend):
                 "date": r[4] or "",
                 "sector_l1": r[5], "sector_l2": r[6], "pe": r[7], "roe": r[8],
                 "sentiment": r[10], "source_query": r[11] or "",
+                "chunk_index": int(r[15] or 0) if len(r) > 15 else 0,
+                "chunk_count": int(r[16] or 1) if len(r) > 16 else 1,
+                "chunk_group_id": (r[17] if len(r) > 17 else "") or "",
             }
             try:
                 meta["tags"] = json.loads(r[9]) if r[9] else []
@@ -650,7 +593,8 @@ class FTS5Backend(MemoryBackend):
             "SELECT DISTINCT m.entry_id, m.stock_code, m.stock_name, f.raw_content, "
             "m.sector_l1, m.sector_l2, m.pe, m.roe, m.volatility, "
             "m.tags, m.sentiment, m.source_query, m.date, "
-            "m.confidence, m.confidence_factors, m.provenance, m.trace_run_id "
+            "m.confidence, m.confidence_factors, m.provenance, m.trace_run_id, "
+            "m.chunk_index, m.chunk_count, m.chunk_group_id, m.rowid "
             "FROM semantic_memory_meta m "
             "LEFT JOIN semantic_memory_fts f ON f.entry_id = m.entry_id "
             "ORDER BY m.date DESC LIMIT ?",
@@ -682,8 +626,30 @@ class FTS5Backend(MemoryBackend):
                 "confidence_factors": confidence_factors,
                 "provenance": provenance,
                 "trace_run_id": r[16] or "",
+                "chunk_index": int(r[17] or 0) if len(r) > 17 else 0,
+                "chunk_count": int(r[18] or 1) if len(r) > 18 else 1,
+                "chunk_group_id": (r[19] if len(r) > 19 else "") or "",
+                "rowid": r[20] if len(r) > 20 else 0,
             })
         return out
+
+    def backfill_chunk_columns(self, records) -> int:
+        """回填 chunk 元数据列（存量数据修复）。
+
+        records: 可迭代 ``(chunk_index, chunk_count, chunk_group_id, entry_id)``。
+        幂等由调用方按需控制（默认不带 where，直接覆盖）。
+        """
+        conn = self._get_conn()
+        n = 0
+        for chunk_index, chunk_count, chunk_group_id, entry_id in records:
+            conn.execute(
+                "UPDATE semantic_memory_meta SET chunk_index=?, chunk_count=?, chunk_group_id=? "
+                "WHERE entry_id=?",
+                (int(chunk_index), int(chunk_count), chunk_group_id, entry_id),
+            )
+            n += 1
+        conn.commit()
+        return n
 
     def get_by_stock(self, stock_code: str, limit: int = 50) -> List[MemoryEntry]:
         """按股票代码列出历史记忆"""
@@ -692,7 +658,8 @@ class FTS5Backend(MemoryBackend):
             "SELECT f.entry_id, f.stock_code, f.stock_name, f.raw_content, f.date, "
             "m.source_query, m.confidence, m.confidence_factors, m.provenance, "
             "m.memory_category, m.ttl_days, m.expires_at, m.last_validated_at, "
-            "m.superseded_by, m.superseded_at, m.supersede_reason, m.subject_kind "
+            "m.superseded_by, m.superseded_at, m.supersede_reason, m.subject_kind, "
+            "m.chunk_index, m.chunk_count, m.chunk_group_id "
             "FROM semantic_memory_fts f "
             "LEFT JOIN semantic_memory_meta m ON f.entry_id = m.entry_id "
             "WHERE f.stock_code = ? "
@@ -715,6 +682,9 @@ class FTS5Backend(MemoryBackend):
                     "date": r[4] or "",
                     "source_query": r[5] or "",
                     "subject_kind": r[16] or "",
+                    "chunk_index": int(r[17] or 0) if len(r) > 17 else 0,
+                    "chunk_count": int(r[18] or 1) if len(r) > 18 else 1,
+                    "chunk_group_id": (r[19] if len(r) > 19 else "") or "",
                 },
                 confidence=r[6] if r[6] is not None else 0.5,
                 confidence_factors=confidence_factors,

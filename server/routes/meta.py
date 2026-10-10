@@ -6,7 +6,9 @@ import threading
 from time import monotonic
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -182,8 +184,17 @@ def _build_datasources_payload() -> dict[str, Any]:
             "available": info.get("available", False),
             "priority": info.get("priority", 0),
         })
-    items.sort(key=lambda x: x["priority"], reverse=True)
-    return {"sources": items}
+    # 按当前生效顺序排列（用户自定义优先；未自定义时=内置 priority 降序）
+    order = DataSourceManager.get_order()
+    rank = {n: i for i, n in enumerate(order)}
+    for it in items:
+        it["order_index"] = rank.get(it["name"], len(rank))
+    items.sort(key=lambda x: x["order_index"])
+    return {
+        "sources": items,
+        "order": order,
+        "customized": DataSourceManager.order_is_customized(),
+    }
 
 
 def _get_datasources_payload(refresh: bool = False) -> dict[str, Any]:
@@ -204,17 +215,97 @@ def _get_datasources_payload(refresh: bool = False) -> dict[str, Any]:
 
 @router.get("/api/modes")
 async def modes():
-    return _get_modes_payload()
+    # 同步体进线程池：_build_modes_payload 首调会懒加载 agents 重包，
+    # 若在事件循环线程直接执行，预热期会撞 agent-warmup 的 import 锁（2026-10-01 冻站）
+    return await run_in_threadpool(_get_modes_payload)
 
 
 @router.get("/api/datasources")
 async def datasources(refresh: bool = False):
-    return _get_datasources_payload(refresh=refresh)
+    # 同步体进线程池：首调懒加载 tools.fetcher，预热期撞 skill-warmup import 锁
+    return await run_in_threadpool(_get_datasources_payload, refresh=refresh)
+
+
+class DatasourceOrderRequest(BaseModel):
+    """数据源优先级顺序（按拖拽后的从前到后）。
+
+    names 为空列表 = 恢复内置 priority。
+    """
+    names: list[str] = []
+
+
+def _invalidate_datasources_cache() -> None:
+    global _datasources_payload_cache
+    with _datasources_cache_lock:
+        _datasources_payload_cache = None
+
+
+def _apply_datasource_order(names: list[str]) -> list[str]:
+    """校验 → 去重 → 补全未列出的源 → 持久化 .env → 运行时生效。"""
+    from tools.fetcher import _ensure_initialized
+    _ensure_initialized()
+    from tools.fetcher.base import DataSourceManager
+
+    known = [s.name for s in DataSourceManager._sources]
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"未知数据源: {unknown}")
+
+    # 去重保序，并把未列出的源按现有顺序补在其后（保证顺序完整、可预期）
+    ordered: list[str] = []
+    for n in names:
+        if n not in ordered:
+            ordered.append(n)
+    for n in DataSourceManager.get_order():
+        if n not in ordered:
+            ordered.append(n)
+
+    # 持久化（空列表 = 清空该键，回到内置 priority）
+    try:
+        from utils.config_manager import ConfigManager
+        from utils.env_helper import get_env_path
+
+        ConfigManager().write_env_changes(
+            {"DATASOURCE_PRIORITY_ORDER": ",".join(ordered) if names else ""},
+            get_env_path(),
+        )
+    except Exception as e:
+        logger.warning("DATASOURCE: 持久化优先级顺序失败（仅本次运行生效）: %s", e)
+
+    applied = DataSourceManager.set_order(ordered if names else [])
+    _invalidate_datasources_cache()
+    logger.info("DATASOURCE: 优先级顺序已更新 → %s", applied)
+    return applied
+
+
+@router.put("/api/datasources/order")
+async def set_datasource_order(payload: DatasourceOrderRequest):
+    """保存数据源优先级顺序（系统配置面板拖拽调整后调用）。"""
+    try:
+        applied = _apply_datasource_order(payload.names or [])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"应用顺序失败: {e}")
+    return {"success": True, "order": applied,
+            "customized": bool(payload.names)}
+
+
+@router.delete("/api/datasources/order")
+async def reset_datasource_order():
+    """恢复内置优先级（清除自定义顺序）。"""
+    applied = _apply_datasource_order([])
+    return {"success": True, "order": applied, "customized": False}
 
 
 @router.get("/api/agents")
 async def agents(mode: str = None):
     """获取 agent 信息。mode=agent_group 时返回 sub-agents 列表。"""
+    # 整体进线程池：懒加载 agents 重包 + 遍历注册表，不在事件循环执行（预热期撞 import 锁）
+    return await run_in_threadpool(_build_agents_payload, mode)
+
+
+def _build_agents_payload(mode: str = None) -> dict:
     from agents import AgentFactory
     from agents.factory import AgentFactory as AF
 

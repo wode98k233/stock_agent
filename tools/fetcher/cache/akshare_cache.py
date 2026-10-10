@@ -29,17 +29,11 @@ def _get_db():
 
 
 def _init_db():
-    """初始化缓存表"""
+    """初始化缓存表（DDL 统一来源 utils/db_schema）"""
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.registry import ALL_DBS
     with _get_db() as conn:
-        c = conn.cursor()
-        # 千股千评全量数据缓存表
-        c.execute('''CREATE TABLE IF NOT EXISTS comment_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data_json TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours REAL NOT NULL
-        )''')
+        ensure_schema(conn, ALL_DBS["akshare_cache"].tables)
 
 
 # 初始化数据库

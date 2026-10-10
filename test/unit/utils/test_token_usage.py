@@ -1,9 +1,14 @@
 """
 TokenUsage 统一提取模块测试
-覆盖 5 种来源、标准字段一致性、normalize 旧数据、缓存字段提取
+覆盖 5 种来源、标准字段一致性、normalize 旧数据、缓存字段提取、模型名提取
 """
 import pytest
-from utils.token_usage import extract_token_usage, normalize_token_usage_dict, _extract_cache_fields
+from utils.token_usage import (
+    extract_model_name,
+    extract_token_usage,
+    normalize_token_usage_dict,
+    _extract_cache_fields,
+)
 
 
 class MockLLMOutput:
@@ -422,3 +427,44 @@ class TestReasoningTokens:
     def test_zero_usage_has_reasoning_key(self):
         from utils.token_usage import _ZERO_USAGE
         assert _ZERO_USAGE["reasoning_tokens"] == 0
+
+
+class TestExtractModelName:
+    """extract_model_name — 按上游模型统计 token 的提取入口"""
+
+    def test_from_llm_output_model_name(self):
+        """langchain-openai 标准字段 llm_output.model_name"""
+        resp = MockLLMOutput(llm_output={
+            "model_name": "gpt-4o-2024-08-06",
+            "token_usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        })
+        assert extract_model_name(resp) == "gpt-4o-2024-08-06"
+
+    def test_from_llm_output_model_alias(self):
+        """部分 provider 只给 llm_output.model"""
+        resp = MockLLMOutput(llm_output={"model": "glm-4-flash"})
+        assert extract_model_name(resp) == "glm-4-flash"
+
+    def test_from_response_metadata(self):
+        """llm_output 缺失时回退 generations 里消息的 response_metadata"""
+        msg = MockMessage(response_metadata={"model_name": "deepseek-chat"})
+        resp = MockLLMOutput(generations=[[MockGen(msg)]])
+        assert extract_model_name(resp) == "deepseek-chat"
+
+    def test_llm_output_takes_priority(self):
+        """llm_output 优先于 response_metadata（网关降级时以服务方回报为准）"""
+        msg = MockMessage(response_metadata={"model_name": "fallback-model"})
+        resp = MockLLMOutput(
+            llm_output={"model_name": "primary-model"},
+            generations=[[MockGen(msg)]],
+        )
+        assert extract_model_name(resp) == "primary-model"
+
+    def test_missing_returns_empty(self):
+        """都缺失时返回空串（调用方按 unknown 处理）"""
+        assert extract_model_name(MockLLMOutput()) == ""
+        assert extract_model_name(MockLLMOutput(llm_output={})) == ""
+
+    def test_none_llm_output(self):
+        """llm_output=None 不报错"""
+        assert extract_model_name(MockLLMOutput(llm_output=None)) == ""

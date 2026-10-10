@@ -14,6 +14,7 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
     this.addBtn = document.getElementById('watchlistAddBtn');
     this.syncBtn = document.getElementById('watchlistSyncBtn');
     this.refreshBtn = document.getElementById('watchlistRefreshBtn');
+    this.scanBtn = document.getElementById('watchlistScanBtn');
     this.sourceDropdown = document.getElementById('wlSourceDropdown');
     this.sourceTrigger = document.getElementById('wlSourceTrigger');
     this.sourceLabel = document.getElementById('wlSourceLabel');
@@ -32,13 +33,34 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
   open() {
     this.overlayEl.classList.add('open');
     this.modalEl.classList.add('open');
-    this._load();
+    // 打开时拉一次实时行情：列表里展示的多是入库时的陈旧价
+    this._load().then(() => this._refreshAll());
+  }
+
+  // 面板内统一提示（复用盯盘面板的浮层）
+  _toast(text, kind = 'info') {
+    const u = window.StockRadar && window.StockRadar.utils;
+    if (u && typeof u.toast === 'function') u.toast(text, kind);
   }
 
   close() {
     this.overlayEl.classList.remove('open');
     this.modalEl.classList.remove('open');
     this._closeSourceDropdown();
+  }
+
+  // 批量策略扫描（跳转回测面板：全部自选批量回测）
+  _openScan() {
+    const bt = typeof window.initBacktestPanel === 'function' && window.initBacktestPanel();
+    if (!bt || !bt.openScanWithCodes) {
+      this._toast('回测面板未加载（backtest.js）', 'error');
+      return;
+    }
+    const codes = (this.items || [])
+      .filter(s => (s.market || 'cn') === 'cn')
+      .map(s => s.stock_code);
+    if (!codes.length) { this._toast('自选为空，无法扫描', 'warn'); return; }
+    bt.openScanWithCodes(codes);
   }
 
   _bindEvents() {
@@ -54,6 +76,7 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
     });
     this.syncBtn.onclick = () => this._syncFromMX();
     this.refreshBtn.onclick = () => this._refreshAll();
+    if (this.scanBtn) this.scanBtn.onclick = () => this._openScan();
 
     this.sourceTrigger.addEventListener('click', () => this._toggleSourceDropdown());
     this.sourceTrigger.addEventListener('keydown', (e) => {
@@ -357,7 +380,8 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
         }
       }
     } catch (e) {
-      console.warn('刷新失败:', code, e);
+      // 单股刷新失败只提示一次，不打断面板
+      this._toast(`刷新行情失败：${e.message || e}`, 'error');
     }
     if (btn) btn.classList.remove('spinning');
   }
@@ -375,7 +399,7 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
         this._render();
       }
     } catch (e) {
-      console.warn('刷新行情失败:', e);
+      this._toast(`刷新行情失败：${e.message || e}`, 'error');
     }
     this.refreshBtn.classList.remove('refreshing');
   }
@@ -390,18 +414,20 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
       await this._load();
       await this._refreshOne(code, this.refreshBtn);
     } catch (e) {
-      alert('添加失败: ' + e.message);
+      this._toast(`添加失败：${e.message || e}`, 'error');
     }
     this.addBtn.disabled = false;
   }
 
   async _removeStock(code, market) {
+    if (!confirm(`从自选股删除 ${code}？`)) return;
     try {
       await window.StockRadar.api.deleteWatchlist(code, market);
       delete this.quotes[code];
       await this._load();
+      this._toast('已从自选股删除', 'ok');
     } catch (e) {
-      alert('删除失败: ' + e.message);
+      this._toast(`删除失败：${e.message || e}`, 'error');
     }
   }
 
@@ -411,11 +437,12 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
       const result = await window.StockRadar.api.syncWatchlist();
       if (result.success) {
         await this._load();
+        this._toast(`已同步 ${result.count || 0} 只自选股`, 'ok');
       } else {
-        alert('同步失败: ' + (result.error || '未知错误'));
+        this._toast(`同步失败：${result.error || '未知错误'}`, 'error');
       }
     } catch (e) {
-      alert('同步失败: ' + e.message);
+      this._toast(`同步失败：${e.message || e}`, 'error');
     }
     this.syncBtn.classList.remove('syncing');
   }

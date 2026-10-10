@@ -76,8 +76,13 @@ class TestMacroAnalyst:
         agent = MacroAnalyst()
         assert agent.agent_name == "macro_analyst"
         assert agent.display_name == "宏观分析师"
-        assert "宏观" in agent.description or "资金" in agent.description
-        assert "mx_data" in agent.assigned_skills
+        assert "宏观" in agent.description
+        # 2026-09-06 重写为真宏观：macro_data 技能绑定（M2/LPR/CPI 定量时序），
+        # mx_data（行情类）不再是宏观职责
+        assert "macro_data" in agent.assigned_skills
+        assert "mx_search" in agent.assigned_skills
+        # 去 stock_code 硬依赖：纯宏观问题也可被 planner 分派
+        assert agent.required_inputs == []
 
     def test_system_prompt_content(self):
         from agents.group.subagents.macro_analyst import MacroAnalyst
@@ -186,7 +191,11 @@ class TestCrossAgentConsistency:
 
     def test_all_skills_include_mx_data(self, agent_class):
         a = agent_class()
-        assert "mx_data" in a.assigned_skills, f"{agent_class.__name__} 缺少 mx_data"
+        if a.agent_name == "macro_analyst":
+            # 2026-09-06 重写为真宏观：macro_data 替代 mx_data（行情类不再是宏观职责）
+            assert "macro_data" in a.assigned_skills, "macro_analyst 缺少 macro_data"
+        else:
+            assert "mx_data" in a.assigned_skills, f"{agent_class.__name__} 缺少 mx_data"
 
     def test_all_have_system_prompt(self, agent_class):
         a = agent_class()

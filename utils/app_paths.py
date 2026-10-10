@@ -19,6 +19,50 @@ def get_app_dir() -> str:
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+_db_migration_done = False
+
+
+def get_db_dir() -> str:
+    """获取数据库统一目录（全部 *.db 集中存放于此）"""
+    _ensure_db_migration()
+    d = os.path.join(get_app_dir(), 'db')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _ensure_db_migration():
+    """启动兜底：把 app 根目录残留的旧位置 *.db 迁入 db/（含 -wal/-shm 附属）。
+
+    仅执行一次；目标已存在则跳过，防止覆盖更新的文件。Windows 下若文件被占用
+    （os.replace 抛 OSError）则静默失败，下次启动再试。
+    """
+    global _db_migration_done
+    if _db_migration_done:
+        return
+    _db_migration_done = True
+    app_dir = get_app_dir()
+    db_dir = os.path.join(app_dir, 'db')
+    if not os.path.isdir(app_dir):
+        return
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+        for fname in os.listdir(app_dir):
+            if not (fname.endswith('.db') or fname.endswith('.db-wal') or fname.endswith('.db-shm')):
+                continue
+            if fname == 'data_monitor.db':
+                continue
+            src = os.path.join(app_dir, fname)
+            dst = os.path.join(db_dir, fname)
+            if os.path.exists(dst):
+                continue
+            try:
+                os.replace(src, dst)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def get_resource_root() -> str:
     """获取打包资源根目录。
 
@@ -40,22 +84,22 @@ def ensure_app_dirs():
 
 def get_db_path() -> str:
     """获取主数据库路径"""
-    return os.path.join(get_app_dir(), 'stock_radar.db')
+    return os.path.join(get_db_dir(), 'stock_radar.db')
 
 
 def get_baostock_cache_path() -> str:
     """获取 baostock 缓存数据库路径"""
-    return os.path.join(get_app_dir(), 'baostock_cache.db')
+    return os.path.join(get_db_dir(), 'baostock_cache.db')
 
 
 def get_checkpoint_db_path() -> str:
     """获取 checkpoint 数据库路径"""
-    return os.path.join(get_app_dir(), 'checkpoint.db')
+    return os.path.join(get_db_dir(), 'checkpoint.db')
 
 
 def get_akshare_cache_path() -> str:
     """获取 akshare 缓存数据库路径"""
-    return os.path.join(get_app_dir(), 'akshare_cache.db')
+    return os.path.join(get_db_dir(), 'akshare_cache.db')
 
 
 def get_logs_dir() -> str:
@@ -68,13 +112,20 @@ def get_agents_dir() -> str:
 
 
 def get_trace_db_path() -> str:
-    """获取调用链追踪数据库路径"""
-    return os.path.join(get_app_dir(), 'agent_trace.db')
+    """获取调用链追踪主库路径（仅 reviews；runs/steps/messages 按月拆到 get_trace_dir()）。"""
+    return os.path.join(get_db_dir(), 'agent_trace.db')
+
+
+def get_trace_dir() -> str:
+    """获取调用链追踪月库目录（db/agent_trace/agent_trace_YYYYMM.db）。"""
+    d = os.path.join(get_db_dir(), 'agent_trace')
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def get_eval_db_path() -> str:
     """获取评测数据库路径"""
-    return os.path.join(get_app_dir(), 'eval.db')
+    return os.path.join(get_db_dir(), 'eval.db')
 
 
 def get_skills_root() -> str:
@@ -124,32 +175,67 @@ def get_agent_trace_viewer_dir() -> str:
 
 def get_market_data_db_path() -> str:
     """获取行情数据库路径"""
-    return os.path.join(get_app_dir(), 'market_data.db')
+    return os.path.join(get_db_dir(), 'market_data.db')
 
 
 def get_fundamental_db_path() -> str:
     """获取基本面数据库路径"""
-    return os.path.join(get_app_dir(), 'fundamental_cache.db')
+    return os.path.join(get_db_dir(), 'fundamental_cache.db')
 
 
 def get_market_cache_db_path() -> str:
     """获取市场缓存数据库路径"""
-    return os.path.join(get_app_dir(), 'market_cache.db')
+    return os.path.join(get_db_dir(), 'market_cache.db')
 
 
 def get_backtest_db_path() -> str:
     """获取回测数据库路径"""
-    return os.path.join(get_app_dir(), 'backtest.db')
+    return os.path.join(get_db_dir(), 'backtest.db')
 
 
 def get_signal_eval_db_path() -> str:
     """获取 AI 信号评测数据库路径"""
-    return os.path.join(get_app_dir(), 'signal_eval.db')
+    return os.path.join(get_db_dir(), 'signal_eval.db')
+
+
+def get_monitor_alerts_db_path() -> str:
+    """获取盯盘告警数据库路径（规则 + 告警历史，独立于 stock_radar.db 零锁冲突）"""
+    return os.path.join(get_db_dir(), 'monitor_alerts.db')
 
 
 def get_stock_memory_db_path() -> str:
     """获取记忆系统数据库路径（语义记忆 + 情景记忆 + 用户画像统计）"""
-    return os.path.join(get_app_dir(), 'stock_memory.db')
+    return os.path.join(get_db_dir(), 'stock_memory.db')
+
+
+def get_data_monitor_db_path() -> str:
+    """获取数据监控快照库路径（快照 + 资产元数据，独立于业务库）"""
+    return os.path.join(get_db_dir(), 'data_monitor.db')
+
+
+def get_shortline_db_path() -> str:
+    """获取短线情绪观测库路径（每日情绪温度快照，独立于业务库）"""
+    return os.path.join(get_db_dir(), 'shortline.db')
+
+
+def get_thesis_db_path() -> str:
+    """获取研究台账库路径（台账定义留痕 + 读数快照 + 变更告警，独立于业务库）"""
+    return os.path.join(get_db_dir(), 'thesis.db')
+
+
+def get_crowding_db_path() -> str:
+    """获取拥挤度扫描库路径（扫描批次 + 标的明细 + 采集游标，独立于业务库）"""
+    return os.path.join(get_db_dir(), 'crowding.db')
+
+
+def get_crowding_pool_path() -> str:
+    """获取拥挤度标的池配置路径（可手改、进版本管理；缺失时用内置默认池）"""
+    return os.path.join(get_app_dir(), 'data', 'crowding', 'pool.json')
+
+
+def get_data_monitor_config_path() -> str:
+    """获取数据监控配置文件路径（扫描路径/保留期/清理阈值）"""
+    return os.path.join(get_app_dir(), 'data_monitor_config.json')
 
 
 def get_memory_config_path() -> str:

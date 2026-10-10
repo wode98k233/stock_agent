@@ -423,30 +423,39 @@ def test_run_concurrent_execution(setup_test_db):
     ])
 
     thread_names = []
+    spans = []          # 每个任务的 (start, end)，用 perf_counter 记录
     lock = threading.Lock()
 
     def fake_run(config, run_id=None, progress_callback=None):
         with lock:
             thread_names.append(threading.current_thread().name)
+            t0 = time.perf_counter()
         time.sleep(0.3)
+        t1 = time.perf_counter()
+        with lock:
+            spans.append((t0, t1))
         return _make_fake_engine_result(run_id)
 
     with patch('backtest.batch_engine.BacktestEngine') as MockEngine:
         MockEngine.return_value.run.side_effect = fake_run
         engine = BatchBacktestEngine(max_concurrency=5)
-        start = time.time()
         engine.run(
             codes=['A', 'B', 'C'],
             config={'concurrency': 3},
             batch_id='BTB-RUN-CONC',
             run_ids=['R-A', 'R-B', 'R-C'],
         )
-        elapsed = time.time() - start
 
-    # 3 个任务并发 0.3s 应在 0.6s 内完成（容忍调度开销）
-    assert elapsed < 0.9, f'未并发: elapsed={elapsed:.2f}s'
     # 3 个任务在不同的线程中执行
     assert len(set(thread_names)) == 3
+    # 并发的确定性证据：3 个任务的执行窗口相互重叠（max(start) < min(end)）。
+    # 不用墙钟阈值（elapsed < 0.9s）—— 在 pytest -n 8 满载下，线程调度抖动会把它
+    # 推过阈值造成误报（2026-10-02 实测并行全量时挂这里）；窗口重叠才是"真并发"
+    # 的充要证据，且对负载免疫：若实现退化成串行，窗口必然首尾相接、断言即失败。
+    starts = [s for s, _ in spans]
+    ends = [e for _, e in spans]
+    assert spans and max(starts) < min(ends), \
+        f'任务执行窗口无重叠 → 实际未并发: spans={[(round(s,2), round(e,2)) for s, e in spans]}'
 
 
 def test_run_progress_callback_invocation(setup_test_db):

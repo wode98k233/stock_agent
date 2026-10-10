@@ -11,6 +11,7 @@
 数据口径与 build_run_kline 一致：_load_stock_daily(auto_heal=False) + _apply_adjustment
 """
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -19,8 +20,42 @@ import pandas as pd
 
 from backtest.data_adapter import _load_stock_daily, _apply_adjustment, _normalize_columns
 from backtest.strategies import get_strategy_class
+from utils.cache.market_data_db import get_latest_trade_date, refresh_stale_tail
+from utils.trading_calendar import get_effective_trading_date
 
 logger = logging.getLogger(__name__)
+
+# 预补尾**环状游标**：记住上一轮挑到 codes 的哪个位置，下一轮从那里往后接着挑。
+#
+# 为什么需要：已补成功的码下一轮不再落后、会自然轮换；但**持续失败**的码
+# （数据源抖动、上游缺失）会一直留在落后面。若每轮都「从 codes 首位取前 N」，
+# 这些码就会长期霸占名额，排在后面的码永远轮不到——2026-09-30 实测：
+# 67/74 只落后、每轮只补 6 只，`513330` 排第 34 位，大屏长期显示「数据截止 09-29」。
+_TAIL_CURSOR: Dict[str, int] = {"idx": 0}
+
+
+def _pick_stale_codes(codes: List[str], effective: str, limit: int) -> List[str]:
+    """按环状游标挑出最多 `limit` 个落后于 `effective` 的代码，并推进游标。
+
+    游标按「扫描过的位置数」推进（而非挑中的数量），保证即使某段全是新鲜码
+    也能继续往前走，不会卡死在同一段。
+    """
+    n = len(codes)
+    if n == 0 or limit <= 0:
+        return []
+    start = _TAIL_CURSOR.get("idx", 0) % n
+    picked: List[str] = []
+    scanned = 0
+    for k in range(n):
+        c = codes[(start + k) % n]
+        scanned = k + 1
+        latest = get_latest_trade_date(c)
+        if not latest or str(latest) < effective:
+            picked.append(c)
+            if len(picked) >= limit:
+                break
+    _TAIL_CURSOR["idx"] = (start + scanned) % n
+    return picked
 
 
 class SignalScanner:
@@ -64,6 +99,12 @@ class SignalScanner:
         params = params or {}
         start_date, end_date = self._resolve_dates(start_date, end_date, days)
 
+        # 0. 读取侧补尾：本地缓存落后于最近已完成交易日时先拉缺口（失败静默）
+        try:
+            refresh_stale_tail(code)
+        except Exception:
+            logger.debug("[scan] %s 尾部补齐异常（继续用本地缓存）", code, exc_info=True)
+
         # 1. 加载策略类
         strategy_cls = get_strategy_class(strategy_id)
 
@@ -106,6 +147,120 @@ class SignalScanner:
             'indicators': indicators,
         }
 
+    def scan_many(self, codes, strategy_ids=None, *, days: int = 120,
+                  adjust_type: str = 'qfq', max_workers: int = 4,
+                  progress=None, refresh_stale_max: int = 0,
+                  refresh_stale_budget_s: float = 0.0) -> Dict[str, Any]:
+        """批量无状态信号扫描：K 线按 code 只加载一次，逐策略复用。
+
+        Args:
+            refresh_stale_max: 扫描前预补尾上限（码；0=关闭，既有调用方行为不变）。
+                按环状游标对落后于最近已完成交易日的标的逐个补尾，失败静默。
+            refresh_stale_budget_s: 补尾阶段的**时间上限**（秒；0=不限）。
+                强烈建议调用方给一个有界值——补尾是网络密集的串行操作，
+                不限时会让它吃光整个块预算，导致「块已判超时、worker 还在跑、
+                进度事件迟到且最终结果被丢弃」。见下方注释。
+
+        Returns:
+            {code: {"hits": [{"strategy_id","date","latest"}],
+                    "sells": [{"strategy_id","date","latest"}],
+                    "latest_date": str, "closes": [近 5 日收盘], "error": str|None}}
+            hits/sells 分别仅保留最近 5 根 bar 内的最近一次买/卖点；
+            单个 code 失败不影响整批（失败分支 hits/sells 均为空列表）。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from backtest.strategies import get_all_strategies
+
+        strategies = (list(strategy_ids) if strategy_ids is not None
+                      else list(get_all_strategies().keys()))
+        codes = list(dict.fromkeys(codes))
+        start_date, end_date = self._resolve_dates(None, None, days)
+        results: Dict[str, Any] = {}
+        done = 0
+
+        # 扫描前预补尾：最多 refresh_stale_max 个落后码（环状游标推进）。
+        # 整体 try/except：补尾本身异常不得影响扫描主流程。
+        if refresh_stale_max and refresh_stale_max > 0:
+            try:
+                effective = get_effective_trading_date("cn").isoformat()
+                stale_codes = _pick_stale_codes(codes, effective, int(refresh_stale_max))
+                n_stale = len(stale_codes)
+                budget_t0 = time.monotonic()
+                for i, c in enumerate(stale_codes, 1):
+                    # 预算检查放在**每只之前**：宁可少补几只（环状游标保证下轮从
+                    # 别处继续），也不能让补尾把块预算吃光——那样块会先判超时，
+                    # 而 worker 仍在跑、进度迟到、结果被丢弃（2026-09-30 实测症状）。
+                    if refresh_stale_budget_s and (time.monotonic() - budget_t0) > refresh_stale_budget_s:
+                        if progress:
+                            try:
+                                progress(0, len(codes),
+                                         f"补尾预算 {refresh_stale_budget_s:.0f}s 用尽，"
+                                         f"{n_stale - i + 1} 只顺延")
+                            except Exception:
+                                pass
+                        break
+                    # ⚠️ 补尾必须发进度：这一段是**串行网络请求**（单只 1~3s，源抖动时更久），
+                    # 原实现整段静默——用户看到的就是「大屏卡了几分钟、日志一行没有」，
+                    # 随后才突然冒出扫描进度。
+                    if progress:
+                        try:
+                            progress(0, len(codes), f"补尾 {i}/{n_stale} {c}")
+                        except Exception:
+                            pass
+                    refresh_stale_tail(c)
+            except Exception:
+                logger.debug("[scan_many] 预补尾失败（继续扫描）", exc_info=True)
+
+        def _one(code: str):
+            try:
+                df = _load_stock_daily(code, start_date, end_date, auto_heal=False)
+                if df is None or df.empty:
+                    return code, {"hits": [], "sells": [], "latest_date": "",
+                                  "closes": [], "error": "无K线数据"}
+                if adjust_type in ('qfq', 'hfq'):
+                    df = _apply_adjustment(df, code, adjust_type)
+                df = df.tail(days).copy()
+                kline = self._build_kline(df)
+                dates = [k.get("date") for k in kline]
+                latest_date = dates[-1] if dates else ""
+                window = set(dates[-5:])
+                hits, sells = [], []
+                for sid in strategies:
+                    try:
+                        sigs = self._run_scan(get_strategy_class(sid), df, {})
+                    except Exception:
+                        logger.debug("[scan_many] %s × %s 扫描异常（跳过）", code, sid,
+                                     exc_info=True)
+                        continue
+                    hit = next((s for s in reversed(sigs) if s.get("buy")), None)
+                    if hit and hit.get("date") in window:
+                        hits.append({"strategy_id": sid, "date": hit["date"],
+                                     "latest": hit["date"] == latest_date})
+                    sell = next((s for s in reversed(sigs) if s.get("sell")), None)
+                    if sell and sell.get("date") in window:
+                        sells.append({"strategy_id": sid, "date": sell["date"],
+                                      "latest": sell["date"] == latest_date})
+                closes = [k.get("close") for k in kline[-5:] if k.get("close") is not None]
+                return code, {"hits": hits, "sells": sells, "latest_date": latest_date,
+                              "closes": closes, "error": None}
+            except Exception as e:
+                logger.warning("[scan_many] %s 扫描失败: %s", code, e)
+                return code, {"hits": [], "sells": [], "latest_date": "",
+                              "closes": [], "error": str(e)}
+
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as ex:
+            futures = [ex.submit(_one, c) for c in codes]
+            for fut in as_completed(futures):
+                code, payload = fut.result()
+                results[code] = payload
+                done += 1
+                if progress:
+                    try:
+                        progress(done, len(codes), code)
+                    except Exception:
+                        pass
+        return results
+
     # -----------------------------------------------------------
     # 内部方法
     # -----------------------------------------------------------
@@ -139,12 +294,51 @@ class SignalScanner:
         return kline
 
     @staticmethod
+    def _min_bars_required(strategy_cls, params: Dict[str, Any]) -> int:
+        """探测策略所需的指标最小周期（最小 K 线根数）。
+
+        必须在 `runonce=False` 下用 1 根占位 K 线真实跑一次：
+        - 未 run 时 `cerebro.strats[0][0][0]` 拿到的是 MetaStrategy 类而非实例，
+          `_minperiod` 恒为 1（实测），据此判断会让守卫完全失效；
+        - `runonce=False` 走向量 next() 模式，1 根 K 线也不会越界，可安全探测。
+        探测失败返回 0（表示未知），调用方跳过预检、交由 backtrader 处理。
+        """
+        try:
+            probe_df = pd.DataFrame({
+                'trade_date': [datetime(2000, 1, 1)],
+                'open': [1.0], 'high': [1.0], 'low': [1.0],
+                'close': [1.0], 'volume': [0.0],
+            })
+            cerebro = bt.Cerebro(stdstats=False, runonce=False)
+            cerebro.adddata(bt.feeds.PandasData(dataname=probe_df,
+                                                datetime='trade_date'))
+            cerebro.addstrategy(strategy_cls, _scan_mode=True, **params)
+            strat = cerebro.run()[0]
+            return int(getattr(strat, '_minperiod', 0) or 0)
+        except Exception:
+            logger.debug("[_run_scan] 探测最小周期失败（跳过预检）", exc_info=True)
+            return 0
+
+    @staticmethod
     def _run_scan(strategy_cls, df: pd.DataFrame,
                   params: Dict[str, Any]) -> List[Dict[str, Any]]:
         """用 backtrader 跑 scan 模式，返回信号日志"""
         # 复制 df 避免 _normalize_columns 修改原 df（kline 和 indicators 用原 df）
         bt_df = df.copy()
         bt_df = _normalize_columns(bt_df)
+
+        # 预检：K 线根数不足指标最小周期时直接返回空信号。
+        # 原因：backtrader 默认 runonce=True 走向量化 once()，当 len(data) < minperiod
+        # 时 SMA.once() 的 `dst[i] = ...` 会抛 IndexError（array assignment index
+        # out of range），且在批量扫描中被 except 吞掉，表现为"该标的永远无信号"。
+        # 指标未成型时任何读数都无意义，因此在此显式短路。
+        min_bars = SignalScanner._min_bars_required(strategy_cls, params)
+        if min_bars > 0 and len(bt_df) < min_bars:
+            logger.debug(
+                "[_run_scan] K线不足最小周期，跳过：len=%d < minperiod=%d",
+                len(bt_df), min_bars,
+            )
+            return []
 
         data = bt.feeds.PandasData(
             dataname=bt_df,
@@ -153,13 +347,15 @@ class SignalScanner:
             volume='volume', openinterest=-1,
         )
 
-        cerebro = bt.Cerebro()
+        cerebro = bt.Cerebro(stdstats=False)
         cerebro.adddata(data)
         # _scan_mode=True → on_bar 只记录不交易；只传策略自身参数
         cerebro.addstrategy(strategy_cls, _scan_mode=True, **params)
         cerebro.broker.setcash(1_000_000)  # scan 不交易，金额无实际意义
 
-        results = cerebro.run()
+        # runonce=False：走 next() 逐 bar 模式，避免 once() 向量化在边界
+        # （数据长度恰等于 minperiod）时的越界；实测信号值与 runonce=True 逐条一致。
+        results = cerebro.run(runonce=False)
         strat = results[0]
         return strat.get_signal_log()
 

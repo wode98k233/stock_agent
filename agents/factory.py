@@ -3,9 +3,29 @@
 启动时只注册工厂函数，第一次 get() 时才 import + 实例化，
 避免启动时加载 langgraph（~15s）。
 """
-from typing import Callable
+from __future__ import annotations
+
+from typing import Callable, TYPE_CHECKING
 import threading
-from agents.base import BaseAgent
+
+if TYPE_CHECKING:
+    from agents.base import BaseAgent
+
+
+def _is_base_agent(agent) -> bool:
+    """判定是否 BaseAgent 实例。
+
+    懒注册的 factory 都是 callable（λ），先快速短路返回 False，
+    避免启动热路径（register_all）因 isinstance 检查导入 agents.base → torch（~20s）。
+    BaseAgent 无 __call__，实例本身不可调用，语义等价。
+    """
+    if callable(agent):
+        return False
+    try:
+        from agents.base import BaseAgent
+        return isinstance(agent, BaseAgent)
+    except Exception:
+        return False
 
 
 class AgentFactory:
@@ -24,7 +44,7 @@ class AgentFactory:
     @classmethod
     def register(cls, agent: BaseAgent | Callable[[], BaseAgent], name: str = None):
         """注册 Agent 实例或工厂函数。传实例=立即注册，传 callable=懒加载。"""
-        if isinstance(agent, BaseAgent):
+        if _is_base_agent(agent):
             cls._instances[agent.name] = agent
             cls._factories[agent.name] = lambda a=agent: a
         else:
@@ -33,6 +53,10 @@ class AgentFactory:
                 raise ValueError("注册懒加载 Agent 必须提供 name")
             cls._factories[key] = agent
             cls._instances.pop(key, None)  # 替换旧实例
+            # 替换工厂 = 旧实例已失效，必须同时清掉「已初始化完成」事件；
+            # 否则下次 get() 走等待分支、拿不到实例 → 误报「初始化失败」
+            # （register_all 二次调用 / WEB_DEV_RELOAD 热重载均会踩中）
+            cls._ready.pop(key, None)
 
     @classmethod
     def get(cls, name=None) -> BaseAgent:

@@ -65,6 +65,9 @@ class GroupAgent(PlanBasedAgent):
             current_agent_names=[],
             current_task_purpose="",
             dispatch_history=[],
+            _extra_dispatched=[],
+            _extra_executed=[],
+            _empty_dispatch_count=0,
         )
 
     def _build_callbacks_tag(self) -> str:

@@ -133,3 +133,44 @@ def test_web_config_apply_writes_env_and_reloads_runtime_settings(tmp_path, monk
             else:
                 os.environ[key] = value
         ConfigManager._instance = None
+
+
+def test_reload_resets_main_llm_singleton(monkeypatch):
+    """从 .env 重载后主 LLM 单例必须失效（回归：曾误重置 TokenCompatibleChatOpenAI
+    上不存在的 _default_instance，导致 OPENAI_MODEL_NAME 重载后不生效）。"""
+    import utils.llm_factory as lf
+    from server.routes import config as config_routes
+
+    calls = []
+
+    def fake_create_from_env(cls):
+        calls.append(1)
+        return object()
+
+    monkeypatch.setattr(lf.LLMFactory, "create_from_env", classmethod(fake_create_from_env))
+    monkeypatch.setattr(lf.LLMFactory, "_default_instance", None, raising=False)
+
+    a = lf.get_llm()
+    b = lf.get_llm()
+    assert a is b and len(calls) == 1          # 单例缓存生效
+
+    config_routes._reload_runtime_deps({"OPENAI_MODEL_NAME"})
+
+    c = lf.get_llm()
+    assert c is not a and len(calls) == 2      # 重载后按新配置重建
+
+
+def test_reload_resets_named_llm_caches(monkeypatch):
+    """REPORT/COMPRESS/JUDGE 具名 LLM 缓存同样失效。"""
+    import utils.llm_factory as lf
+    from server.routes import config as config_routes
+
+    lf._report_llm[0] = object()
+    lf._compress_llm[0] = object()
+    lf._judge_llm[0] = object()
+
+    config_routes._reload_runtime_deps({"REPORT_LLM_MODEL"})
+
+    assert lf._report_llm[0] is None
+    assert lf._compress_llm[0] is None
+    assert lf._judge_llm[0] is None

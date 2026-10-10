@@ -3,6 +3,7 @@
 提供 K 线图、技术指标等数据接口
 """
 import asyncio
+import logging
 import re
 from functools import partial
 from typing import Any, Dict, Optional
@@ -10,6 +11,8 @@ from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from server.schemas import KlineSyncRequest
 from server.chart_utils import round_list, ma, ema, macd, rsi, kdj, boll, dpo
@@ -104,12 +107,29 @@ def _get_kline_sync(code: str, days: int, start_date: str, end_date: str, adjust
     from utils.cache.market_data_db import get_stock_daily, get_stock_info, get_index_daily
 
     is_index = (market == 'INDEX')
+    is_board = is_index is False and (market == 'BOARD' or str(code).startswith('board_'))
 
     if is_index:
-        # 指数：直接从 index_daily 读
+        # 指数：直接从 index_daily 读；默认"最近 N 天"查询时增量补齐（与个股同机制）
         df = get_index_daily(code, start_date=start_date, end_date=end_date)
+        if not df.empty and not start_date and not end_date:
+            if _maybe_refresh_index_daily(code, df):
+                refreshed = get_index_daily(code, start_date=start_date, end_date=end_date)
+                if refreshed is not None and not refreshed.empty:
+                    df = refreshed
         if not df.empty and days and not start_date:
             df = df.tail(days)
+    elif is_board:
+        # 板块K线：stock_daily 既有约定（board_industry_半导体），无复权概念；
+        # 首次数据靠采集任务（board_kline），读取时按需增量补齐缺口
+        df = get_stock_daily(code, start_date=start_date, end_date=end_date, limit=days if not start_date else None)
+        if df.empty:
+            return None
+        if not start_date and not end_date and _maybe_refresh_board_kline(code, df):
+            refreshed = get_stock_daily(code, start_date=start_date, end_date=end_date,
+                                        limit=days if not start_date else None)
+            if refreshed is not None and not refreshed.empty:
+                df = refreshed
     else:
         # 个股：从 stock_daily 读，无数据时 fallback 到 index_daily
         df = get_stock_daily(code, start_date=start_date, end_date=end_date, limit=days if not start_date else None)
@@ -119,6 +139,14 @@ def _get_kline_sync(code: str, days: int, start_date: str, end_date: str, adjust
                 is_index = True
                 if days and not start_date:
                     df = df.tail(days)
+        elif not start_date and not end_date:
+            # 增量自动补齐：默认"最近 N 天"查询时，若本地数据落后于最近已完成
+            # 交易日，只同步缺口天数后重读（明确指定历史区间时不触发）
+            if _maybe_refresh_daily(code, df):
+                refreshed = get_stock_daily(code, start_date=start_date, end_date=end_date,
+                                            limit=days if not start_date else None)
+                if refreshed is not None and not refreshed.empty:
+                    df = refreshed
 
     if df.empty:
         return None
@@ -129,17 +157,16 @@ def _get_kline_sync(code: str, days: int, start_date: str, end_date: str, adjust
         with get_market_data_db() as conn:
             row = conn.execute('SELECT name FROM index_info WHERE code = ?', (code,)).fetchone()
             stock_name = row['name'] if row else code
-    elif market == 'BOARD' or code.startswith('board_'):
-        # 板块K线：从 stock_board 表获取名称
-        from utils.cache.market_data_db import get_market_data_db
+    elif is_board:
+        # 板块K线：名称取自 code 本身（board_industry_白酒 → 白酒）
         board_name = code.split('_', 2)[-1] if code.startswith('board_') else code
         stock_name = board_name
     else:
         info = get_stock_info(code)
         stock_name = info['name'] if info else code
 
-    # 复权处理（指数无复权）
-    if adjust != "none" and not is_index:
+    # 复权处理（指数/板块无复权）
+    if adjust != "none" and not is_index and not is_board:
         df = _apply_adjust(df, code, adjust)
 
     # 计算技术指标
@@ -191,6 +218,60 @@ def _sync_kline_sync(code: str, days: int, source: str = "auto") -> int:
     from utils.cache.market_data_db import fetch_and_store_daily
 
     return fetch_and_store_daily(code, days=days, source=source)
+
+
+# ── K 线增量自动补齐 ──────────────────────────────────────
+# 本地缓存可能停在很久前（如 7 月查过 513330，9 月再查直接返回旧缓存）。
+# 读取时检查本地最新日期是否落后于「最近已完成交易日」，落后则只同步缺口
+# （INSERT OR REPLACE 幂等覆盖，旧数据不重拉不丢失），失败静默用本地旧数据。
+# 统一走 utils.cache.market_data_db.refresh_stale_tail（扫描/策略信号同口径），
+# 本模块只负责注入不同标的类型的 fetch。
+
+
+def _refresh_if_stale(code: str, df, fetch) -> bool:
+    """本地日线新鲜度检查，落后于最近已完成交易日则增量同步缺口。
+
+    fetch(code, days=gap) 由调用方注入（个股 fetch_and_store_daily /
+    指数 fetch_and_store_index_daily / 板块 fetch_and_store_board_kline），
+    INSERT OR REPLACE 幂等覆盖。
+
+    Returns:
+        True 表示已完成同步（调用方需重读本地数据）；False 表示数据已新或未同步。
+    """
+    from utils.cache.market_data_db import refresh_stale_tail
+
+    try:
+        latest = str(df["trade_date"].max())   # 'YYYY-MM-DD'，ISO 字符串可直接比较
+    except Exception as e:
+        logger.debug(f"K线增量同步跳过（继续用本地缓存） {code}: {e}")
+        return False
+    return refresh_stale_tail(code, latest=latest, fetch=fetch)
+
+
+def _maybe_refresh_daily(code: str, df) -> bool:
+    """个股日线新鲜度检查（同步走 fetch_and_store_daily）。"""
+    from utils.cache.market_data_db import fetch_and_store_daily
+    return _refresh_if_stale(code, df, fetch_and_store_daily)
+
+
+def _maybe_refresh_index_daily(code: str, df) -> bool:
+    """指数日线新鲜度检查（同步走 fetch_and_store_index_daily）。
+
+    指数分支此前无增量机制：index_daily 停更会让 signal_eval 的
+    alpha 基准停在旧日期（个股当月收益 vs 基准旧月收益错位对比）。
+    """
+    from utils.cache.market_data_db import fetch_and_store_index_daily
+    return _refresh_if_stale(code, df, fetch_and_store_index_daily)
+
+
+def _maybe_refresh_board_kline(code: str, df) -> bool:
+    """板块K线新鲜度检查（同步走 fetch_and_store_board_kline）。
+
+    板块K线（board_industry_X，存 stock_daily）是 P6 第二步的行业基准
+    数据源，停更会让 alpha 基准停在旧日期；与指数同机制按需增量补齐。
+    """
+    from utils.cache.market_data_db import fetch_and_store_board_kline
+    return _refresh_if_stale(code, df, fetch_and_store_board_kline)
 
 
 def _apply_adjust(df: pd.DataFrame, code: str, adjust: str) -> pd.DataFrame:
@@ -288,6 +369,7 @@ def _calc_indicators(df: pd.DataFrame) -> dict:
 async def get_signals(
     code: str,
     days: int = Query(default=120, ge=1, le=1000, description="计算天数"),
+    market: str = Query(default=None, description="市场类型: INDEX 指数, 其他/空 个股"),
 ):
     """获取技术指标信号（金叉死叉、布林带突破等）
 
@@ -300,19 +382,28 @@ async def get_signals(
     - ma_death: MA 死叉（MA5 下穿 MA20）
     - boll_break_up: 突破布林带上轨
     - boll_break_down: 突破布林带下轨
+
+    market=INDEX 时走 index_daily；**必须与 /api/chart/kline 的 market 一致**，
+    否则 `000001` 会拿平安银行的信号叠到上证指数 K 线上（交易日几乎重合，
+    不会静默丢弃，而是"看起来正常但全错"）。
     """
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
-        None, partial(_calc_signals_sync, code, days)
+        None, partial(_calc_signals_sync, code, days, market)
     )
     return result
 
 
-def _calc_signals_sync(code: str, days: int) -> dict:
-    """同步计算技术指标信号"""
-    from utils.cache.market_data_db import get_stock_daily
+def _calc_signals_sync(code: str, days: int, market: str = None) -> dict:
+    """同步计算技术指标信号（个股 / 指数双通道）"""
+    from utils.cache.market_data_db import get_stock_daily, get_index_daily
 
-    df = get_stock_daily(code, limit=days)
+    if market == 'INDEX':
+        df = get_index_daily(code)
+        if not df.empty and days:
+            df = df.tail(days).reset_index(drop=True)
+    else:
+        df = get_stock_daily(code, limit=days)
     if df.empty:
         return {"code": code, "signals": []}
 

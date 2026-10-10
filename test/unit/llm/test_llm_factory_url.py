@@ -37,10 +37,31 @@ def test_chat_suffix_case_insensitive():
 
 # ── OPENAI_REASONING_EFFORT 配置（2026-08-14）───────────────
 
-def test_config_reasoning_effort_default_medium():
-    """默认 medium（跟随推理模型默认思考强度）"""
-    from config import Config
-    assert Config.OPENAI_REASONING_EFFORT == "medium"
+def test_config_reasoning_effort_default_medium(monkeypatch):
+    """代码缺省值 medium（跟随推理模型默认思考强度）。
+
+    隔离本机 .env（如显式配置 OPENAI_REASONING_EFFORT=high 会覆盖缺省）：
+    屏蔽 load_dotenv + 清空环境变量后，在**独立的模块副本**中加载 config.py，
+    验证纯缺省值。
+
+    不能用 importlib.reload(config)：reload 会在同一模块对象里替换出新的
+    Config 类，而其他模块/测试模块早已 `from config import Config` 绑定旧类，
+    造成「monkeypatch 打在新类、业务读旧类」的跨文件顺序敏感失败
+    （routing/embedding/pdor 多组用例曾因此并行间歇失败）。
+    """
+    import importlib.util
+    import config as cfg_mod
+
+    monkeypatch.delenv("OPENAI_REASONING_EFFORT", raising=False)
+    # 隔离副本会重新执行 `from dotenv import load_dotenv`，
+    # 必须 patch 源头 dotenv.load_dotenv 才能屏蔽 .env
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: None)
+    spec = importlib.util.spec_from_file_location(
+        "config_isolated_reasoning_effort", cfg_mod.__file__)
+    isolated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(isolated)
+    assert isolated.Config.OPENAI_REASONING_EFFORT == "medium"
 
 
 def test_config_reasoning_effort_valid_values(monkeypatch):

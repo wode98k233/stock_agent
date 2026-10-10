@@ -42,6 +42,13 @@ class AgentRunContext:
         self.run_id = str(_uuid.uuid4())[:8]
         self._old_stdout, self._old_stderr = redirect_stdio_to_logger(self.logger)
 
+        # 每个题目一个 opencode 会话 ID（本 run 内所有 LLM 请求共用，避免串会话）
+        try:
+            from utils.opencode_session import new_session
+            new_session()
+        except Exception:
+            pass
+
         # 重置请求级数据源失败缓存，确保每次请求独立
         from tools.fetcher.base import _request_failed_sources
         _request_failed_sources.set(set())
@@ -49,8 +56,8 @@ class AgentRunContext:
         if Config.ENABLE_TRACE:
             try:
                 from utils.agent_trace.core import TraceRecorder, _active_recorder
-                from utils.app_paths import get_trace_db_path
-                db_path = Config.TRACE_DB_PATH or get_trace_db_path()
+                # TRACE_DB_PATH 显式指定 → 直写单文件（调试）；默认 None → 分库路由当月月库
+                db_path = Config.TRACE_DB_PATH or None
                 self._recorder = TraceRecorder(agent_name=self.agent_name, db_path=db_path)
                 self._recorder.start_run(task_input=self.user_input)
                 # 全局注入：所有 LLM 调用自动 trace

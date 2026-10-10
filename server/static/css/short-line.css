@@ -1,0 +1,259 @@
+/* 短线情绪观测页（sl- 前缀）
+ *
+ * 布局模型：**纯 flexbox，高度全由浏览器计算**。
+ *
+ *   壳 .sl-page        flex column，高度 = 视口（position:fixed; inset:0）
+ *     ├ 顶栏           flex:0 0 auto        —— 不压缩
+ *     └ .sl-body       flex:1 1 0 + min-height:0  —— 吃掉剩余，永不超出
+ *         ├ 行1         grid-column span 12；内部 flex row
+ *         └ 行2         同上
+ *
+ * 关键约定（缺任何一个都会退化成"撑破/留白"）：
+ *   1) 每个「要分配剩余高度」的容器：flex:1 1 0 且 min-height:0。
+ *      basis 必须是 0（不是 auto），否则容器按内容宽度/高度算，分配失真。
+ *   2) 滚动体：flex:1 1 0 + min-height:0 + overflow-y:auto。
+ *      父级给了确定高度后，内容超出即出滚动条；不超就自然铺满，不留白。
+ *   3) 不需要拉伸的块（标题、列头、指标行）一律 flex:none。
+ *
+ * ⚠️ 不要在这个文件里写死任何内容高度，也不要用 JS 测量并回写高度。
+ *    浏览器算得比我们准；一旦用 JS 算，就会在字体/行高/缩放的边界上出偏差，
+ *    表现为"有的卡撑破、有的卡空白"——这正是之前几版反复翻车的原因。
+ * 断点用容器查询（@container slpage）而非媒体查询 → 导出时改元素尺寸即可切分支。
+ */
+.sl-page { display: none; position: fixed; inset: 0; z-index: 900; background: var(--bg, #f6f7f9);
+  overflow: hidden; font-family: var(--font, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif);
+  container-type: size; container-name: slpage; }
+.sl-page.open { display: flex; flex-direction: column; }
+
+/* ── 顶栏（不参与滚动、不压缩） ── */
+.sl-topbar { flex: 0 0 auto; background: var(--panel, #fff); border-bottom: 1px solid var(--border, #e5e7eb);
+  padding: 9px 20px; display: flex; align-items: center; gap: 10px; }
+.sl-back-btn { width: 28px; height: 28px; border: 1px solid var(--border, #e5e7eb); border-radius: 7px;
+  background: var(--panel, #fff); color: var(--text, #1c2430); cursor: pointer; display: flex;
+  align-items: center; justify-content: center; flex: none; }
+.sl-back-btn:hover { background: var(--border-light, #f0f0f0); }
+.sl-page-title { display: flex; align-items: center; gap: 7px; font-size: 14.5px; font-weight: 600; }
+.sl-title-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand, #176b5b); }
+.sl-date { font-size: 12px; color: var(--text-secondary, #6b7280); }
+.sl-topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+.sl-topbar-btn { border: 1px solid var(--border, #e5e7eb); background: var(--panel, #fff); cursor: pointer;
+  padding: 4px 11px; border-radius: 7px; font-size: 12.5px; color: var(--text, #1c2430); white-space: nowrap; }
+.sl-topbar-btn:hover { background: var(--border-light, #f0f0f0); }
+.sl-topbar-btn:disabled { opacity: .55; cursor: default; }
+.sl-topbar-btn.sl-primary { background: var(--brand, #176b5b); border-color: var(--brand, #176b5b); color: #fff; }
+.sl-topbar-btn.sl-primary:hover { filter: brightness(1.08); }
+
+/* ── 主体：吃掉顶栏以下的全部高度，自身**不滚动** ──
+ * 它只负责把高度分给两行；任何溢出都必须发生在卡片内部的滚动体里。 */
+.sl-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 10px;
+  padding: 10px 20px 12px; overflow: hidden; }
+
+/* 行：flex:1 1 0 让两行按权重瓜分高度；min-height:0 是允许内部滚动的前提 */
+.sl-row-main { flex: 3 1 0; min-height: 0; display: flex; gap: 10px; }
+.sl-row-foot { flex: 2 1 0; min-height: 0; display: flex; gap: 10px; }
+
+/* 右侧纵向堆叠：首板墙 与 题材聚合 按 2:3 瓜分右侧高度，各自内部滚动。
+ * ⚠️ 不要给任一张卡写 flex:none —— 卡内唯一内容 .sl-scroll 是 flex-basis:0，
+ *    在 auto 高的父级里会塌成 0，卡片只剩 h2 一条、内容被 overflow:hidden 剪光。 */
+.sl-stack { flex: 5 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.sl-row-main > .sl-card-ladder { flex: 7 1 0; }
+.sl-row-foot > .sl-card { flex: 1 1 0; }
+
+/* 卡片 = 壳 + 滚动体。卡片恒为 flex column，滚动体负责吃满剩余。 */
+.sl-card { background: var(--panel, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: 11px; padding: 9px 13px 11px; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0; overflow: hidden; }
+.sl-card h2 { flex: none; font-size: 13px; font-weight: 600; margin: 0 0 7px; display: flex;
+  align-items: center; gap: 7px; }
+.sl-card h2 .hint { font-weight: 400; font-size: 11px; color: var(--muted, #667085);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mono { font-family: var(--font-mono, Consolas, monospace); }
+
+/* 启动/空态：整行居中，不参与高度分配 */
+.sl-loading, .sl-empty { flex: none; display: flex; align-items: center; justify-content: center;
+  color: var(--muted, #667085); padding: 30px 0; font-size: 13px; }
+.sl-degraded { flex: none; background: var(--warning-bg, #fffbeb); border: 1px solid #fcd34d;
+  color: #b45309; border-radius: 8px; padding: 5px 12px; font-size: 12px; }
+
+/* ── 滚动体：唯一允许滚动的东西。细滚动条 5px ── */
+.sl-scroll { flex: 1 1 0; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: thin; scrollbar-color: rgba(17, 24, 39, .16) transparent; }
+.sl-scroll::-webkit-scrollbar { width: 5px; }
+.sl-scroll::-webkit-scrollbar-track { background: transparent; }
+.sl-scroll::-webkit-scrollbar-thumb { background: rgba(17, 24, 39, .16); border-radius: 3px; }
+.sl-scroll::-webkit-scrollbar-thumb:hover { background: rgba(17, 24, 39, .32); }
+/* 横向滚动条同样细 */
+.sl-ladder-wrap::-webkit-scrollbar { height: 5px; }
+.sl-ladder-wrap::-webkit-scrollbar-thumb { background: rgba(17, 24, 39, .16); border-radius: 3px; }
+
+/* ── ① 市场温度计 + 指标（整行，按内容高，不拉伸） ── */
+.sl-card-gauge { flex: none; }
+.sl-gauge-inner { display: flex; gap: 14px; align-items: center; min-width: 0; }
+.sl-gauge-box { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sl-gauge-arc { position: relative; width: 150px; height: 84px; overflow: hidden; flex: none; }
+.sl-gauge-arc svg { display: block; }
+.sl-gauge-needle { position: absolute; left: 50%; bottom: 5px; width: 2.5px; height: 58px;
+  background: var(--text, #1c2430); border-radius: 2px; transform-origin: bottom center;
+  transition: transform .8s cubic-bezier(.34, 1.4, .44, 1); }
+.sl-gauge-center { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: 11px;
+  height: 11px; border-radius: 50%; background: var(--text, #1c2430); }
+.sl-gauge-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sl-gauge-meta h2 { margin: 0; }
+.sl-gauge-score { display: flex; align-items: baseline; gap: 8px; }
+.sl-gauge-score .num { font-size: 30px; font-weight: 700; font-family: var(--font-mono, monospace);
+  line-height: 1.05; }
+.sl-gauge-score .lvl { font-size: 12px; font-weight: 600; padding: 1px 11px; border-radius: 999px;
+  white-space: nowrap; }
+.sl-lvl-ice  { background: #e0f2fe; color: #0369a1; }
+.sl-lvl-ebb  { background: #ecfdf5; color: #067647; }
+.sl-lvl-warm { background: #fffbeb; color: #b45309; }
+.sl-lvl-hot  { background: #fdf0ef; color: #e74c3c; }
+.sl-gauge-scale { display: flex; justify-content: space-between; width: 150px; font-size: 9.5px;
+  color: var(--muted, #667085); }
+
+/* 指标卡：label 独占首行，值与 sub 同基线 */
+.sl-metric-grid { flex: 1 1 0; min-width: 0; display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.sl-metric-card { border: 1px solid var(--border, #e5e7eb); border-radius: 8px; padding: 8px 11px;
+  display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; column-gap: 7px;
+  row-gap: 2px; min-width: 0; }
+.sl-metric-card .label { flex: 1 1 100%; font-size: 11.5px; color: var(--text-secondary, #6b7280); }
+.sl-metric-card .value { font-size: 20px; font-weight: 700; font-family: var(--font-mono, monospace);
+  white-space: nowrap; }
+.sl-metric-card .sub { flex: 1 1 0; min-width: 0; font-size: 10.5px; color: var(--muted, #667085);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-up { color: #e74c3c; } .sl-down { color: #16a34a; } .sl-warn { color: #f59e0b; }
+
+/* ── ② 连板天梯（左，占 7/12） ── */
+/* 天梯：横向滚 + 各列内部纵滚。列高各自吃满，长列不撑破、短列不留死白。 */
+.sl-ladder-wrap { flex: 1 1 0; min-height: 0; display: flex; gap: 10px; align-items: stretch;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.sl-ladder-col { flex: 0 0 168px; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.sl-ladder-col > .sl-scroll { flex: 1 1 0; min-height: 0; }
+.sl-col-head { flex: none; text-align: center; font-size: 11.5px; font-weight: 700; padding: 4px 0;
+  border-radius: 7px; margin-bottom: 5px; color: #fff; }
+.sl-stock-card { border: 1px solid var(--border, #e5e7eb); border-left: 3px solid var(--theme-color, #176b5b);
+  border-radius: 7px; padding: 5px 8px; margin-bottom: 5px; font-size: 11.5px; background: #fff;
+  transition: transform .12s, box-shadow .12s; }
+.sl-stock-card:last-child { margin-bottom: 0; }
+.sl-stock-card:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0, 0, 0, .08); }
+.sl-stock-card .nm { font-weight: 600; display: flex; justify-content: space-between;
+  align-items: center; gap: 6px; }
+.sl-stock-card .nm > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-stock-card .nm .code { color: var(--muted, #667085); font-size: 10px;
+  font-family: var(--font-mono, monospace); flex: none; }
+.sl-stock-card .meta { display: flex; gap: 6px; margin-top: 2px; font-size: 10px;
+  color: var(--text-secondary, #6b7280); flex-wrap: wrap; }
+.sl-stock-card .theme { font-size: 9.5px; padding: 0 5px; border-radius: 3px; display: inline-block;
+  margin-top: 2px; color: var(--theme-color, #176b5b); background: #f3f4f6; }
+.sl-next-tag { font-size: 9.5px; padding: 0 4px; border-radius: 3px; }
+.sl-next-seal { background: #fdf0ef; color: #e74c3c; }
+.sl-next-break { background: #ecfdf5; color: #067647; }
+
+/* ── ③ 首板墙（右列上，占右列 2/5 高，内部滚动） ── */
+.sl-card-first { flex: 2 1 0; min-height: 0; }
+/* auto-fill 需确定宽度基准：栅格自身 width:100% + 外层已撑满 */
+.sl-fb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(82px, 1fr)); gap: 5px;
+  width: 100%; box-sizing: border-box; align-content: flex-start; }
+.sl-fb-card { border: 1px dashed var(--border, #e5e7eb); border-radius: 7px; padding: 3px 7px;
+  font-size: 10.5px; border-left: 3px solid var(--theme-color, #176b5b); min-width: 0; overflow: hidden; }
+.sl-fb-card .nm { font-weight: 600; font-size: 11px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.sl-fb-card .t { color: var(--theme-color, #176b5b); font-size: 9.5px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; display: block; }
+
+/* ── ④ 题材聚合（右列下，吃掉右列剩余高度） ── */
+.sl-card-themes { flex: 1 1 0; min-height: 0; }
+.sl-theme-row { display: flex; align-items: center; gap: 9px; padding: 3.5px 0;
+  border-bottom: 1px dashed #f2f2f2; }
+.sl-theme-row:last-child { border-bottom: none; }
+.sl-theme-name { flex: 0 0 132px; font-weight: 600; font-size: 12px; display: flex;
+  align-items: center; gap: 5px; min-width: 0; }
+.sl-theme-dot { width: 9px; height: 9px; border-radius: 2.5px; flex: none; }
+.sl-theme-bar-wrap { flex: 1 1 0; min-width: 40px; }
+/* 轨道色要能与白底区分（近白轨道在导出图里会被误读为"柱子只有一小截"） */
+.sl-theme-bar { height: 12px; border-radius: 3px; display: flex; overflow: hidden;
+  background: #eef1f4; box-shadow: inset 0 0 0 1px rgba(17, 24, 39, .05); }
+.sl-theme-bar .seg { height: 100%; min-width: 2px; }
+.sl-theme-stats { flex: 0 0 auto; text-align: right; font-size: 10.5px;
+  color: var(--text-secondary, #6b7280); white-space: nowrap; }
+.sl-theme-stats b { font-family: var(--font-mono, monospace); color: var(--text, #1c2430); }
+.sl-pill { font-size: 9.5px; padding: 0 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+.sl-pill-yes { background: #fdf0ef; color: #e74c3c; }
+.sl-pill-probe { background: #f3efff; color: #8b5cf6; }
+.sl-pill-fade { background: #ecfdf5; color: #067647; }
+
+/* ── ⑤ 晋级率矩阵 + 封板质量（第 2 行左） ── */
+.sl-promo-grid { flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 7px; }
+.sl-promo-cell { border: 1px solid var(--border, #e5e7eb); border-radius: 7px; padding: 5px 7px;
+  text-align: center; }
+.sl-promo-cell .node { font-size: 10.5px; color: var(--text-secondary, #6b7280); font-weight: 600; }
+.sl-promo-cell .pct { font-size: 17px; font-weight: 700; font-family: var(--font-mono, monospace); }
+.sl-promo-cell .ratio { font-size: 9.5px; color: var(--muted, #667085); font-family: var(--font-mono, monospace); }
+.sl-p-good { color: #e74c3c; background: #fdf0ef; }
+.sl-p-mid  { color: #b45309; background: #fffbeb; }
+.sl-p-bad  { color: #16a34a; background: #ecfdf5; }
+/* 晋级矩阵卡片里有两个滚动区：矩阵按内容高（只有 3 个格子），质量吃掉剩余。
+ * 用结构选择器区分，避免给两张卡都写 flex:1 导致 50/50 平分出空白。 */
+.sl-card-promo > #slPromoWrap { flex: none; }
+.sl-card-promo > #slQualityHost { flex: 1 1 0; min-height: 0; }
+.sl-promo-hint { flex: none; margin-top: 7px; font-size: 11px; color: var(--text-secondary, #6b7280); }
+.sl-subhead { flex: none; font-size: 13px; font-weight: 600; margin: 9px 0 6px; display: flex;
+  align-items: center; gap: 7px; }
+.sl-subhead .hint { font-weight: 400; font-size: 11px; color: var(--muted, #667085); }
+/* 质量列表：吃掉卡片剩余高度，行多时内部滚动 */
+.sl-quality-wrap { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+  gap: 0 16px; align-content: start; }
+.sl-q-row { display: flex; justify-content: space-between; padding: 3.5px 0;
+  border-bottom: 1px dashed #f2f2f2; font-size: 11.5px; gap: 9px; }
+.sl-q-row > span:first-child { min-width: 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.sl-q-row .r { font-family: var(--font-mono, monospace); color: var(--text-secondary, #6b7280);
+  font-size: 10.5px; text-align: right; white-space: nowrap; flex: none; }
+.sl-tag { font-size: 9.5px; padding: 0 5px; border-radius: 3px; }
+.sl-tag-broken { background: #fef2f2; color: #ef4444; }
+.sl-tag-down { background: #ecfdf5; color: #067647; }
+
+/* ── ⑥ 情绪温度历史（可选块） ── */
+.sl-card-hist { flex: none; }
+.sl-hist-wrap { position: relative; height: 146px; }
+
+/* ── 窄屏降级（容器查询：导出时容器恒为 2560 宽 → 走桌面分支） ──
+ * 窄屏放不下一屏 → 允许整页滚动，两行改纵向堆叠。 */
+@container slpage (max-width: 1500px) {
+  .sl-body { overflow-y: auto; scrollbar-width: thin; }
+  .sl-body::-webkit-scrollbar { width: 5px; }
+  .sl-body::-webkit-scrollbar-thumb { background: rgba(17, 24, 39, .16); border-radius: 3px; }
+  .sl-row-main, .sl-row-foot { flex: none; flex-direction: column; }
+  .sl-row-main > .sl-card-ladder, .sl-row-main > .sl-stack,
+  .sl-row-foot > .sl-card { flex: none; }
+  .sl-gauge-inner { flex-wrap: wrap; }
+  .sl-metric-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .sl-ladder-col { flex: 0 0 150px; }
+  .sl-ladder-wrap { min-height: 240px; flex: none; }
+  /* 窄屏整页滚动：卡内滚动体交出滚动权，按内容自然高铺开；封面给个下限免得塌成 0 */
+  .sl-scroll { flex: none; max-height: none; }
+  .sl-card-first, .sl-card-themes { flex: none; min-height: 0; }
+  .sl-card-first > .sl-scroll { min-height: 120px; }
+  .sl-hist-wrap { height: 190px; }
+}
+
+/* ── 导出态：临时 2560×1279 渲染时隐藏滚动条与操作按钮，并放开全部限高 ── */
+.sl-exporting .sl-body, .sl-exporting .sl-scroll, .sl-exporting .sl-ladder-wrap {
+  scrollbar-width: none; }
+.sl-exporting .sl-body::-webkit-scrollbar,
+.sl-exporting .sl-scroll::-webkit-scrollbar,
+.sl-exporting .sl-ladder-wrap::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
+/* 导出要"一屏看全"，所以滚动一律放开 */
+.sl-exporting .sl-scroll { overflow: visible !important; }
+.sl-exporting .sl-ladder-wrap { overflow: visible !important; }
+.sl-exporting .sl-body { overflow: visible !important; }
+.sl-exporting .sl-stock-card, .sl-exporting .sl-fb-card { transition: none !important; }
+.sl-exporting .sl-topbar-actions { visibility: hidden; }
+
+/* 浮层提示 */
+.sl-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px);
+  background: rgba(17, 24, 39, .92); color: #fff; font-size: 12.5px; padding: 7px 16px;
+  border-radius: 999px; z-index: 999; opacity: 0; pointer-events: none;
+  transition: opacity .18s, transform .18s; }
+.sl-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }

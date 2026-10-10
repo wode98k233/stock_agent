@@ -12,6 +12,7 @@ Planner 直接选择技能名，Executor 按名加载工具
 - build_all_tools(logger, memory_mgr) -> list: 构建所有技能的工具
 """
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from tools.skill_register import SkillRegister
@@ -21,23 +22,139 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("radar.skills")
 
+# 目录层的平台分组顺序与显示名（分层渲染：平台 → 技能）
+_PLATFORM_ORDER = ("internal", "eastmoney", "10jqka", "external")
+_PLATFORM_LABELS = {
+    "internal": "内部技能",
+    "eastmoney": "东财妙想（eastmoney）",
+    "10jqka": "同花顺问财（10jqka）",
+    "external": "其他外部技能",
+}
+# 组内完全一致时可上提到平台头的字段（避免每个技能重复同一行）
+_HOISTABLE_FIELDS = ("category", "key_params", "tool_names")
+
 
 class SkillPromptBuilder:
     """技能提示词构建器：构建供 LLM 使用的技能目录和工具详情提示词"""
     
     @staticmethod
+    def _field_text(item: dict, field: str) -> str:
+        """把目录项字段规范化为可比较的字符串。"""
+        if field == "category":
+            return str(item.get("category") or "").strip()
+        if field == "key_params":
+            return "、".join(item.get("key_params") or [])
+        if field == "tool_names":
+            return ", ".join(item.get("tool_names") or [])
+        return str(item.get(field) or "").strip()
+
+    @staticmethod
+    def _load_platform_shared(metas) -> str:
+        """读取平台级共享说明（平台根目录下的 PLATFORM.md）；无则空串。
+
+        分层原则（2026-09-21）：同一平台内**逐字重复**的说明（如同花顺的
+        「注意事项」原先复制在 16 个技能包里）上提到平台层，在目录中**只渲染一次**；
+        技能条目本身保留，以便按 skill id 区分限制参数、并避免描述覆盖多域导致注意力分散。
+        """
+        try:
+            for m in metas:
+                d = (getattr(m, "skill_dir", "") or "").strip()
+                if not d:
+                    continue
+                path = os.path.join(os.path.dirname(d), "PLATFORM.md")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        return f.read().strip()
+        except Exception as e:
+            logger.warning(f"读取平台共享说明失败: {e}")
+        return ""
+
+    @staticmethod
     def build_catalog_prompt(registry) -> str:
-        """构建结构化技能目录提示词（目录层）"""
+        """构建结构化技能目录提示词（目录层，按平台分层渲染）。
+
+        结构::
+
+            ## 可用技能目录
+
+            ### 内部技能
+            #### stock_analysis
+            - 描述：...
+            - 核心目标：...
+
+            ### 同花顺问财（10jqka）
+            #### 平台共享注意事项      <- PLATFORM.md，只渲染一次
+            - ...
+            #### 共享工具（非技能名）    <- 组内一致字段上提；工具名不是技能名
+            - 分类：...
+            #### hithink_market_query
+            - 描述：...
+        """
         catalog = registry.get_skill_catalog()
-        lines = ["## 可用技能目录", ""]
+
+        # 1) 按平台分组（保持目录原有顺序）
+        groups: dict = {}
         for item in catalog:
-            lines.append(f"### {item['skill_name']}")
-            lines.append(f"- 描述：{item['description']}")
-            lines.append(f"- 分类：{item['category']}")
-            lines.append(f"- 关键参数：{', '.join(item['key_params']) if item['key_params'] else '无'}")
-            lines.append(f"- 核心目标：{item['target']}")
-            lines.append(f"- 可用工具：{', '.join(item['tool_names'])}")
+            meta = None
+            try:
+                meta = registry.get_skill_meta(item["skill_name"])
+            except Exception:
+                meta = None
+            plat = getattr(meta, "platform", "internal") if meta else "internal"
+            groups.setdefault(plat, []).append((item, meta))
+
+        lines = ["## 可用技能目录", ""]
+        ordered = [p for p in _PLATFORM_ORDER if p in groups]
+        ordered += [p for p in groups if p not in _PLATFORM_ORDER]
+
+        for plat in ordered:
+            entries = groups[plat]
+            lines.append(f"### {_PLATFORM_LABELS.get(plat, plat)}")
+
+            # 平台级共享说明（PLATFORM.md）：只渲染一次
+            shared = SkillPromptBuilder._load_platform_shared([m for _, m in entries if m])
+            if shared:
+                lines.append(shared)
             lines.append("")
+
+            # 组内「工具相同」的子组：把一致的字段上提到子组头，只写一次
+            # （同平台内可能有多套工具，如 iwc_query / iwc_search，各自参数不同）
+            sub_hoisted = {}
+            for key in {SkillPromptBuilder._field_text(it, "tool_names") for it, _ in entries}:
+                group = [(it, m) for it, m in entries
+                         if SkillPromptBuilder._field_text(it, "tool_names") == key]
+                h = {}
+                for field in _HOISTABLE_FIELDS:
+                    vals = {SkillPromptBuilder._field_text(it, field) for it, _ in group}
+                    if len(vals) == 1 and next(iter(vals)):
+                        h[field] = next(iter(vals))
+                sub_hoisted[key] = h
+            emitted_subgroups = set()
+
+            for item, _meta in entries:
+                key = SkillPromptBuilder._field_text(item, "tool_names")
+                h = sub_hoisted.get(key, {})
+                if key not in emitted_subgroups:
+                    emitted_subgroups.add(key)
+                    if h:
+                        lines.append(f"#### 共享工具（非技能名）：{key or '无'}")
+                        if "category" in h:
+                            lines.append(f"- 分类：{h['category']}")
+                        if "key_params" in h:
+                            lines.append(f"- 关键参数：{h['key_params']}")
+                        lines.append("")
+
+                lines.append(f"#### {item['skill_name']}")
+                lines.append(f"- 描述：{item['description']}")
+                if "category" not in h:
+                    lines.append(f"- 分类：{item['category']}")
+                if "key_params" not in h:
+                    kp = "、".join(item["key_params"]) if item["key_params"] else "无"
+                    lines.append(f"- 关键参数：{kp}")
+                lines.append(f"- 核心目标：{item['target']}")
+                if "tool_names" not in h:
+                    lines.append(f"- 可用工具：{item['tool_names'] and ', '.join(item['tool_names']) or '无'}")
+                lines.append("")
         return "\n".join(lines)
     
     @staticmethod

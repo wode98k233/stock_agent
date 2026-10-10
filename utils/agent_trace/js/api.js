@@ -67,3 +67,27 @@ function getFilteredRuns() {
   if (!q) return S.runs;
   return S.runs.filter(r => JSON.stringify(r).toLowerCase().includes(q));
 }
+
+async function fetchReviews(runId) {
+  if (!S.apiBase) return { items: [] };
+  try {
+    const r = await fetch(`${S.apiBase}/api/reviews?run_id=${encodeURIComponent(runId)}`);
+    return r.ok ? await r.json() : { items: [] };
+  } catch (e) {
+    return { items: [] };
+  }
+}
+
+async function createReview(runId) {
+  if (!S.apiBase) return null;
+  try {
+    const r = await fetch(`${S.apiBase}/api/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: runId })
+    });
+    return r.ok ? await r.json() : null;
+  } catch (e) {
+    return null;
+  }
+}

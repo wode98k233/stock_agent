@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime
 from typing import List, Optional, Dict
 
+from utils import sqlite_guard
+
 
 class EpisodicMemory:
     """情景记忆——记录分析事件"""
@@ -17,7 +19,9 @@ class EpisodicMemory:
         self._db_path = db_path
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        # 每次调用新建（用完即随对象回收），故不存在跨线程共享；
+        # 走守卫版 connect 只为挡住「del 工厂属性 → 下次查询原生崩溃」这个 CPython 坑。
+        conn = sqlite_guard.connect(self._db_path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 

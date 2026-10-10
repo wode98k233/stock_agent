@@ -4,6 +4,7 @@
 所有请求走分类缓存 + 重试机制
 """
 import logging
+import threading
 import pandas as pd
 import re
 from datetime import datetime, timedelta
@@ -25,6 +26,11 @@ from utils.cache import (
     get_realtime_cache, set_realtime_cache,
     is_market_closed,
 )
+
+
+# 历史K线缓存的最小有效行数：低于该值视为「非历史数据」（如被实时快照污染），
+# 拒绝命中并按缓存失效重新取数。取 2 是为了不误伤 days=1 这类极小请求。
+MIN_HISTORY_CACHE_ROWS = 2
 
 
 def _get_logger(logger):
@@ -131,13 +137,19 @@ def _normalize_history_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _validate_normalized_history_cache(df: pd.DataFrame) -> tuple[bool, str]:
-    """检查历史K线缓存是否仍满足技术/风险指标的最低字段要求。"""
+    """检查历史K线缓存是否仍满足技术/风险指标的最低字段与行数要求。"""
     if df is None:
         return False, "缓存为空"
     if not isinstance(df, pd.DataFrame):
         return False, f"缓存类型错误: {type(df).__name__}"
     if df.empty:
         return False, "缓存数据为空"
+    # 行数下限：历史K线缓存曾被「1 行实时快照」污染（字段齐全但只有当日一行），
+    # 若只校验列会被判为有效并持续命中，导致 calc_indicators 等下游
+    # 在 obv[-6] 处 IndexError（2026-09-20 实测）。此处拒绝明显非历史的短序列，
+    # 使其按缓存失效重新取数自愈。
+    if len(df) < MIN_HISTORY_CACHE_ROWS:
+        return False, f"有效行数不足: {len(df)} < {MIN_HISTORY_CACHE_ROWS}"
     required = ['open', 'close', 'high', 'low', 'volume']
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -170,35 +182,101 @@ def get_board_stocks(board_name: str, logger=None) -> pd.DataFrame:
 
 # ── 个股历史K线 ──────────────────────────────────────────────
 
-def get_stock_history(symbol: str, days: int = 120, logger=None) -> pd.DataFrame:
+# 并发去重（single-flight）：同一标的的历史K线常被多个工具在同一批次并发请求
+# （如 calc_technical_indicators 与 get_risk_metrics 同时取 159570），
+# 而两次都缓存未命中 → 双倍网络开销（2026-09-21 实测日志里同一标的被取两次）。
+# 此处让同 key 的并发请求共享首个请求的结果。
+_HIST_INFLIGHT_LOCK = threading.Lock()
+_HIST_INFLIGHT: dict = {}
+_HIST_INFLIGHT_WAIT_S = 60.0
+
+
+def get_stock_history(symbol: str, days: int = 120, logger=None, period: str = "daily") -> pd.DataFrame:
     """
-    获取个股历史K线，默认最近120天
+    获取个股历史K线，默认最近120天（日线）
+
+    period: ``daily`` / ``weekly`` / ``monthly``（默认 daily）；``days`` 指 **K 线条数**。
+    **period 必须放在 logger 之后**：已有调用点用位置参数传 logger（`(sym, days, logger)`），
+    插到 logger 前会静默把 logger 当 period（2026-09-22 差点踩到，见 SubToolNode 同类回归）。
     返回含: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
+
+    非日线**不落缓存、不做并发去重**：本地历史缓存键是 ``(symbol, start, end)``（不含 period），
+    若周/月线也走该键会与日线互相污染；周/月线调用频率低，直连取数即可。
+    数据源侧：akshare/efinance/mx_data 支持周月线，hithink REST 只支持日线（会被自动换源）。
     """
     logger = _get_logger(logger)
+    period = str(period or "daily").strip().lower()
+    if period not in ("daily", "weekly", "monthly"):
+        logger.warning(f"get_stock_history 不支持的 period={period!r}，回退 daily")
+        period = "daily"
     end = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=days + 60)).strftime('%Y%m%d')  # 多取一些节假日
+    _span = {"daily": 1, "weekly": 7, "monthly": 31}[period]
+    # 多取一些节假日（周/月线要乘以周期跨度，days 是条数）
+    start = (datetime.now() - timedelta(days=days * _span + 60)).strftime('%Y%m%d')
 
-    cached = get_history_cache(symbol, start, end)
-    if cached is not None:
+    if period != "daily":
+        try:
+            logger.info(f"请求历史K线({period}): {symbol}")
+            df = ak_stock_hist(symbol, period=period, start=start, end=end)
+            if df is None or df.empty:
+                raise ValueError(f"未获取到 {symbol} 的{period}历史数据")
+            return _normalize_history_df(df, symbol).tail(days)
+        except Exception as e:
+            logger.warning(f"获取{period}历史K线失败: {symbol} {e}")
+            return pd.DataFrame()
+
+    def _read_valid_cache():
+        cached = get_history_cache(symbol, start, end)
+        if cached is None:
+            return None
         valid, reason = _validate_normalized_history_cache(cached)
         if valid:
-            logger.info(f"缓存命中 历史K线: {symbol} ({len(cached)}条)")
             return cached
         logger.warning(f"历史K线缓存无效，忽略缓存重新请求: {symbol}, {reason}")
+        return None
 
-    logger.info(f"请求历史K线: {symbol}")
-    df = ak_stock_hist(symbol, period="daily", start=start, end=end)
+    hit = _read_valid_cache()
+    if hit is not None:
+        logger.info(f"缓存命中 历史K线: {symbol} ({len(hit)}条)")
+        return hit
 
-    if df.empty:
-        raise ValueError(f"未获取到 {symbol} 的历史数据")
+    key = (symbol, start, end)
+    with _HIST_INFLIGHT_LOCK:
+        event = _HIST_INFLIGHT.get(key)
+        if event is None:
+            event = threading.Event()
+            _HIST_INFLIGHT[key] = event
+            leader = True
+        else:
+            leader = False
 
-    df = _normalize_history_df(df, symbol)
-    # 只取需要的天数
-    df = df.tail(days)
+    if not leader:
+        # 跟随者：等首个请求落缓存后复用，避免重复取数
+        event.wait(_HIST_INFLIGHT_WAIT_S)
+        hit = _read_valid_cache()
+        if hit is not None:
+            logger.info(f"历史K线并发去重复用: {symbol} ({len(hit)}条)")
+            return hit
+        logger.warning(f"历史K线并发等待后仍无可用缓存，自行取数: {symbol}")
 
-    set_history_cache(symbol, start, end, df)
-    return df
+    try:
+        logger.info(f"请求历史K线: {symbol}")
+        df = ak_stock_hist(symbol, period="daily", start=start, end=end)
+
+        if df.empty:
+            raise ValueError(f"未获取到 {symbol} 的历史数据")
+
+        df = _normalize_history_df(df, symbol)
+        # 只取需要的天数
+        df = df.tail(days)
+
+        set_history_cache(symbol, start, end, df)
+        return df
+    finally:
+        if leader:
+            with _HIST_INFLIGHT_LOCK:
+                _HIST_INFLIGHT.pop(key, None)
+            event.set()
 
 
 # ── 实时行情（单只股票） ─────────────────────────────────────
@@ -568,7 +646,7 @@ def get_limit_up_pool(date: str = None, n: int = 20, logger=None) -> list:
         logger.info(f"涨停池: {len(rows)} 只 (date={date})")
         return rows
     except Exception as e:
-        logger.warning(f"获取涨停池失败: {e}")
+        logger.warning(f"获取涨停池失败: {e}", exc_info=True)
         return []
 
 
@@ -580,7 +658,7 @@ def get_limit_break_pool(date: str = None, n: int = 20, logger=None) -> list:
         logger.info(f"炸板池: {len(rows)} 只 (date={date})")
         return rows
     except Exception as e:
-        logger.warning(f"获取炸板池失败: {e}")
+        logger.warning(f"获取炸板池失败: {e}", exc_info=True)
         return []
 
 
@@ -592,7 +670,7 @@ def get_lianban_ladder(days: int = 5, logger=None) -> list:
         logger.info(f"连板天梯: {len(rows)} 个交易日")
         return rows
     except Exception as e:
-        logger.warning(f"获取连板天梯失败: {e}")
+        logger.warning(f"获取连板天梯失败: {e}", exc_info=True)
         return []
 
 
@@ -604,7 +682,7 @@ def get_stock_anomaly(date: str = None, n: int = 20, tag_codes: str = "", logger
         logger.info(f"个股异动: {len(rows)} 条 (tag_codes={tag_codes or '全部'})")
         return rows
     except Exception as e:
-        logger.warning(f"获取个股异动失败: {e}")
+        logger.warning(f"获取个股异动失败: {e}", exc_info=True)
         return []
 
 
@@ -616,7 +694,7 @@ def get_dragon_tiger_list(date: str = None, n: int = 20, board_type: str = "all"
         logger.info(f"龙虎榜({board_type}): {len(rows)} 只 (date={date})")
         return rows
     except Exception as e:
-        logger.warning(f"获取龙虎榜失败: {e}")
+        logger.warning(f"获取龙虎榜失败: {e}", exc_info=True)
         return []
 
 
@@ -628,5 +706,5 @@ def get_hot_stocks(n: int = 10, logger=None) -> list:
         logger.info(f"热股榜: {len(rows)} 只")
         return rows
     except Exception as e:
-        logger.warning(f"获取热股榜失败: {e}")
+        logger.warning(f"获取热股榜失败: {e}", exc_info=True)
         return []

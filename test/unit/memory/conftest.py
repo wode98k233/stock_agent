@@ -5,13 +5,26 @@ import os
 # 测试环境禁用 reranker（避免 HuggingFace 下载超时）
 os.environ["STOCK_MEMORY_RERANKER"] = ""
 
-# Ensure project root is in sys.path (needed for pytest >= 9)
+# Ensure project root in sys.path (needed for pytest >= 9)
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import pytest
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(autouse=True)
+def _disable_reranker_for_tests(monkeypatch):
+    """逐用例禁用 reranker，保证与 import 顺序无关。
+
+    仅在 conftest import 时写 os.environ 不够：全量/并行运行时 config 可能
+    已被其他目录的测试先导入，Config.STOCK_MEMORY_RERANKER 已固化为 .env 值，
+    导致 create_memory_backend(mode="auto", embedding_fn=None) 仍返回 HybridBackend
+    （工厂在 embedding 不可用但 reranker 可用时保留精排路径）。
+    这里按当前 Config 类 patch，_build_reranker 的惰性 import 会读到同一类。
+    """
+    monkeypatch.setattr("config.Config.STOCK_MEMORY_RERANKER", "", raising=False)
 
 
 # ---------------------------------------------------------------------------

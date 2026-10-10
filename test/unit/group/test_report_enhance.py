@@ -168,8 +168,13 @@ class TestReportEnhanceNode:
         assert "报告内容" in result["response"]
 
     @pytest.mark.asyncio
-    async def test_tool_calls_empty_for_group_mode(self):
-        """agent_group 模式：报告后处理时 tool_calls=[]"""
+    async def test_tool_calls_carry_evidence_items_for_group_mode(self):
+        """agent_group 模式：报告后处理收到「可下钻条目」而非空列表
+
+        2026-10-01 契约变更：原实现传 tool_calls=[]（"报告只接收 agent 级别的总结"），
+        导致报告层零原始数据、只能改写 4 份散文。现改为把 group 产物表达为条目，
+        由报告层自己决定 need_tools 载入哪些全文。
+        """
         from agents.group.nodes.report_enhance import report_enhance_node
         state = _make_state()
         ctx = _make_ctx()
@@ -185,7 +190,10 @@ class TestReportEnhanceNode:
             await report_enhance_node(state, ctx)
 
         _, kwargs = mock_post.call_args
-        assert kwargs.get("tool_calls") == []
+        items = kwargs.get("tool_calls")
+        assert items, "不得再传空列表（否则报告层零原始数据）"
+        assert all(it.get("tool_output") for it in items)
+        assert kwargs.get("step_results") is None   # 已表达为条目，不再双通道
 
     @pytest.mark.asyncio
     async def test_progress_final_called(self):
@@ -203,3 +211,104 @@ class TestReportEnhanceNode:
             await report_enhance_node(state, ctx)
 
         ctx.progress_reporter.final.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════
+# 报告引擎证据通道（2026-10-01：原传 tool_calls=[] → 报告层零原始数据）
+# ══════════════════════════════════════════════════════════════
+
+_DOC = "## 数据底版\n| 指数 | 9月涨跌幅 |\n|---|---|\n| 深证成指 | -8.044% |\n"
+
+
+def _capturing_ctx():
+    return _make_ctx()
+
+
+async def _run_capture(state, ctx):
+    """跑 report_enhance_node，捕获传给 run_report_post_processing 的实参。"""
+    from agents.group.nodes.report_enhance import report_enhance_node
+
+    captured = {}
+
+    async def fake_post(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    with patch("agents.group.nodes.report_enhance.Config") as mock_cfg, \
+         patch("agents.group.nodes.report_enhance.GroupMessageLogger") as mock_log_cls, \
+         patch("agents.group.nodes.report_enhance.run_report_post_processing", side_effect=fake_post):
+        mock_cfg.REPORT_ENABLE_ANALYSIS_ENGINE = True
+        mock_cfg.DASHBOARD_ENABLED = False
+        mock_log_cls.from_state.return_value = MagicMock()
+        await report_enhance_node(state, ctx)
+    return captured
+
+
+class TestEvidenceItemsBuilder:
+    """_build_evidence_items: group 产物 → 可下钻条目"""
+
+    def test_doc_first_and_empty_step_skipped(self):
+        from agents.group.nodes.report_enhance import _build_evidence_items
+        plan = _make_state()["plan_steps"]
+        plan[0]["result"] = ""                       # 数据采集步被清空
+        items = _build_evidence_items(plan, _DOC, [])
+        assert items[0]["tool_name"] == "数据底版 · 数据采集员"
+        assert items[0]["tool_output"] == _DOC
+        assert all(it["tool_output"] for it in items)         # 无空条目
+        assert sum(1 for it in items if it["tool_name"].startswith("分析 · ")) == 1
+
+    def test_duplicate_of_doc_not_repeated(self):
+        from agents.group.nodes.report_enhance import _build_evidence_items
+        plan = _make_state()["plan_steps"]
+        plan[0]["result"] = _DOC
+        items = _build_evidence_items(plan, _DOC, [])
+        assert len([it for it in items if it["tool_output"] == _DOC]) == 1
+
+    def test_real_tool_calls_appended(self):
+        from agents.group.nodes.report_enhance import _build_evidence_items
+        tcs = [{"tool_name": "mx_data_query", "tool_input": "q", "tool_output": "raw", "tool_call_id": ""}]
+        items = _build_evidence_items(_make_state()["plan_steps"], _DOC, tcs)
+        assert any(it["tool_name"] == "mx_data_query" for it in items)
+
+
+class TestEngineEvidenceChannel:
+    """report_enhance_node → 引擎实参"""
+
+    @pytest.mark.asyncio
+    async def test_passes_items_not_empty_tool_calls(self):
+        state = _make_state(data_collection_doc=_DOC)
+        captured = await _run_capture(state, _capturing_ctx())
+
+        assert captured["tool_calls"], "修复前这里是空列表 → 报告层零原始数据"
+        assert captured["tool_calls"][0]["tool_name"] == "数据底版 · 数据采集员"
+        # 已表达为条目，不再走 step_results 双通道
+        assert captured["step_results"] is None
+        # raw_result 仅作下钻种子
+        assert captured["raw_result"] == _DOC
+        assert any(it["tool_name"] == "mx_get_kline" for it in captured["tool_calls"])
+
+    @pytest.mark.asyncio
+    async def test_step_result_kept_when_doc_missing(self):
+        state = _make_state(accumulated_data="累计结果")
+        captured = await _run_capture(state, _capturing_ctx())
+
+        assert captured["tool_calls"], "无底版时各步结果仍应作为条目"
+        assert not any(it["tool_name"].startswith("数据底版") for it in captured["tool_calls"])
+        assert captured["raw_result"] == "累计结果"
+
+    @pytest.mark.asyncio
+    async def test_engine_disabled_keeps_legacy_merge(self):
+        """引擎关闭 → 仍返回原合并文本（含底版），不回归"""
+        from agents.group.nodes.report_enhance import report_enhance_node
+        state = _make_state(data_collection_doc=_DOC, accumulated_data="累计结果")
+        ctx = _make_ctx()
+
+        with patch("agents.group.nodes.report_enhance.Config") as mock_cfg, \
+             patch("agents.group.nodes.report_enhance.GroupMessageLogger") as mock_log_cls:
+            mock_cfg.REPORT_ENABLE_ANALYSIS_ENGINE = False
+            mock_cfg.DASHBOARD_ENABLED = False
+            mock_log_cls.from_state.return_value = MagicMock()
+            result = await report_enhance_node(state, ctx)
+
+        assert result["response"].startswith("## 数据底版")
+        assert "累计结果" in result["response"]

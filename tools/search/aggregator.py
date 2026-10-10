@@ -88,11 +88,15 @@ class SearchAggregator:
             )
 
         best_response: Optional[SearchResponse] = None
+        failures: List[str] = []          # 汇总各 provider 的失败原因（别再吞掉真相）
 
         for provider in available:
             try:
                 response = provider.search(query, max_results=max_results * 2, **kwargs)
                 if not response.success or not response.results:
+                    failures.append(
+                        f"{provider.name}: {response.error_message or '无结果'}"
+                    )
                     continue
 
                 # 如果找到足够多的结果，早返回
@@ -107,14 +111,20 @@ class SearchAggregator:
 
             except Exception as e:
                 logger.warning(f"[{provider.name}] 搜索失败: {e}")
+                failures.append(f"{provider.name}: {type(e).__name__}: {e}")
                 continue
 
         if best_response:
             return best_response
 
+        # 2026-09-21：原实现只回一句「所有搜索引擎均无结果」，把 provider 的真实原因
+        # （未配置 Key / 额度耗尽 / 解析不到数据）全吞了 —— 上层只能猜，实测被误读成
+        # 「额度耗尽」。这里把逐 provider 的原因带出去。
+        detail = "；".join(failures) if failures else "无可用搜索引擎"
+        logger.warning(f"[聚合器] 全部搜索引擎无结果: {detail}")
         return SearchResponse(
             query=query, results=[], provider="aggregator",
-            success=False, error_message="所有搜索引擎均无结果"
+            success=False, error_message=f"所有搜索引擎均无结果（{detail}）"
         )
 
     def clear_cache(self):

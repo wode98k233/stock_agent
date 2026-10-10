@@ -136,9 +136,12 @@ def _reload_runtime_deps(changed: set):
     if changed & _llm_keys:
         try:
             import utils.llm_factory as llm_factory
-            # 重置所有 LLM 单例缓存
-            if hasattr(llm_factory, "TokenCompatibleChatOpenAI"):
-                llm_factory.TokenCompatibleChatOpenAI._default_instance = None
+            # 主 LLM 单例：get_llm() → LLMFactory.get_default()，缓存挂在 LLMFactory 类，
+            # 重置必须打在 LLMFactory 上。（历史 bug：误重置
+            # TokenCompatibleChatOpenAI._default_instance —— 该类无此缓存，
+            # 导致 OPENAI_MODEL_NAME / API_BASE 等主模型配置重载后不生效。）
+            llm_factory.LLMFactory._default_instance = None
+            # 具名 LLM 缓存：_report_llm / _compress_llm / _judge_llm（[实例, 锁] 列表）
             for _cache_list in ["_report_llm", "_compress_llm", "_judge_llm"]:
                 if hasattr(llm_factory, _cache_list):
                     getattr(llm_factory, _cache_list)[0] = None

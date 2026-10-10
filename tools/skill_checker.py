@@ -9,7 +9,7 @@
 用法:
   python -m tools.skill_checker              # 检查所有技能
   python -m tools.skill_checker --fix-hints   # 显示修复建议
-  python -m tools.skill_checker --skill stock_query  # 检查指定技能
+  python -m tools.skill_checker --skill stock_analysis  # 检查指定技能
 """
 import os
 import sys

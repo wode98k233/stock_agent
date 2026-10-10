@@ -303,6 +303,50 @@ def get_strategy_meta() -> dict:
     }
 
 
+def export_llm_schema() -> str:
+    """只读导出编译器的指标/字段/数据/运算符清单，作为 LLM prompt 约束（A3 schema 单源）。
+
+    与 get_strategy_meta 同模式的只读导出，不改编译逻辑。
+    供 StrategyGenerator 与 /strategies/generate 端点共用（M4 单源化）。
+    """
+    lines: List[str] = []
+    lines.append('## 可用指标函数（func 只能取以下值）')
+    for func, info in INDICATOR_MAP.items():
+        fields = _fields_for_func(func)
+        field_names = [f['value'] for f in fields]
+        if func == 'volume':
+            arg_str = '（无参数，直接代表成交量线）'
+            field_str = '（无 field）'
+        else:
+            args = info['arg_names']
+            arg_str = '(' + ', '.join(args) + ')'
+            field_str = '可选 field: ' + (', '.join(field_names) if field_names else '（无，单线指标不带 field）')
+        lines.append(f'- {func}{arg_str}；{field_str}')
+    lines.append('')
+    lines.append('## 字段（field）全局取值')
+    lines.append(', '.join(sorted(FIELD_MAP.keys())))
+    lines.append('')
+    lines.append('## 数据引用（"data" 只能取以下值）')
+    lines.append(', '.join(sorted(DATA_REF_MAP.keys())))
+    lines.append('')
+    lines.append('## 运算符（op 只能取以下值）')
+    lines.append('比较: ' + ', '.join(sorted(COMPARE_OPS)))
+    lines.append('跨越: ' + ', '.join(sorted(CROSS_OPS)) + '（cross_above/cross_below 左右必须是指标定义 {"func": ...}）')
+    lines.append('')
+    lines.append('## 结构硬性要求')
+    lines.append('1. 顶层键: meta / params / conditions / risk / chart_indicators（后两者可选）；')
+    lines.append('2. params 中每个参数必须是 {"value": 数值, "min": 数值, "max": 数值, "label": 文本, "type": "int"|"float"}；')
+    lines.append('3. conditions.buy 与 conditions.sell 必须同时存在，各含 logic("AND"|"OR") 与 rules 数组，rules 不得为空；')
+    lines.append('4. 规则叶子结构: {"type": "indicator", "left": {...}, "op": "...", "right": {...}}；')
+    lines.append('   左/右值只能是三种之一: {"func": "指标名", "args": [...], "field": 可选} / {"value": 数值} / {"data": "数据名", "shift": 可选}；')
+    lines.append('5. 指标 args 中引用参数用 "{参数名}" 字符串，字面量直接写数值，数据引用写 "close" 等；')
+    lines.append('6. KDJ 固定写法: {"func": "kdj", "args": ["high", "low", "close", "{kdj_n}"], "field": "k"|"d"|"j"}；')
+    lines.append('7. 严禁使用清单之外的指标函数（如 obv/vwap/adx/cci/wr 等）和清单之外的数据引用；')
+    lines.append('8. 指标的 field 必须属于该指标的合法 field 列表（见上方每个指标的可选 field）；')
+    lines.append('9. 只输出一个合法 JSON 对象，不要任何解释文字、不要 markdown 代码块围栏。')
+    return '\n'.join(lines)
+
+
 def _fields_for_func(func_name: str) -> list:
     """返回指标的多字段列表（如 MACD 有 macd/signal）"""
     if func_name == 'macd':
@@ -342,6 +386,11 @@ def compile_strategy(json_str: str) -> Type[StockSolveStrategy]:
         StockSolveStrategy 的子类，可直接传给 cerebro.addstrategy()
     """
     data = json.loads(json_str)
+
+    # 编译期 field 校验（A3 Spike 修订 1）：
+    # FIELD_MAP 查找原本发生在运行时 _create_bt_indicator，编译通过 ≠ 回测可跑。
+    # 此处在编译期即拒绝「field 不属于该指标」的策略，错误信息自带合法 field 清单。
+    _validate_fields(data)
 
     ctx = _CompileContext()
 
@@ -870,6 +919,51 @@ def _make_reason(node: RuleNode, strategy_instance, prefix: str) -> str:
 # ============================================================
 # 辅助函数
 # ============================================================
+
+
+# ============================================================
+# 编译期 field 校验（A3 Spike 修订 1）
+# ============================================================
+
+
+def _validate_fields(data: dict) -> None:
+    """校验策略 JSON 中每个指标定义的 field 是否属于该指标的合法 field 列表。
+
+    合法 field 来自 _fields_for_func()（macd→macd/signal、boll→upper/mid/lower、
+    kdj→k/d/j、dpo→dpo/madpo、dma→dif/ama、cyw→cyw）；其余指标不允许带 field。
+    """
+    conditions = data.get('conditions') or {}
+
+    def _walk(rules: list) -> None:
+        for rule in rules or []:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get('type') == 'group':
+                _walk(rule.get('rules', []))
+                continue
+            for side in ('left', 'right'):
+                defn = rule.get(side)
+                if not isinstance(defn, dict) or 'func' not in defn:
+                    continue
+                func = defn.get('func')
+                field = defn.get('field')
+                if not field or func not in INDICATOR_MAP:
+                    continue
+                valid_fields = {f['value'] for f in _fields_for_func(func)}
+                if not valid_fields:
+                    raise ValueError(
+                        f"指标 '{func}' 不支持 field（单线指标不带 field），"
+                        f"请移除 \"field\": \"{field}\"。"
+                    )
+                if field not in valid_fields:
+                    raise ValueError(
+                        f"指标 '{func}' 的 field '{field}' 不存在。\n"
+                        f"合法 field: {sorted(valid_fields)}。"
+                    )
+
+    for side in ('buy', 'sell'):
+        cond = conditions.get(side) or {}
+        _walk(cond.get('rules', []))
 
 
 def _to_class_name(name: str) -> str:

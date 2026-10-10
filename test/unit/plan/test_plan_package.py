@@ -274,44 +274,74 @@ def test_match_pending_empty():
 
 
 def test_match_pending_basic():
-    """新步骤与未执行步骤匹配"""
+    """同 skill 且未执行段唯一候选 → 直接替换"""
     from agents.plan.analyze import match_pending_steps
-    new_steps = [{"instruction": "查询茅台股价"}]
-    plan = [{"instruction": "查询茅台股价数据"}]
+    new_steps = [{"skill": "stock_query", "instruction": "查询茅台股价"}]
+    plan = [{"skill": "stock_query", "instruction": "查询茅台股价数据"}]
     result = match_pending_steps(new_steps, plan, 0)
     assert result == {0: 0}
 
 
+def test_match_pending_cross_skill_blocked_even_if_identical_text():
+    """2026-09-27 决策 A：跨 skill 一律不替换——哪怕 instruction 完全相同。
+
+    背景：若允许跨 skill 关键词替换，短而泛化的老 instruction（如「综合结论」4 字）
+    对比 51 字新指令时重叠可达 1.0，会把已规划步骤静默吃掉。
+    """
+    from agents.plan.analyze import match_pending_steps
+    new_steps = [{"skill": "hang_seng_env", "instruction": "获取环境因子综合结论"}]
+    plan = [{"skill": "stock_analysis", "instruction": "获取环境因子综合结论"}]
+    assert match_pending_steps(new_steps, plan, 0) == {}
+
+
+def test_match_pending_generic_short_instruction_not_stolen():
+    """老步 instruction 短而泛化时不会被抢位（决策 A 的直接回归）。"""
+    from agents.plan.analyze import match_pending_steps
+    new_steps = [{
+        "skill": "hang_seng_env",
+        "instruction": "获取恒生科技环境因子综合结论（七因子：美债10Y分母端、内外双轴、价格位置…）",
+        "purpose": "评估估值与价格是否处于历史低位",
+    }]
+    plan = [{"skill": "stock_analysis", "instruction": "综合结论", "purpose": "汇总"}]
+    assert match_pending_steps(new_steps, plan, 0) == {}, "泛化短 instruction 不应被跨 skill 抢位"
+
+
 def test_match_pending_no_match():
-    """新步骤与未执行步骤不匹配（overlap < threshold）"""
+    """新步骤与未执行步骤 skill 不同 → 不匹配"""
     from agents.plan.analyze import match_pending_steps
-    new_steps = [{"instruction": "查询新闻资讯"}]
-    plan = [{"instruction": "分析K线走势"}]
-    result = match_pending_steps(new_steps, plan, 0)
-    assert result == {}
+    new_steps = [{"skill": "news", "instruction": "查询新闻资讯"}]
+    plan = [{"skill": "mx_data", "instruction": "分析K线走势"}]
+    assert match_pending_steps(new_steps, plan, 0) == {}
 
 
-def test_match_pending_multi_to_one_best():
-    """多个新步骤匹配同一老步骤 → 取 overlap 最高的"""
+def test_match_pending_multi_same_skill_best_wins():
+    """同 skill 多候选 → 取关键词最像的一个"""
     from agents.plan.analyze import match_pending_steps
-    new_steps = [
-        {"instruction": "查询茅台实时股价"},  # overlap 较高
-        {"instruction": "获取茅台股价信息"},  # overlap 也较高但稍低
+    new_steps = [{"skill": "mx_data", "instruction": "查询茅台股价"}]
+    plan = [
+        {"skill": "mx_data", "instruction": "查询茅台股价数据"},   # 更像
+        {"skill": "mx_data", "instruction": "查询行业涨跌幅排名"},
     ]
-    plan = [{"instruction": "查询茅台股价"}]
     result = match_pending_steps(new_steps, plan, 0)
-    assert 0 in result  # 第一个匹配
-    assert 1 not in result  # 第二个不匹配（已被占用）
+    assert result == {0: 0}
 
 
-def test_match_pending_threshold_boundary():
-    """overlap 边界值测试 — 完全不同的指令不匹配"""
+def test_match_pending_multi_same_skill_dissimilar_appends():
+    """同 skill 多候选且都不像 → 视为新任务（不替换，交给调用方追加）"""
     from agents.plan.analyze import match_pending_steps
-    # 构造完全不同的指令
-    new_steps = [{"instruction": "分析K线走势形态"}]
-    plan = [{"instruction": "获取新闻舆情数据"}]
-    result = match_pending_steps(new_steps, plan, 0, threshold=0.6)
-    assert result == {}
+    new_steps = [{"skill": "mx_data", "instruction": "查询港股通持仓明细"}]
+    plan = [
+        {"skill": "mx_data", "instruction": "查询茅台股价数据"},
+        {"skill": "mx_data", "instruction": "查询行业涨跌幅排名"},
+    ]
+    assert match_pending_steps(new_steps, plan, 0) == {}
+
+
+def test_match_pending_missing_skill_never_matches():
+    """任一侧缺 skill 时无法判定能力等价 → 不替换"""
+    from agents.plan.analyze import match_pending_steps
+    assert match_pending_steps([{"instruction": "查询茅台股价"}], [{"skill": "a", "instruction": "查询茅台股价"}], 0) == {}
+    assert match_pending_steps([{"skill": "a", "instruction": "查询茅台股价"}], [{"instruction": "查询茅台股价"}], 0) == {}
 
 
 # ============================================================
@@ -339,10 +369,10 @@ def test_dedup_by_purpose():
 
 
 def test_dedup_by_pending_replaces():
-    """与待执行步骤指令相似的新步骤应被保留用于替换（而非过滤）"""
+    """与待执行步骤同 skill 的新步骤应被保留用于替换（而非过滤）"""
     from agents.plan.analyze import dedup_new_steps
     new_steps = [{"skill": "a", "instruction": "查询茅台股价", "purpose": "获取价格"}]
-    original_plan = [{"instruction": "查询茅台股价", "purpose": "获取价格"}]
+    original_plan = [{"skill": "a", "instruction": "查询茅台股价", "purpose": "获取价格"}]
     unique, reasons, replace_map = dedup_new_steps(new_steps, [], original_plan, 0)
     # 新逻辑：与未执行步骤匹配 → 保留用于替换，不过滤
     assert len(unique) == 1
@@ -363,7 +393,7 @@ def test_dedup_all_unique():
 
 
 def test_dedup_multi_replace():
-    """多个新步骤：2个匹配未执行步骤（替换），1个全新（追加）"""
+    """多个新步骤：2个与未执行步骤同 skill（替换），1个全新 skill（追加）"""
     from agents.plan.analyze import dedup_new_steps
     new_steps = [
         {"skill": "a", "instruction": "查询茅台股价", "purpose": "获取价格"},
@@ -371,15 +401,15 @@ def test_dedup_multi_replace():
         {"skill": "c", "instruction": "查询新闻资讯", "purpose": "获取消息"},
     ]
     original_plan = [
-        {"instruction": "查询茅台股价", "purpose": "获取价格"},
-        {"instruction": "分析茅台K线", "purpose": "技术分析"},
-        {"instruction": "查询行业排名", "purpose": "行业对比"},
+        {"skill": "a", "instruction": "查询茅台股价", "purpose": "获取价格"},
+        {"skill": "b", "instruction": "分析茅台K线", "purpose": "技术分析"},
+        {"skill": "d", "instruction": "查询行业排名", "purpose": "行业对比"},
     ]
     unique, reasons, replace_map = dedup_new_steps(new_steps, [], original_plan, 0)
     assert len(unique) == 3  # 全部保留
     assert len(replace_map) == 2  # 2个替换映射
-    assert 0 in replace_map and 1 in replace_map  # 前两个匹配
-    assert 2 not in replace_map  # 第三个是全新步骤
+    assert 0 in replace_map and 1 in replace_map  # 前两个同 skill 匹配
+    assert 2 not in replace_map  # 第三个是全新 skill
 
 
 def test_dedup_completed_priority_over_pending():

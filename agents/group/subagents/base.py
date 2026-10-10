@@ -3,6 +3,7 @@
 子类定义能力属性（agent_name, assigned_skills 等），
 基类提供 __call__ 使其可直接作为 workflow.add_node() 的节点。
 """
+import copy
 import datetime
 import re
 from typing import Any
@@ -161,9 +162,73 @@ class SpecializedAgent:
         task_purpose = state.get("current_task_purpose", "")
 
         if current_idx >= len(plan):
-            return {}
+            # 计划已全部处理完仍被调度：不执行（省 token），标记为已处理的计划外目标，
+            # 供 supervisor 下一轮剔除该调度目标，避免"调度→越界→再调度"空转
+            extra_executed = list(state.get("_extra_executed", []))
+            if self.agent_name not in extra_executed:
+                extra_executed.append(self.agent_name)
+            logger.warning(
+                "E",
+                f"[{self.agent_name}] current_step_index {current_idx} 越界（计划已全部处理），"
+                "标记计划外已处理，不执行",
+            )
+            return {
+                "current_agent_names": [],
+                "current_task_purpose": "",
+                "_extra_executed": extra_executed,
+            }
 
-        step = plan[current_idx]
+        # ── 槽位归属校验（B）──
+        # current_idx 指向的步骤若不属于自己，全表查找自己的未完成步骤；
+        # 仍找不到 → 计划外执行（结果只累积，不占用计划槽位、不推进 index）。
+        # 防止"重复调度同一 agent 补采时写错计划槽位"导致后续步骤永远匹配不上。
+        # parallel_executor 可通过 _extra_dispatch=True 显式声明计划外调度。
+        own_idx = current_idx
+        extra_dispatch = bool(state.get("_extra_dispatch", False))
+        # 取**拷贝**而非 plan 条目的别名：下方 step["status"/"result"/...] 是原地赋值，
+        # 别名会让空结果直接改写 plan（绕过末尾「重跑保护」）。
+        # 2026-10-01：补采熔断 result="" 原地清空了数据底版所在的 plan 槽位。
+        step = copy.deepcopy(plan[current_idx])
+        if not extra_dispatch and self.agent_name not in step.get("agent_names", []):
+            owned_idx = next(
+                (
+                    idx
+                    for idx, s in enumerate(plan)
+                    if self.agent_name in s.get("agent_names", [])
+                    and s.get("status") != "success"
+                ),
+                None,
+            )
+            if owned_idx is not None:
+                logger.info(
+                    "E",
+                    f"[{self.agent_name}] 槽位重定位: current_step_index {current_idx} → {owned_idx}"
+                    f" (步骤 {plan[owned_idx].get('step')})",
+                )
+                own_idx = owned_idx
+                step = copy.deepcopy(plan[owned_idx])
+            else:
+                extra_dispatch = True
+                logger.warning(
+                    "E",
+                    f"[{self.agent_name}] 未匹配到任何计划步骤，走计划外执行"
+                    "（结果仅累积，不占用计划槽位）",
+                )
+                step = {
+                    "step": 0,
+                    "agent_names": [self.agent_name],
+                    "task_purpose": task_purpose,
+                    "input_params": {},
+                    "status": "pending",
+                    "result": "",
+                    "feedback": "",
+                    "requests": [],
+                    "retry_count": 0,
+                    "executed_at": "",
+                    "run_group": 0,
+                    "depends_on": [],
+                }
+
         context_msgs = self.build_context(state)
 
         # trace
@@ -237,11 +302,21 @@ class SpecializedAgent:
                 "tool_call_id": "",
             })
 
-        # 更新 plan
-        for i, p in enumerate(plan):
-            if p["step"] == step["step"]:
-                plan[i] = step
-                break
+        # 更新 plan（计划外执行不写回计划槽位）
+        if not extra_dispatch:
+            for i, p in enumerate(plan):
+                if p["step"] == step["step"]:
+                    # 重跑保护：本次 result 为空时保留既有非空结果，不覆盖。
+                    # 2026-10-01 事故：补采因预算熔断 result="" 覆盖了数据底版，
+                    # 报告层 Step1 只剩 276 字符任务描述 → 报告零原始数据。
+                    if step.get("result") or not p.get("result"):
+                        plan[i] = step
+                    else:
+                        logger.warning(
+                            "E",
+                            f"[{self.agent_name}] 本次 result 为空，保留步骤 {p['step']} 的既有结果，不覆盖",
+                        )
+                    break
 
         # 更新 _completed_agents（并行 join 计数器）
         completed = list(state.get("_completed_agents", []))
@@ -258,9 +333,12 @@ class SpecializedAgent:
             "status": step.get("status", "success"),
         })
 
+        # 计划外执行标记（供 supervisor / parallel_executor 剔除重复调度）
+        extra_executed = list(state.get("_extra_executed", []))
+        if extra_dispatch and self.agent_name not in extra_executed:
+            extra_executed.append(self.agent_name)
+
         result_dict = {
-            "plan_steps": plan,
-            "current_step_index": current_idx + 1,
             "accumulated_data": accumulated,
             "tool_calls": tool_calls,
             "current_agent_names": [],
@@ -269,7 +347,13 @@ class SpecializedAgent:
             "_completed_agents": completed if state.get("_parallel_batch_id") else [],
             "_parallel_batch_id": state.get("_parallel_batch_id"),
             "_total_parallel": state.get("_total_parallel", 0),
+            "_extra_executed": extra_executed,
         }
+
+        # 计划内执行才推进计划槽位
+        if not extra_dispatch:
+            result_dict["plan_steps"] = plan
+            result_dict["current_step_index"] = own_idx + 1
 
         # DataCollector 产出数据底版，注入后续 agent 上下文
         if self.agent_type == "data_collection" and step["result"]:

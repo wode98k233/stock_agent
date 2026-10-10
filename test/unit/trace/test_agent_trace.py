@@ -292,6 +292,36 @@ def test_on_tool_start_end():
                 pass
 
 
+def test_update_tool_step_metrics_merges_extra():
+    """压缩埋点：update_tool_step_metrics 应把 compress 指标并入 tool step 的 extra，且不清空原文。"""
+    from utils.agent_trace import TraceRecorder
+    db_path = Path(tempfile.gettempdir()) / f"test_tool_metrics_{uuid.uuid4().hex[:8]}.db"
+    try:
+        r = TraceRecorder("test_agent", str(db_path))
+        rid = r.start_run("input")
+        r.on_tool_start({"name": "mx_data_query"}, "{}", run_id="tool-9", parent_run_id=rid)
+        r.on_tool_end("RAW" * 100, run_id="tool-9")
+        r.update_tool_step_metrics("tool-9", {
+            "raw_len": 300, "final_len": 30, "compress_method": "trim",
+        })
+
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        step = conn.execute("SELECT output, extra FROM steps WHERE event_run_id=?", ("tool-9",)).fetchone()
+        assert step["output"] == "RAW" * 100  # 原文仍保留
+        extra = json.loads(step["extra"])
+        assert extra["compress"]["final_len"] == 30
+        assert extra["compress"]["compress_method"] == "trim"
+        conn.close()
+    finally:
+        if db_path.exists():
+            try:
+                db_path.unlink()
+            except PermissionError:
+                pass
+
+
 def test_on_tool_error():
     """验证 on_tool_error 记录工具错误"""
     from utils.agent_trace import TraceRecorder
@@ -548,12 +578,21 @@ def test_cli_serve_imports():
 # ============================================================
 
 def test_ddl_creates_all_tables():
-    """验证 DDL 创建所有必要的表"""
-    from utils.agent_trace.models import _DDL
-    assert "CREATE TABLE IF NOT EXISTS runs" in _DDL
-    assert "CREATE TABLE IF NOT EXISTS steps" in _DDL
-    assert "CREATE TABLE IF NOT EXISTS messages" in _DDL
-    assert "CREATE INDEX IF NOT EXISTS idx_steps_run" in _DDL
+    """验证统一 schema（utils/db_schema agent_trace 组）创建所有必要表与索引。"""
+    from utils.agent_trace.models import ensure_trace_schema
+    import sqlite3 as _sq
+    conn = _sq.connect(":memory:")
+    ensure_trace_schema(conn)
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"runs", "steps", "messages"} <= tables
+    indexes = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_steps_run" in indexes
+    # reasoning 补列迁移幂等生效（新库直接在 DDL 之后补上）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+    assert "reasoning" in cols
+    conn.close()
 
 
 # ============================================================

@@ -32,7 +32,11 @@
   transition: opacity 0.2s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.2s ease;
   z-index: 120;
   box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18), 0 4px 12px rgba(15, 23, 42, 0.08);
-  overflow: hidden;
+  /* 2026-09-18：这里原本是 overflow: hidden，会把顶栏「数据源」下拉整个裁掉。
+     成因：下拉是 absolute 定位、12 项（11 个可用源 + 自动）、展开近 600px，
+     而 modal 高度是内容驱动（列表短就矮），下拉超出 modal 下沿的部分就被剪掉 →
+     表现为「下拉框没完整显示出来」。
+     圆角改由 .watchlist-header / .watchlist-footer 自己承接。 */
 }
 
 .watchlist-modal.open {
@@ -48,6 +52,8 @@
   padding: 0 20px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, #fff 0%, #f7fafb 100%);
+  /* 承接 modal 圆角（modal 已去掉 overflow:hidden） */
+  border-radius: 10px 10px 0 0;
 }
 
 .watchlist-title {
@@ -390,6 +396,8 @@
   display: flex;
   gap: 8px;
   background: #fbfcfd;
+  /* 承接 modal 圆角（modal 已去掉 overflow:hidden） */
+  border-radius: 0 0 10px 10px;
 }
 
 .watchlist-input {
@@ -512,7 +520,16 @@
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  min-width: 230px;
+  /* 2026-09-18：原为 min-width: 230px，装不下真实描述。
+     实测后端 /api/datasources 返回 11 个可用源，其中「同花顺」描述 89 个汉字；
+     220px 文本区在 10px 字号下只放得下约 17 字 → 约 80% 被省略号吞掉。
+     改为定宽 340px + 换行 + 限高滚动。 */
+  width: 340px;
+  max-width: calc(100vw - 40px);
+  max-height: min(58vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -525,6 +542,15 @@
   z-index: 50;
 }
 
+.wl-source-dropdown::-webkit-scrollbar {
+  width: 5px;
+}
+
+.wl-source-dropdown::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 3px;
+}
+
 .wl-source-dropdown.open {
   opacity: 1;
   visibility: visible;
@@ -533,9 +559,9 @@
 
 .wl-source-option {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 9px 10px;
   border-radius: 7px;
   cursor: pointer;
 }
@@ -552,8 +578,9 @@
 
 .wl-source-option-name {
   color: var(--text);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 800;
+  line-height: 1.35;
 }
 
 .wl-source-option.active .wl-source-option-name {
@@ -561,15 +588,20 @@
 }
 
 .wl-source-option-desc {
-  color: #94a3b8;
-  font-size: 10px;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #8a97a8;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 3px;
+  /* 2026-09-18：去掉 nowrap + ellipsis（原为单行省略）。
+     描述最长 89 字，单行 10px 只显示约 17 字，用户看不到内容。
+     改为整段换行显示；极端长词用 overflow-wrap 兜底不撑破容器。 */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .wl-source-option-check {
+  flex-shrink: 0;
+  margin-top: 1px;
   color: var(--brand);
   opacity: 0;
 }

@@ -73,5 +73,11 @@ class GroupState(TypedDict):
     _completed_agents: List[str]     # 当前批次已完成 agent 列表
     _total_parallel: int           # 当前批次并行 agent 总数
 
+    # 调度-计划对齐护栏
+    _extra_dispatched: List[str]   # supervisor 已授权放行的计划外 agent（授权去重）
+    _extra_executed: List[str]     # 已实际执行完成的计划外 agent（防重复调度）
+    _empty_dispatch_count: int     # parallel_executor 连续 0 步骤绑定的空转计数（>=3 → early_stop）
+    _extra_dispatch: bool          # parallel_executor → subagent 直调链的显式计划外标记（不入全局 state）
+
     # Supervisor 模式：调度历史（用于构建缓存友好的消息结构）
     dispatch_history: List[dict]  # [{"dispatch": {"name": str, "purpose": str}, "result": str}]

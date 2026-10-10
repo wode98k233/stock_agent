@@ -42,22 +42,22 @@ def test_build_catalog_prompt(registry):
     assert isinstance(catalog, str)
     assert len(catalog) > 100, f"catalog prompt 过短: {len(catalog)} 字符"
     # 应包含至少一个已知 skill 名
-    known_skills = ["stock_query", "technical_analysis", "mx_data"]
+    known_skills = ["stock_analysis", "mx_data"]
     found = [s for s in known_skills if s in catalog]
     assert len(found) >= 1, f"catalog 中未找到任何已知 skill，只找到: {found}"
 
 
 @pytest.mark.integration
-def test_build_tools_detail_prompt_stock_query(registry):
-    """build_tools_detail_prompt(stock_query) 应返回使用指南（若技能已启用）"""
+def test_build_tools_detail_prompt_stock_analysis(registry):
+    """build_tools_detail_prompt(stock_analysis) 应返回使用指南（若技能已启用）"""
     from tools.skills import SkillPromptBuilder
 
-    guide = SkillPromptBuilder.build_tools_detail_prompt(registry, "stock_query")
+    guide = SkillPromptBuilder.build_tools_detail_prompt(registry, "stock_analysis")
     assert isinstance(guide, str)
-    # stock_query 可能被配置禁用，此时返回空字符串
+    # stock_analysis 可能被配置禁用，此时返回空字符串
     if len(guide) == 0:
-        pytest.skip("stock_query 技能已禁用（配置文件中 enabled=false）")
-    assert len(guide) > 50, f"stock_query 指南过短: {len(guide)} 字符"
+        pytest.skip("stock_analysis 技能已禁用（配置文件中 enabled=false）")
+    assert len(guide) > 50, f"stock_analysis 指南过短: {len(guide)} 字符"
 
 
 @pytest.mark.integration
@@ -73,7 +73,7 @@ def test_build_tools_detail_prompt_mx_data(registry):
 @pytest.mark.integration
 def test_usage_guide_parsing(registry):
     """usage_guide 应能正确解析为结构化内容"""
-    for skill_name in ["stock_query", "technical_analysis"]:
+    for skill_name in ["stock_analysis"]:
         usage_guide = registry.get_skill_usage_guide(skill_name)
         if usage_guide:
             assert isinstance(usage_guide, str)
@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     tests = [
         lambda: test_build_catalog_prompt(reg),
-        lambda: test_build_tools_detail_prompt_stock_query(reg),
+        lambda: test_build_tools_detail_prompt_stock_analysis(reg),
         lambda: test_build_tools_detail_prompt_mx_data(reg),
         lambda: test_usage_guide_parsing(reg),
     ]

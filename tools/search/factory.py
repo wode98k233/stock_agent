@@ -22,6 +22,8 @@ from .brave_provider import BraveSearchProvider
 from .searxng_provider import SearXNGSearchProvider
 from .anspire_provider import AnspireSearchProvider
 from .minimax_provider import MiniMaxSearchProvider
+from .parallel_provider import ParallelSearchProvider
+from .exa_provider import ExaSearchProvider
 
 logger = logging.getLogger("radar.search")
 
@@ -84,7 +86,22 @@ class SearchProviderFactory:
             providers.append(MiniMaxSearchProvider(minimax_keys))
             logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 Key")
 
-        # 8. SearXNG（自建实例）
+        # 8/9. Parallel / Exa —— 免 Key 托管 MCP（境外），作为**兜底源**
+        # 排在所有需要 Key 的付费源之后：付费源是用户主动配置的、额度与质量更可控；
+        # 免 Key 属于厂商免费档（有频率限制、非 SLA），适合在 MX 额度耗尽或付费源未配时顶上。
+        # 注意：DDG 系免 Key MCP 在国内不可达（2026-10-06 实测），只有这两个托管版可用。
+        # 用 `SEARCH_FREE_MCP_ENABLED=false` 可整体关闭（数据出境合规开关）。
+        parallel = ParallelSearchProvider()
+        if parallel.is_available:
+            providers.append(parallel)
+            logger.info("已配置 Parallel 搜索（免 Key，MCP 托管）")
+
+        exa = ExaSearchProvider()
+        if exa.is_available:
+            providers.append(exa)
+            logger.info("已配置 Exa 搜索（免 Key，MCP 托管）")
+
+        # 10. SearXNG（自建实例）
         searxng_urls = os.getenv("SEARXNG_URLS", "")
         searxng_url_list = [u.strip() for u in searxng_urls.split(",") if u.strip()] if searxng_urls else []
         searxng_public = os.getenv("SEARXNG_PUBLIC_INSTANCES", "false").lower() == "true"

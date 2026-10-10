@@ -41,6 +41,7 @@ class EfinanceDataSource(DataSource):
         market = DataSourceManager.detect_market(symbol)
         if market == "etf":
             # ETF 用 stock API（不是 fund API），返回完整 OHLCV
+            # 参考 daily_stock_analysis efinance_fetcher.py:453-461
             df = ef.stock.get_quote_history(symbol, beg=beg, end=_end, klt=klt, fqt=1)
         else:
             df = ef.stock.get_quote_history(symbol, beg=beg, end=_end, klt=klt)

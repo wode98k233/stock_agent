@@ -1,0 +1,385 @@
+/* 研究台账页（th- 前缀）
+ *
+ * 布局模型与短线情绪页保持一致：**纯 flex/grid，高度全由浏览器算**。
+ *   壳 .th-page      flex column，高度 = 视口（position:fixed; inset:0）
+ *     ├ 顶栏         flex:0 0 auto
+ *     └ .th-body     flex:1 1 0 + min-height:0
+ *         ├ 左侧台账列表（定宽）+ 右侧主区（1fr）
+ *         └ 主区内：hero(flex:none) + 两行(flex 权重分配)
+ *
+ * 三条硬约定（缺任一条就退化成撑破/留白）：
+ *   1) 要分配剩余高度的容器：flex:1 1 0 且 min-height:0，basis 必须是 0
+ *   2) 滚动体：flex:1 1 0 + min-height:0 + overflow-y:auto
+ *   3) 标题/列头/指标行等不拉伸的块：flex:none
+ * ⚠️ 不在本文件写死内容高度，也不用 JS 测量回写高度。
+ *
+ * 断点走容器查询（@container thpage）而非媒体查询 —— 导出/嵌iframe 时窗口尺寸会变，
+ * 媒体查询会走错分支；且容器查询不能作用于容器自身，滚动一律落在后代 .th-scroll 上。
+ *
+ * 配色：得分色阶用 A 股惯例「红=有利、绿=不利、黄=中性」（--up/--down/--warn）。
+ * 若想按西方惯例反过来，只改 .th-score 的四个类即可。
+ */
+.th-page { display: none; position: fixed; inset: 0; z-index: 900; background: var(--bg, #f6f7f9);
+  overflow: hidden; font-family: var(--font, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif);
+  container-type: size; container-name: thpage; }
+.th-page.open { display: flex; flex-direction: column; }
+
+/* ── 顶栏 ── */
+.th-topbar { flex: 0 0 auto; background: var(--panel, #fff); border-bottom: 1px solid var(--border, #e5e7eb);
+  padding: 9px 20px; display: flex; align-items: center; gap: 10px; }
+.th-back-btn { width: 28px; height: 28px; border: 1px solid var(--border, #e5e7eb); border-radius: 7px;
+  background: var(--panel, #fff); color: var(--text, #1c2430); cursor: pointer; display: flex;
+  align-items: center; justify-content: center; flex: none; }
+.th-back-btn:hover { background: var(--border-light, #f0f0f0); }
+.th-page-title { display: flex; align-items: center; gap: 7px; font-size: 14.5px; font-weight: 600;
+  color: var(--text, #1c2430); }
+.th-title-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand, #176b5b); }
+.th-meta { font-size: 12px; color: var(--text-secondary, #6b7280); }
+.th-topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+.th-btn { border: 1px solid var(--border, #e5e7eb); background: var(--panel, #fff); cursor: pointer;
+  padding: 4px 11px; border-radius: 7px; font-size: 12.5px; color: var(--text, #1c2430); white-space: nowrap; }
+.th-btn:hover { background: var(--border-light, #f0f0f0); }
+.th-btn:disabled { opacity: .55; cursor: default; }
+.th-btn.th-primary { background: var(--brand, #176b5b); border-color: var(--brand, #176b5b); color: #fff; }
+.th-btn.th-primary:hover { filter: brightness(1.08); }
+
+/* ── 主体：两栏 ── */
+.th-body { flex: 1 1 0; min-height: 0; display: grid; gap: 10px;
+  grid-template-columns: 268px minmax(0, 1fr); padding: 10px 20px 12px; overflow: hidden; }
+
+/* ── 左：台账列表 ── */
+.th-side { display: flex; flex-direction: column; min-height: 0; background: var(--panel, #fff);
+  border: 1px solid var(--border, #e5e7eb); border-radius: var(--radius-lg, 12px); overflow: hidden; }
+.th-side-head { flex: none; padding: 10px 13px 8px; font-size: 12.5px; font-weight: 600;
+  color: var(--text, #1c2430); border-bottom: 1px solid var(--border-light, #f0f0f0);
+  display: flex; align-items: center; gap: 6px; }
+.th-side-head .th-count { font-weight: 400; color: var(--text-secondary, #6b7280); }
+.th-side-list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 6px; }
+.th-item { display: block; width: 100%; text-align: left; border: 1px solid transparent; cursor: pointer;
+  background: transparent; border-radius: 9px; padding: 9px 10px; margin-bottom: 4px; }
+.th-item:hover { background: var(--border-light, #f0f0f0); }
+.th-item.active { background: var(--brand-bg, rgba(23,107,91,.08)); border-color: var(--brand, #176b5b); }
+.th-item-name { font-size: 13px; font-weight: 600; color: var(--text, #1c2430);
+  display: flex; align-items: center; gap: 6px; }
+.th-item-desc { font-size: 11.5px; color: var(--text-secondary, #6b7280); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.th-item-foot { display: flex; align-items: baseline; gap: 7px; margin-top: 6px; font-size: 11.5px;
+  color: var(--text-secondary, #6b7280); }
+.th-item-total { font-family: var(--font-mono, monospace); font-size: 14px; font-weight: 700; }
+.th-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.th-dot.ok { background: var(--success, #1e8449); }
+.th-dot.warn { background: var(--warn, #c88a1e); }
+.th-dot.bad { background: var(--danger, #c0392b); }
+.th-dot.none { background: var(--border-main, #c8d0d8); }
+
+/* ── 右：主区 ── */
+/* 主区纵向滚动：原设计是「两行按权重瓜分视口、一屏看全」，但内容增加后
+   新块没有权重可分配，会被压成 0 高度再被 overflow:hidden 裁掉（2026-09-22 实测：
+   阶段条/情景/链路/矩阵全被挤没）。改为内容按自然高度排列 + 主区滚动兜底。 */
+.th-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; gap: 10px;
+  overflow-y: auto; overflow-x: hidden; }
+
+/* 结论带（不拉伸） */
+.th-hero { flex: none; background: var(--panel, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius-lg, 12px); padding: 13px 18px; display: flex; align-items: center;
+  gap: 16px; flex-wrap: wrap; }
+.th-verdict { font-size: 19px; font-weight: 700; padding: 3px 16px; border-radius: 999px;
+  border: 1px solid currentColor; }
+.th-action { font-size: 13.5px; color: var(--text, #1c2430); }
+.th-hero-right { margin-left: auto; text-align: right; font-size: 12px;
+  color: var(--text-secondary, #6b7280); line-height: 1.55; }
+.th-hero-right b { font-family: var(--font-mono, monospace); font-size: 15px; color: var(--text, #1c2430); }
+
+/* 各行按内容高度排列（不再瓜分视口高度）；min-height:0 仍是内部滚动的前提 */
+.th-rows { flex: none; display: flex; flex-direction: column; gap: 10px; }
+.th-row { display: grid; gap: 10px; }
+.th-row-factors { grid-template-columns: minmax(0, 1fr); }
+.th-row-bottom { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr); }
+
+/* 卡片 = 壳 + 滚动体。壳不写 flex:none，否则内部 basis:0 的滚动体会塌成 0 */
+.th-card { background: var(--panel, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius-lg, 12px); display: flex; flex-direction: column;
+  min-height: 0; min-width: 0; overflow: hidden; }
+.th-card-head { flex: none; padding: 9px 14px 7px; font-size: 13px; font-weight: 600;
+  color: var(--text, #1c2430); border-bottom: 1px solid var(--border-light, #f0f0f0);
+  display: flex; align-items: center; gap: 7px; }
+.th-card-head .th-sub { font-weight: 400; font-size: 11.5px; color: var(--text-secondary, #6b7280); }
+/* 滚动体：父链已改为 auto 高度，卡片按内容展开，不再内部滚动（整页滚动兜底） */
+.th-scroll { flex: 0 0 auto; padding: 10px 12px; }
+
+/* ── 因子卡网格 ── */
+.th-factors { display: grid; gap: 9px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.th-factor { border: 1px solid var(--border-light, #f0f0f0); border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 5px; }
+.th-factor-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.th-factor-name { font-size: 12.5px; font-weight: 600; color: var(--text, #1c2430); }
+/* 状态用文字，不只靠颜色区分（色阶红/绿对色盲不友好，且中性与不利需可读） */
+.th-factor-status { font-size: 11.5px; color: var(--text-secondary, #6b7280); margin-left: auto;
+  white-space: nowrap; }
+.th-score { font-size: 11.5px; font-weight: 700; color: #fff; border-radius: 999px; padding: 1px 9px; flex: none; }
+.th-score.s2 { background: var(--up, #c0392b); }
+.th-score.s1 { background: var(--brand, #176b5b); }
+.th-score.s0 { background: var(--warn, #c88a1e); }
+.th-score.sm { background: var(--down, #1e8449); }
+.th-score.sn { background: var(--border-main, #8a97a8); }
+.th-factor-value { font-family: var(--font-mono, monospace); font-size: 21px; font-weight: 700;
+  color: var(--text, #1c2430); line-height: 1.15; }
+.th-factor-value .unit { font-size: 11.5px; font-weight: 400; color: var(--text-secondary, #6b7280);
+  margin-left: 3px; }
+.th-factor-detail { font-size: 11.5px; color: var(--text-secondary, #6b7280); line-height: 1.5; }
+.th-factor-src { font-size: 11px; color: var(--muted, #9aa5b1); border-top: 1px solid var(--border-light, #f0f0f0);
+  padding-top: 5px; margin-top: auto; line-height: 1.5; }
+.th-flag { font-size: 11px; color: var(--danger, #c0392b); }
+/* 手工维护因子：分数照常计入总分，只是把「这一条是人填的」显式标出来，
+   避免读者以为所有读数都是当日自动取的。不属于扣分/降权提示。 */
+.th-factor.is-manual { border-color: var(--border-main, #8a97a8); background: var(--bg-soft, #f7f9fb);
+  box-shadow: inset 3px 0 0 var(--border-main, #8a97a8); }
+.th-badge-manual { font-size: 10.5px; font-weight: 600; color: var(--text-secondary, #6b7280);
+  border: 1px solid var(--border-main, #8a97a8); border-radius: 4px; padding: 0 5px;
+  margin-left: 6px; white-space: nowrap; flex: none; }
+/* 数据口径声明条：价格指数与全收益同一指数年化差 4~6pp，必须显式提示 */
+.th-caliber { font-size: 11.5px; line-height: 1.6; color: var(--text-secondary, #6b7280);
+  background: var(--bg-soft, #f7f9fb); border: 1px solid var(--border-light, #f0f0f0);
+  border-radius: 8px; padding: 7px 10px; margin: 0 0 10px; }
+.th-caliber b { color: var(--text, #1c2430); margin-right: 6px; }
+/* 历史阶段定位条：把报告的 20 年阶段划出来，高亮当前格。
+   **必须 flex:none** —— 它是 .th-main 的直接子元素，默认 flex-shrink:1，
+   在主区内容超出视口时会被压成几像素（2026-09-22 实测被压到 2px）。 */
+.th-phases { flex: none; margin-bottom: 10px; }
+
+/* ── 双维阶段矩阵（黄金类台账）：驱动力 × 位置 九宫格 ──
+   同 .th-phases：**.th-main 的直接子元素必须 flex:none**，否则会被 flex-shrink 压扁。 */
+.th-stages { flex: none; margin-bottom: 10px; }
+.th-stg-hero { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 11px 12px 4px; }
+.th-stg-badge { font-size: 17px; font-weight: 700; padding: 3px 15px; border-radius: 999px;
+  border: 1px solid currentColor; color: var(--text, #1c2430); }
+.th-stg-desc { font-size: 12.5px; color: var(--text-secondary, #6b7280); flex: 1; min-width: 200px; }
+.th-stg-num { margin-left: auto; text-align: right; font-size: 11.5px;
+  color: var(--text-secondary, #6b7280); line-height: 1.6; }
+.th-stg-num b { font-family: var(--font-mono, monospace); font-size: 14px; color: var(--text, #1c2430); }
+/* 九宫格：行=驱动力档（顺风/中性/逆风），列=位置档（低位/中性位/高位） */
+.th-stg-matrix { width: 100%; border-collapse: separate; border-spacing: 5px;
+  font-size: 12px; margin: 2px 0 0; padding: 0 12px 4px; }
+.th-stg-matrix th { font-weight: 600; }
+.th-stg-h { background: var(--bg-soft, #f7f9fb); color: var(--text-secondary, #6b7280);
+  border-radius: 7px; padding: 7px 4px; text-align: center; width: 1%; white-space: nowrap;
+  font-size: 11.5px; }
+.th-stg-c { border: 1px solid var(--border-light, #f0f0f0); border-radius: 7px;
+  padding: 9px 4px; text-align: center; color: var(--text-secondary, #6b7280);
+  background: var(--panel, #fff); opacity: .6; }
+/* 命中格：实心 + 高不透明；其余弱化。方向色遵循 A 股习惯：有利=红、不利=绿。
+   ⚠️ 底色**不能**用 `--border-main`（#e2e6ec 是浅色边框色）——配 `color:#fff`
+   会得到白字浅灰底、对比度约 1.2:1，实测量出来「看不见」。中性档用中灰 #5a6b80。 */
+.th-stg-c.is-cur { opacity: 1; font-weight: 700; color: #fff; border-color: transparent; }
+.th-stg-c.is-cur.th-tone-bull { background: var(--up, #e74c3c); }
+.th-stg-c.is-cur.th-tone-warn { background: var(--warn, #9a6700); }
+.th-stg-c.is-cur.th-tone-neutral { background: #5a6b80; }
+.th-stg-c.is-cur.th-tone-bear { background: var(--down, #176b5b); }
+.th-stg-badge.th-tone-bull { color: var(--up, #e74c3c); }
+.th-stg-badge.th-tone-warn { color: var(--warn, #9a6700); }
+.th-stg-badge.th-tone-neutral { color: #5a6b80; }
+.th-stg-badge.th-tone-bear { color: var(--down, #176b5b); }
+.th-stages .th-note { font-size: 11px; color: var(--muted, #9aa5b1); line-height: 1.55;
+  padding: 6px 12px 11px; }
+.th-stages > .th-flag { padding: 0 12px 6px; display: block; }
+.th-phase-track { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px;
+  padding: 10px 12px; overflow-x: auto; }
+.th-phase { border: 1px solid var(--border-light, #f0f0f0); border-radius: 8px; padding: 7px 9px;
+  opacity: .62; }
+.th-phase.is-cur { opacity: 1; border-color: var(--brand, #176b5b);
+  box-shadow: inset 0 -3px 0 var(--brand, #176b5b); }
+.th-phase-name { font-size: 12px; font-weight: 600; color: var(--text, #1c2430); }
+.th-phase.is-cur .th-phase-name { color: var(--brand, #176b5b); }
+.th-phase-span { font-size: 10.5px; color: var(--muted, #9aa5b1); margin: 2px 0 4px;
+  font-family: var(--font-mono, monospace); }
+.th-phase-feat { font-size: 10.5px; color: var(--text-secondary, #6b7280); line-height: 1.5; }
+/* 情景推演：命中项高亮 + 条件逐条带当前值 */
+.th-scens, .th-transs { display: grid; gap: 8px; }
+.th-scen, .th-trans { border: 1px solid var(--border-light, #f0f0f0); border-radius: 9px;
+  padding: 8px 10px; opacity: .7; }
+.th-scen.is-cur, .th-trans.is-on { opacity: 1; border-color: var(--brand, #176b5b);
+  background: var(--bg-soft, #f7f9fb); box-shadow: inset 3px 0 0 var(--brand, #176b5b); }
+.th-scen-head, .th-trans-head { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px;
+  color: var(--text, #1c2430); }
+.th-scen-prob { font-family: var(--font-mono, monospace); font-size: 11px;
+  color: var(--text-secondary, #6b7280); }
+.th-scen-tag { font-size: 10px; font-weight: 600; color: var(--brand, #176b5b);
+  border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; }
+.th-scen-out { font-size: 11.5px; color: var(--text-secondary, #6b7280); margin-top: 4px; line-height: 1.55; }
+.th-scen-conds { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
+.th-cond { font-size: 10.5px; font-family: var(--font-mono, monospace);
+  color: var(--muted, #9aa5b1); border: 1px dashed var(--border-light, #f0f0f0);
+  border-radius: 4px; padding: 1px 6px; }
+.th-cond.is-hit { color: var(--brand, #176b5b); border-style: solid; border-color: currentColor; }
+.th-scen-factors { font-size: 10.5px; color: var(--muted, #9aa5b1); margin-top: 5px; }
+.th-trans-status { font-size: 11px; color: var(--text-secondary, #6b7280); }
+.th-trans-mech { font-size: 11.5px; color: var(--text, #1c2430); margin-top: 4px; line-height: 1.55; }
+.th-trans-effect { font-size: 11px; color: var(--text-secondary, #6b7280); margin-top: 3px; line-height: 1.5; }
+/* 分析行：情景 + 传导链路并排 */
+.th-row-analysis { display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+#thMatrix { flex: none; }
+/* 市场矩阵表（热力图 + 相关性矩阵）：底色由 JS 按涨跌/正负内联着色 */
+.th-matrix { width: 100%; border-collapse: separate; border-spacing: 2px; font-size: 11.5px; }
+.th-matrix th { font-size: 11px; font-weight: 500; color: var(--text-secondary, #6b7280);
+  padding: 4px 6px; white-space: nowrap; }
+.th-matrix td { padding: 4px 6px; border-radius: 4px; color: var(--text, #1c2430); }
+.th-matrix td.c, .th-matrix th.c { text-align: center; }
+.th-matrix td:first-child, .th-matrix th:first-child { text-align: left; white-space: nowrap; }
+.th-mono { font-family: var(--font-mono, monospace); }
+/* 历史分位带：0 = 历史最低、100 = 历史最高，标记当前读数在本地序列中的位置 */
+.th-pct { display: flex; align-items: center; gap: 6px; font-size: 10.5px;
+  color: var(--muted, #9aa5b1); margin: 1px 0; }
+.th-pct-track { position: relative; flex: 1 1 auto; height: 4px; border-radius: 2px;
+  background: var(--border-light, #f0f0f0); }
+.th-pct-track > i { position: absolute; top: -2px; width: 2px; height: 8px; border-radius: 1px;
+  background: var(--text, #1c2430); }
+.th-pct > b { flex: none; font-family: var(--font-mono, monospace);
+  color: var(--text-secondary, #6b7280); font-weight: 600; }
+.th-pct-empty { font-style: italic; }
+/* 因子「数据验证」折叠区：关联性回测的证据链 */
+.th-factor-ev { border-top: 1px dashed var(--border-light, #f0f0f0); padding-top: 4px; margin-top: 3px; }
+.th-ev-btn { border: none; background: none; cursor: pointer; font-size: 10.5px;
+  color: var(--text-secondary, #6b7280); padding: 0; }
+.th-ev-btn:hover { color: var(--brand, #176b5b); }
+.th-ev-box { margin-top: 5px; }
+.th-ev { border: 1px solid var(--border-light, #f0f0f0); border-radius: 8px;
+  padding: 7px 9px; background: var(--panel, #fff); }
+.th-ev-verdict { font-size: 11.5px; font-weight: 600; color: var(--text, #1c2430);
+  line-height: 1.55; margin-bottom: 6px; background: var(--bg-soft, #f7f9fb);
+  border-radius: 6px; padding: 5px 8px; }
+.th-ev-title { font-size: 11px; font-weight: 600; color: var(--text, #1c2430); margin-bottom: 5px; }
+.th-ev-title span { font-weight: 400; color: var(--text-secondary, #6b7280); }
+.th-ev-chart { width: 100%; height: 160px; margin-top: 6px; }
+.th-ev-note { font-size: 10px; color: var(--muted, #9aa5b1); margin-top: 4px; line-height: 1.5; }
+.th-ev-off { font-size: 10.5px; color: var(--muted, #9aa5b1); font-style: italic; }
+/* 置信度：用色点区分强弱，不对整块着色——避免与「涨红跌绿」的行情语义混淆 */
+.th-conf { font-size: 10.5px; line-height: 1.5; color: var(--text-secondary, #6b7280);
+  border-top: 1px dashed var(--border-light, #f0f0f0); padding-top: 4px; }
+.th-conf::before { content: '\25CF'; margin-right: 4px; font-size: 8px; }
+.th-conf-high::before { color: #2e9e6b; }
+.th-conf-mid::before { color: #c88a1e; }
+.th-conf-low::before { color: #c0392b; }
+
+/* ── 列表：信号 / 失效条件 / 告警 ── */
+.th-rows-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.th-rows-table th { text-align: left; font-weight: 600; color: var(--text-secondary, #6b7280);
+  padding: 3px 6px; border-bottom: 1px solid var(--border-light, #f0f0f0); font-size: 11.5px; }
+.th-rows-table td { padding: 5px 6px; border-bottom: 1px solid var(--border-light, #f0f0f0);
+  color: var(--text, #1c2430); vertical-align: top; }
+.th-rows-table td.cur { text-align: right; white-space: nowrap; font-family: var(--font-mono, monospace);
+  color: var(--text-secondary, #6b7280); font-size: 11.5px; }
+.th-rows-table td.mk { width: 26px; text-align: center; font-weight: 700; }
+.th-rows-table tr.hit td.mk { color: var(--up, #c0392b); }
+.th-rows-table tr.hit { background: var(--brand-bg-light, rgba(192,57,43,.05)); }
+.th-rows-table tr.crit td.mk { color: var(--danger, #c0392b); }
+.th-empty { font-size: 12px; color: var(--text-secondary, #6b7280); padding: 8px 2px; }
+
+/* 告警项 */
+.th-alert { display: flex; gap: 8px; padding: 7px 2px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0); font-size: 12px; }
+.th-alert-sev { flex: none; font-size: 11px; font-weight: 700; border-radius: 5px; padding: 1px 6px;
+  color: #fff; height: fit-content; }
+.th-alert-sev.critical { background: var(--danger, #c0392b); }
+.th-alert-sev.warn { background: var(--warn, #c88a1e); }
+.th-alert-sev.info { background: var(--border-main, #8a97a8); }
+.th-alert-body { min-width: 0; }
+.th-alert-msg { color: var(--text, #1c2430); line-height: 1.5; }
+.th-alert-time { font-size: 11px; color: var(--muted, #9aa5b1); margin-top: 2px; }
+
+/* ── 趋势图 ── */
+/* 趋势图：父容器不再是定高，改用固定高度（ECharts 需要有明确高度才能初始化） */
+.th-chart { width: 100%; height: 240px; min-height: 150px; }
+.th-warnbox { margin-top: 8px; background: var(--warning-bg, #fff8ec); border: 1px solid var(--warn, #f0dcb4);
+  border-radius: 8px; padding: 7px 10px; font-size: 11.5px; color: var(--text, #1c2430); }
+.th-warnbox ul { margin: 4px 0 0; padding-left: 16px; }
+
+.th-loading { padding: 26px 4px; color: var(--text-secondary, #6b7280); font-size: 13px; }
+
+/* ── 组合层视图（组合入口置顶；腿/权重/共同风险） ── */
+.th-item-pf { border-left: 3px solid var(--brand, #176b5b); }
+.th-sec-note { font-size: 11.5px; color: var(--text-secondary, #6b7280); line-height: 1.6; margin-bottom: 7px; }
+
+/* 腿 / 权重行 */
+.th-leg { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; font-size: 12px;
+  border-bottom: 1px dashed var(--border-light, #f0f0f0); }
+.th-leg:last-child { border-bottom: none; }
+.th-leg-role { flex: 0 0 62px; font-size: 10.5px; color: var(--muted, #9aa5b1); }
+.th-leg-name { flex: 1 1 auto; color: var(--text, #1c2430); }
+.th-leg-score { flex: 0 0 76px; text-align: right; font-family: var(--font-mono, monospace);
+  font-weight: 700; color: var(--text, #1c2430); }
+.th-leg-verdict { flex: 0 0 84px; text-align: right; font-size: 11px;
+  color: var(--text-secondary, #6b7280); }
+
+/* 共同风险因子：区分「已触发 / 未触发 / 无法评估」三种状态 */
+.th-risk { border: 1px solid var(--border-light, #f0f0f0); border-radius: 9px;
+  padding: 9px 11px; margin-bottom: 7px; }
+.th-risk.hit { border-color: var(--warn, #f0dcb4); background: var(--warning-bg, #fff8ec); }
+.th-risk-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  color: var(--text, #1c2430); }
+.th-risk-tag { font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--border-main, #c8d0d8); color: var(--text-secondary, #6b7280); }
+.th-risk-tag.hit { border-color: var(--warn, #c88a1e); color: var(--warn, #c88a1e); }
+.th-risk-tag.na { border-style: dashed; color: var(--muted, #9aa5b1); }
+.th-risk-legs { margin-left: auto; font-size: 10.5px; color: var(--muted, #9aa5b1);
+  font-family: var(--font-mono, monospace); }
+.th-risk-why { font-size: 11.5px; color: var(--text-secondary, #6b7280); line-height: 1.6;
+  margin-top: 5px; }
+.th-risk-action { font-size: 11.5px; color: var(--text, #1c2430); margin-top: 5px; font-weight: 600; }
+.th-risk-conf { font-size: 10.5px; color: var(--muted, #9aa5b1); margin-top: 3px; }
+
+/* 组合结构：相关性 / 波动 / 分散化（本地复算，用于复核 basis 里的写死常量） */
+.th-pfstats { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.th-pfstat { display: flex; flex-direction: column; gap: 2px; }
+.th-pfstat b { font-family: var(--font-mono, monospace); font-size: 17px; color: var(--text, #1c2430); }
+.th-pfstat em { font-size: 10.5px; color: var(--text-secondary, #6b7280); font-style: normal; }
+.th-legs-inline { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 7px;
+  padding-top: 7px; border-top: 1px dashed var(--border-light, #f0f0f0); }
+.th-legs-inline .th-pfstat b { font-size: 13px; }
+.th-legs-inline .th-pfstat em { font-size: 10.5px; }
+
+/* 档位全景：当前档高亮，一眼看出「再走多远换档」 */
+.th-band { display: flex; align-items: center; gap: 8px; padding: 5px 7px; font-size: 12px;
+  border-radius: 6px; border: 1px solid transparent; }
+.th-band.current { background: var(--brand-bg, rgba(23,107,91,.08));
+  border-color: var(--brand, #176b5b); font-weight: 600; }
+.th-band-mark { flex: 0 0 10px; color: var(--brand, #176b5b); font-size: 10px; }
+.th-band-label { flex: 1 1 auto; color: var(--text, #1c2430); }
+.th-band-min { flex: 0 0 46px; text-align: right; font-family: var(--font-mono, monospace);
+  font-size: 11px; color: var(--text-secondary, #6b7280); }
+.th-band-w { flex: 0 0 168px; text-align: right; font-size: 11px;
+  color: var(--text-secondary, #6b7280); font-family: var(--font-mono, monospace); }
+
+/* 因子有效性汇总表（批量准入检查） */
+.th-ev-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.th-ev-table th { text-align: left; font-weight: 600; padding: 4px 6px;
+  color: var(--text-secondary, #6b7280); border-bottom: 1px solid var(--border-light, #f0f0f0);
+  white-space: nowrap; }
+.th-ev-table td { padding: 4px 6px; border-bottom: 1px dashed var(--border-light, #f0f0f0);
+  color: var(--text, #1c2430); }
+.th-ev-table td.mono { font-family: var(--font-mono, monospace); text-align: right; }
+.th-tier { font-size: 10px; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+  border: 1px solid currentColor; }
+.th-tier.strong { color: var(--up, #c0392b); }
+.th-tier.medium { color: var(--warn, #c88a1e); }
+.th-tier.weak { color: var(--text-secondary, #6b7280); }
+.th-tier.insufficient { color: var(--muted, #9aa5b1); border-style: dashed; }
+.th-tier.unsupported { color: var(--muted, #9aa5b1); border-style: dashed; }
+.th-ev-sum { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px;
+  color: var(--text-secondary, #6b7280); margin-bottom: 7px; }
+
+/* ── 窄屏：列表转为横向条，主区单列 ── */
+@container thpage (max-width: 1180px) {
+  .th-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .th-side { flex-direction: row; align-items: center; }
+  .th-side-head { border-bottom: none; border-right: 1px solid var(--border-light, #f0f0f0);
+    white-space: nowrap; }
+  .th-side-list { display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; padding: 6px 8px; }
+  .th-item { min-width: 168px; margin-bottom: 0; }
+  .th-row-bottom { grid-template-columns: minmax(0, 1fr); }
+}
+@container thpage (max-width: 760px) {
+  .th-hero-right { margin-left: 0; text-align: left; }
+  .th-factors { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}

@@ -15,6 +15,7 @@ from agents.group.state import GroupState
 from agents.group.subagents import AGENT_CLASSES, get_agent_instance
 from agents.agent_context import AgentContext
 from config import Config
+from utils.cancellation import AgentCancelled
 
 
 # ── 路由函数 ──────────────────────────────────────────────────────
@@ -51,16 +52,23 @@ def _route_after_parallel(state: GroupState) -> str:
     observation = state.get("observation", "")
     if observation == "error":
         return "exception_summary"
+    if observation == "early_stop":
+        # 空转护栏触发：拿已有数据直接出报告，避免 Supervisor↔PE 死循环
+        return "report"
     return "supervisor"
 
 
 # ── parallel_executor 节点 ─────────────────────────────────────
 
-async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs) -> dict:
+async def parallel_executor_node(state: GroupState, ctx: AgentContext, run_config=None) -> dict:
     """真正并行调用多个 agent，完成后一次性更新 state
 
     关键点：在单节点内用 asyncio.gather 并行，
     避免 Send API 的 state 拷贝问题。
+
+    签名必须与其他节点一致（state, ctx, run_config）：build_dispatch_graph._wrap
+    会以 3 个位置参数调用节点函数，第三参若声明为 **kwargs 会因位置传参而 TypeError
+    （"takes 2 positional arguments but 3 were given"）。
     """
     import asyncio
     import copy
@@ -73,8 +81,27 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
 
     plan = copy.deepcopy(list(state.get("plan_steps", [])))
     current_idx = state.get("current_step_index", 0)
+    extra_executed = list(state.get("_extra_executed", []))
+
+    def _prepare(name):
+        agent = get_agent_instance(name)
+        # get_agent_instance 每次返回新实例（非单例），必须无条件 configure。
+        # 旧实现被 hasattr(ctx.budget, '_llm') 挡住 —— BudgetController 无 _llm 属性
+        # （恒 False）→ 新实例 _logger=None → logger.phase 抛
+        # 'NoneType' object has no attribute 'phase'。LLM 与图构建同源 get_llm()。
+        from utils.llm_factory import get_llm
+        agent.configure(
+            llm=get_llm(),
+            skill_registry=ctx.skill_registry,
+            budget=ctx.budget,
+            logger=ctx.logger,
+        )
+        agent._progress = ctx.progress_reporter
+        return agent
 
     # 每个 agent 绑定第一个尚未完成且明确包含它的计划步骤。
+    # 匹配放宽为 status != "success"（partial 可复用槽位，支持补采重跑）；
+    # current_idx 起找不到时全表回溯；全表也无 → 计划外放行（不绑定步骤）。
     assignments = []
     for name in current_agent_names:
         target_idx = next(
@@ -82,25 +109,32 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
                 idx
                 for idx in range(current_idx, len(plan))
                 if name in plan[idx].get("agent_names", [])
-                and plan[idx].get("status") not in ("success", "partial")
+                and plan[idx].get("status") != "success"
             ),
             None,
         )
         if target_idx is None:
-            logger.error("PE", f"Agent {name} 未匹配到待执行计划步骤")
-            continue
-        agent = get_agent_instance(name)
-        # 复用 supervisor 注入的依赖
-        if hasattr(ctx.budget, '_llm'):
-            agent.configure(
-                llm=ctx.budget._llm,
-                skill_registry=ctx.skill_registry,
-                budget=ctx.budget,
-                logger=ctx.logger,
+            target_idx = next(
+                (
+                    idx
+                    for idx, s in enumerate(plan)
+                    if name in s.get("agent_names", [])
+                    and s.get("status") != "success"
+                ),
+                None,
             )
-        agent._progress = ctx.progress_reporter
+            if target_idx is not None:
+                logger.warning("PE", f"Agent {name} 槽位回溯匹配: step {target_idx + 1}")
+        if target_idx is None:
+            # 计划外调度（supervisor 源头已限一次，此处防御性再拦已执行过的）
+            if name in extra_executed:
+                logger.error("PE", f"Agent {name} 未匹配到计划步骤且已计划外执行过，跳过")
+                continue
+            logger.warning("PE", f"Agent {name} 计划外调度，放行执行（不绑定计划步骤）")
+            assignments.append((name, _prepare(name), None, purpose))
+            continue
         assignments.append(
-            (name, agent, target_idx, plan[target_idx].get("task_purpose", purpose))
+            (name, _prepare(name), target_idx, plan[target_idx].get("task_purpose", purpose))
         )
 
     # 并行调用
@@ -109,11 +143,21 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
         # 每个 agent 的独立 state 快照 + 专属任务
         agent_state = copy.deepcopy(dict(state))
         agent_state["current_agent_names"] = [name]
-        agent_state["current_step_index"] = target_idx
-        agent_state["current_task_purpose"] = task_purpose
+        if target_idx is not None:
+            agent_state["current_step_index"] = target_idx
+            agent_state["current_task_purpose"] = task_purpose
+        else:
+            # 显式计划外标记：base.py 据此走计划外分支（不写槽位、不推 index）
+            agent_state["_extra_dispatch"] = True
         tasks.append(agent(agent_state, None))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 协作式取消优先：gather(return_exceptions=True) 会把 BaseException 当结果；
+    # 若任一子 Agent 被取消，整轮立即终止（否则会被当成失败继续空转其它 Agent）
+    for r in results:
+        if isinstance(r, AgentCancelled):
+            raise r
 
     # 收集结果，更新 state
     accumulated = state.get("accumulated_data", "")
@@ -126,10 +170,19 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
     for (name, agent, target_idx, _), result in zip(assignments, results):
         if isinstance(result, Exception):
             logger.error("PE", f"Agent {name} 执行失败: {result}")
+            # 异常必须写回绑定步骤，否则步骤永远 pending，supervisor 盲目重派 → 死循环
+            # （2026-10-01 16:01 事故：'NoneType' object has no attribute 'phase' 循环 27 轮）
+            if target_idx is not None and target_idx < len(plan):
+                plan[target_idx]["status"] = "failed"
+                plan[target_idx]["retry_count"] = int(plan[target_idx].get("retry_count", 0)) + 1
+                plan[target_idx]["feedback"] = f"Agent {name} 执行异常: {result}"
             continue
 
+        # 计划外执行结果：只累积数据，不绑定计划步骤
+        extra_executed.extend(result.get("_extra_executed", []))
+
         result_plan = result.get("plan_steps", [])
-        if target_idx < len(result_plan):
+        if target_idx is not None and target_idx < len(result_plan):
             step_updates.setdefault(target_idx, []).append(
                 (name, copy.deepcopy(result_plan[target_idx]))
             )
@@ -150,7 +203,22 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
 
     for target_idx, updates in step_updates.items():
         if len(updates) == 1:
-            plan[target_idx] = updates[0][1]
+            new_step = updates[0][1]
+            old_step = plan[target_idx]
+            # 重跑保护：本次 result 为空时保留既有非空结果，只同步状态类字段。
+            # 与 subagents/base.py 同口径（2026-10-01：空 result 覆盖数据底版）。
+            if not new_step.get("result") and old_step.get("result"):
+                logger.warning(
+                    "PE",
+                    f"步骤 {old_step.get('step')} 本次 result 为空，保留既有结果，不覆盖",
+                )
+                merged = copy.deepcopy(old_step)
+                for field in ("status", "feedback", "requests", "executed_at", "retry_count"):
+                    if field in new_step:
+                        merged[field] = new_step[field]
+                plan[target_idx] = merged
+                continue
+            plan[target_idx] = new_step
             continue
 
         combined = copy.deepcopy(plan[target_idx])
@@ -197,7 +265,25 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
 
     logger.info("PE", f"并行执行完成，{len(results)} 个 agent, {len(step_updates)} 个步骤有结果")
 
-    return {
+    # ── 空转护栏（C）：本轮"绑定且正常返回"的计划 agent 数为 0 → 计数；连续 3 轮 → 强制转报告 ──
+    # 覆盖两种空转：① 0 个计划步骤被绑定；② 绑定成功但全部执行异常（无步骤产出）。
+    # 防止"调度与计划槽位脱节"或"agent 持续异常"时 Supervisor↔PE 无限空转打满 recursion_limit
+    bound_count = sum(1 for (_, _, idx, _) in assignments if idx is not None)
+    exception_bound = sum(
+        1
+        for (_, _, idx, _), r in zip(assignments, results)
+        if idx is not None and isinstance(r, Exception)
+    )
+    bound_ok = bound_count - exception_bound
+    empty_count = 0 if bound_ok > 0 else int(state.get("_empty_dispatch_count", 0)) + 1
+    if bound_ok == 0:
+        logger.warning(
+            "PE",
+            f"本轮并行调度无有效计划进展"
+            f"（绑定 {bound_count}，其中异常 {exception_bound}，第 {empty_count} 次空转）",
+        )
+
+    update = {
         "plan_steps": plan,
         "current_step_index": next_idx,
         "accumulated_data": accumulated,
@@ -205,7 +291,16 @@ async def parallel_executor_node(state: GroupState, ctx: AgentContext, **kwargs)
         "current_agent_names": [],
         "current_task_purpose": "",
         "dispatch_history": dispatch_history,
+        "_extra_executed": sorted(set(extra_executed)),
+        "_empty_dispatch_count": empty_count,
     }
+    if empty_count >= 3:
+        logger.warning(
+            "PE",
+            f"连续 {empty_count} 轮并行调度无计划步骤产出，触发空转护栏，提前转报告",
+        )
+        update["observation"] = "early_stop"
+    return update
 
 
 # ── 构建图 ──────────────────────────────────────────────────────

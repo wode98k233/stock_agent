@@ -4,8 +4,22 @@ IO 重定向工具
 """
 import sys
 import logging
+import re
 
 _ERROR_KEYWORDS = ("失败", "错误", "Error", "Warning", "Exception", "Traceback")
+
+# 进度条（tqdm 等）识别：写到 stderr 时不应被当成 ERROR 噪声。
+# 典型形态：` 33%|####| 1/3 [00:00<00:01, 1.74it/s]`；tqdm 重绘用 \r。
+_PROGRESS_RE = re.compile(r"(\d+%\s*\|)|(\|\s*\d+/\d+\s*\[)|(it/s)|(s/it)|(\[\d+:\d+<)")
+
+
+def _is_progress_bar(data) -> bool:
+    """判断是否为进度条输出（含 \\r 重绘或 tqdm 形态）。非字符串（如 bytes）一律视为否。"""
+    if not isinstance(data, str):
+        return False
+    if "\r" in data:
+        return True
+    return bool(_PROGRESS_RE.search(data))
 
 
 class LoggerStream:
@@ -29,6 +43,9 @@ class LoggerStream:
 
         if data.strip():
             try:
+                # 进度条（tqdm 等）只保留控制台输出，不进日志（否则刷屏 ERROR）
+                if _is_progress_bar(data):
+                    return
                 if self._is_radar:
                     tag = "IO"
                     if self.level >= logging.ERROR:

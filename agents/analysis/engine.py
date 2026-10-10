@@ -25,7 +25,8 @@ _MIN_RAW_RESULT_LENGTH = 300
 
 async def run_analysis(request: AnalysisRequest, tool_calls: list,
                        raw_result: str = "", metadata=None, run_config=None,
-                       step_results: list = None) -> AnalysisResult:
+                       step_results: list = None,
+                       raw_result_is_seed: bool = False) -> AnalysisResult:
     """
     分析框架后处理主入口。
 
@@ -98,7 +99,8 @@ async def run_analysis(request: AnalysisRequest, tool_calls: list,
                             selected_skills=request.selected_skills,
                             metadata=metadata,
                             run_config=run_config,
-                            step_results=step_results)
+                            step_results=step_results,
+                            raw_result_is_seed=raw_result_is_seed)
 
         content = format_report(report)
         diagnostics["output_length"] = len(content)

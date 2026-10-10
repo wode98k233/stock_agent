@@ -280,6 +280,11 @@ def test_load_all_enabled_index_templates():
     for template_id in enabled_ids:
         template = load_template(template_id)
         assert template["id"] == template_id
+        # 轻量模板（min_report_tokens=0，如 quick_lookup）按设计只保留最少板块
+        # （速览/来源与限制），不走"报告必须有结构深度"的默认门槛。
+        if template.get("min_report_tokens") == 0:
+            assert len(template["sections"]) >= 2, template_id
+            continue
         assert len(template["sections"]) >= 4
 
 
@@ -558,9 +563,8 @@ def test_enabled_templates_keep_non_mx_skills_as_fallbacks():
     index = _load_index()
     mx_skills = {"mx_data", "mx_search", "mx_xuangu", "mx_moni", "mx_zixuan"}
     fallback_capable_skills = {
-        "stock_query",
-        "technical_analysis",
-        "sentiment_analysis",
+        "stock_analysis",
+        "market_review",
         "valuation",
         "money_flow",
     }
@@ -613,7 +617,7 @@ def test_get_required_skills_derives_mx_skills_from_capabilities_without_calling
     skills = get_required_skills(template)
 
     assert skills[:3] == ["mx_data", "mx_xuangu", "mx_search"]
-    assert "technical_analysis" in skills
+    assert "stock_analysis" in skills
     assert "money_flow" in skills
 
 
@@ -630,6 +634,230 @@ def test_score_route_no_match():
     score, matched = _score_route("今天天气怎么样", [["板块", 12]])
     assert score == 0
     assert matched == []
+
+
+def test_rank_templates_for_input_shape_and_consistency():
+    """预览排名与真实选择口径一致（winner == select_template_for_input）。"""
+    from agents.analysis.template_store import (
+        rank_templates_for_input, select_template_for_input,
+    )
+    for q in [
+        "恒生互联网ETF亏了3.5k，今年累计亏损，心态崩了怎么办",
+        "给我生成今天大盘的总结",
+        "我买了白酒消费，已经连跌好几年了，需要清仓吗",
+    ]:
+        out = rank_templates_for_input(q, top_n=5)
+        assert out["winner"] == select_template_for_input(q)
+        assert 1 <= len(out["ranked"]) <= 5
+        top = out["ranked"][0]
+        assert {"template_id", "name", "score", "matched_keywords", "family"} <= set(top)
+        # 排名分数单调不增
+        scores = [t["score"] for t in out["ranked"]]
+        assert scores == sorted(scores, reverse=True)
+
+
+def test_portfolio_advice_uses_portfolio_dashboard():
+    """持仓诊断模板必须挂「组合决策仪表盘」（不是通用 stock）。"""
+    from agents.analysis.template_store import load_template
+    from agents.analysis.dashboard_config import get_dashboard_def, get_dashboard_category
+    t = load_template("portfolio_advice")
+    assert t.get("dashboard_type") == "portfolio"
+    assert get_dashboard_def("portfolio") is not None
+    assert get_dashboard_category("portfolio_advice", t) is not None
+
+
+# ══════════════════════════════════════════════════════════════
+# 横向复盘意图优先（2026-10-01）
+#   事故：market_daily 触发词全是连续整词，用户写「市场的9月总结」一条不命中 → 0 分，
+#   而 theme_trading 仅凭「题材」拿 14 分胜出 → 整条数据计划被带偏。
+# ══════════════════════════════════════════════════════════════
+
+_ACCIDENT_QUERY = "给我市场的9月总结，以及10月份展望，10月主线题材可能是什么"
+
+
+def test_market_review_intent_predicate():
+    """判定条件（数据驱动，intent_rules.json）：复盘词族 与 市场主体词族 同时命中"""
+    from agents.analysis.template_store import _load_intent_rules, _match_intent
+    rule = next(r for r in _load_intent_rules()["intents"] if r["id"] == "market_review")
+    assert _match_intent(_ACCIDENT_QUERY, rule) is True
+    assert _match_intent("市场月度总结", rule) is True
+    # 反例：有复盘词但无市场主体
+    assert _match_intent("半导体板块总结", rule) is False
+    assert _match_intent("个股复盘：宁德时代", rule) is False
+    assert _match_intent("新能源行业的月度回顾", rule) is False
+    # 反例：有市场主体但无复盘词
+    assert _match_intent("今天大盘怎么样", rule) is False
+    assert _match_intent("", rule) is False
+
+
+def test_accident_query_routes_to_market_daily():
+    """回归：2026-10-01 事故原句必须路由到 market_daily"""
+    from agents.analysis.template_store import select_template_for_input
+    assert select_template_for_input(_ACCIDENT_QUERY) == "market_daily"
+
+
+def test_market_review_boost_keeps_sector_and_stock_queries():
+    """关键反例：不能被意图加分误伤"""
+    from agents.analysis.template_store import select_template_for_input
+    assert select_template_for_input("半导体板块总结") == "sector_timing"
+    assert select_template_for_input("个股复盘：宁德时代") == "stock_deep_dive"
+    assert select_template_for_input("机器人题材炒作到什么阶段了") == "theme_trading"
+
+
+def test_market_review_boost_applied_in_every_scoring_pass():
+    """加分必须在 family 累计 / family 内选优 / 全局兜底三处都生效。
+
+    否则会出现"family 赢了但 family 内选不出 winner"的分裂结果（winner 为空）。
+    """
+    from agents.analysis.template_store import _rank_core
+    r = _rank_core(_ACCIDENT_QUERY)
+    assert r["winner"] == "market_daily"
+    assert r["best_family"] == "market_daily"
+    assert r["family_scores"]["market_daily"] == 20
+    md = next(t for t in r["templates"] if t["template_id"] == "market_daily")
+    assert md["score"] == 20
+    assert any("意图优先" in str(k) for k in md["matched_keywords"])
+
+
+def test_market_review_boost_does_not_break_preview_consistency():
+    """前端预览端点复用 _rank_core，必须与选择结果一致（所见即所得）"""
+    from agents.analysis.template_store import rank_templates_for_input
+    out = rank_templates_for_input(_ACCIDENT_QUERY, top_n=3)
+    assert out["winner"] == "market_daily"
+    assert out["ranked"][0]["template_id"] == "market_daily"
+
+
+# ══════════════════════════════════════════════════════════════
+# 模板指引分层：报告级内容不下发给子步执行器（2026-10-01）
+# ══════════════════════════════════════════════════════════════
+
+def test_build_guidance_include_report_structure_flag():
+    """include_report_structure=False 剔除报告级内容，保留数据契约"""
+    from agents.analysis.template_store import load_template, build_guidance
+
+    t = load_template("theme_trading")
+    full = build_guidance(t, "10月主线题材")
+    lean = build_guidance(t, "10月主线题材", include_report_structure=False)
+
+    # 报告级：默认（主 Agent / 规划器）保留
+    assert "报告输出结构" in full
+    assert "质量门禁" in full
+    assert "必须完整输出全部板块" in full
+
+    # 报告级：子步执行器不得收到
+    assert "报告输出结构" not in lean
+    assert "质量门禁" not in lean
+    assert "必须完整输出全部板块" not in lean
+
+    # 数据级：两者都必须保留
+    for key in ("场景化数据契约", "必需数据", "硬性"):
+        assert key in lean, f"数据契约片段 {key!r} 不应被剔除"
+
+    # 精简版应显著更短（实测报告级占 72%）
+    assert len(lean) < len(full) * 0.5
+
+
+def test_build_guidance_default_keeps_report_structure():
+    """默认参数不得改变既有行为（主 Agent / 规划器依赖 True）"""
+    from agents.analysis.template_store import load_template, build_guidance
+    t = load_template("sector_timing")
+    assert build_guidance(t, "板块还能追吗") == build_guidance(
+        t, "板块还能追吗", include_report_structure=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# 轻量模板 quick_lookup（2026-10-01）
+#   事故：用户说「只要最新股价/股价+一条新闻」，全表 0 分落兜底 standard（7283 字），
+#   或被 hot_news 靠单个「新闻」抢走。新增 quick_lookup + 轻量仪表盘 quick。
+# ══════════════════════════════════════════════════════════════
+
+_QUICK_Q1 = "给我获取下今世缘最新的股价，只需要这个就行了"
+_QUICK_Q2 = "给我获取下今世缘最新的股价和一条相关的新闻，只需要这个就行了"
+
+
+def test_quick_lookup_template_composed_and_registered():
+    """模板可加载、只有 2 个短 section、挂轻量仪表盘、关闭扩写下限"""
+    from agents.analysis.template_store import load_template
+    t = load_template("quick_lookup")
+    assert t["id"] == "quick_lookup"
+    assert [s["title"] for s in t["sections"]] == ["速览", "来源与限制"]
+    assert t["dashboard_type"] == "quick"
+    assert t["min_report_tokens"] == 0            # 关键：不触发扩写
+    assert t["verbosity"] == "brief"
+    # qa_rules 必须显式禁止用户没要的板块
+    assert any("禁止输出分析" in r for r in t["qa_rules"])
+
+
+def test_quick_lookup_intent_predicate():
+    """判定条件（数据驱动，intent_rules.json）：极简词族 且 取数词族，且不含阻挡词"""
+    from agents.analysis.template_store import _load_intent_rules, _match_intent
+    rule = next(r for r in _load_intent_rules()["intents"] if r["id"] == "quick_lookup")
+    for q in (_QUICK_Q1, _QUICK_Q2, "只要最新股价", "查一下 603369 收盘价就行"):
+        assert _match_intent(q, rule) is True, q
+    # 反例：决策类（阻挡词「持仓」）、分析类、无极简词、市场复盘
+    for q in ("只要价格不破28就继续持仓", "帮我分析下今世缘最新股价走势",
+              "今天股价怎么样", _ACCIDENT_QUERY):
+        assert _match_intent(q, rule) is False, q
+
+
+def test_intent_rules_active_boosts(monkeypatch):
+    """意图规则 → {template_id: (boost, 标签)}；模板未启用则忽略；非法条目被消毒丢弃"""
+    from agents.analysis import template_store as ts
+
+    boosts = ts._active_intent_boosts(_ACCIDENT_QUERY, {"market_daily", "quick_lookup"})
+    assert boosts.get("market_daily") == (20, "（意图优先：市场复盘）")
+    assert "quick_lookup" not in boosts          # 事故句含「总结」阻挡词
+
+    boosts2 = ts._active_intent_boosts(_QUICK_Q1, {"market_daily", "quick_lookup"})
+    assert boosts2.get("quick_lookup") == (30, "（意图优先：极简取数）")
+    assert "market_daily" not in boosts2
+
+    # 模板未启用 → 该意图不生效（不会把分加到不可用模板上）
+    assert ts._active_intent_boosts(_QUICK_Q1, {"market_daily"}).get("quick_lookup") is None
+
+    # 结构消毒：非法条目（非对象 / 缺 template / boost 不可转 int）被丢弃，
+    # 合法条目照常生效 —— 配置写错只应表现为"少一条意图"，绝不能让路由崩掉。
+    # 用 monkeypatch 模拟，测试结束自动还原，不会毒化其他用例的缓存。
+    monkeypatch.setattr(ts, "_intent_rules_cache", {"intents": [
+        "not-a-dict",                                     # 非法：非对象
+        {"id": "no-template"},                            # 非法：缺 template
+        {"template": "quick_lookup", "boost": "abc"},     # 非法：boost 不可转 int
+        {"template": "quick_lookup", "boost": 30, "label": "极简取数",
+         "require_any": [["只需要"]], "block_any": []},    # 合法
+    ]})
+    boosts3 = ts._active_intent_boosts("只需要这个就行了", {"quick_lookup"})
+    assert boosts3.get("quick_lookup") == (30, "（意图优先：极简取数）")
+
+
+def test_quick_lookup_routes_for_minimal_requests():
+    """回归：两个极简取数请求必须路由到 quick_lookup"""
+    from agents.analysis.template_store import select_template_for_input
+    assert select_template_for_input(_QUICK_Q1) == "quick_lookup"
+    assert select_template_for_input(_QUICK_Q2) == "quick_lookup"
+
+
+def test_quick_lookup_does_not_hijack_analysis_requests():
+    """关键反例：分析/个股/持仓/板块/题材/大盘类请求不得被速览模板抢走"""
+    from agents.analysis.template_store import select_template_for_input
+    assert select_template_for_input("分析贵州茅台") != "quick_lookup"
+    assert select_template_for_input("我的持仓亏了要不要卖") == "portfolio_advice"
+    assert select_template_for_input("半导体板块总结") == "sector_timing"
+    assert select_template_for_input("机器人题材炒作到什么阶段了") == "theme_trading"
+    assert select_template_for_input("今天大盘怎么样") == "market_daily"
+    assert select_template_for_input(_ACCIDENT_QUERY) == "market_daily"
+    # 没有极简词就不该命中速览：「给我今世缘最新的股价」
+    assert select_template_for_input("给我今世缘最新的股价") != "quick_lookup"
+
+
+def test_quick_lookup_boost_applied_in_every_scoring_pass():
+    """加分必须在三处打分点都生效（否则 family 赢了却选不出 winner）"""
+    from agents.analysis.template_store import _rank_core
+    r = _rank_core(_QUICK_Q1)
+    assert r["winner"] == "quick_lookup"
+    assert r["best_family"] == "quick_lookup"
+    md = next(t for t in r["templates"] if t["template_id"] == "quick_lookup")
+    assert md["score"] >= 30
+    assert any("意图优先：极简取数" in str(k) for k in md["matched_keywords"])
 
 
 if __name__ == "__main__":

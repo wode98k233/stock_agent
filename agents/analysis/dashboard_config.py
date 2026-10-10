@@ -131,6 +131,46 @@ def _category_from_def(dashboard_id: str) -> DashboardCategory | None:
     return _FALLBACK.get(dashboard_id)
 
 
+def validate_dashboards_llm_fields(defs: list[dict] | None = None,
+                                   schema_fields: set | None = None) -> list[str]:
+    """校验各 dashboard 的 llm_fields 是否都在 DashboardData 白名单内。
+
+    DashboardData 是 pydantic 硬白名单（extra 字段被 model_validate 静默丢弃），
+    新增 dashboard 字段漏改 schema 时无任何报错——本函数在启动期显式检出。
+    返回问题列表（空 = 全部通过），同时打 warning 日志。
+
+    Args:
+        defs: 待校验的 dashboard 定义列表；None 时加载全部已注册 dashboard
+        schema_fields: 合法字段集合；None 时取 DashboardData.model_fields + 元数据字段
+    """
+    import logging
+
+    logger_ = logging.getLogger(__name__)
+
+    if schema_fields is None:
+        from agents.analysis.dashboard_schema import DashboardData
+        schema_fields = set(DashboardData.model_fields) | {"scenario_tag", "dashboard_id"}
+    if defs is None:
+        defs = []
+        for did in list_dashboards():
+            d = get_dashboard_def(did)
+            if d:
+                defs.append(d)
+
+    problems = []
+    for d in defs:
+        dash_id = d.get("id", "?")
+        for f in d.get("llm_fields", []):
+            name = f.get("name", "")
+            if name and name not in schema_fields:
+                problems.append(
+                    f"dashboard '{dash_id}' 的 llm_field '{name}' 不在 DashboardData "
+                    f"白名单，将被静默丢弃——请在 dashboard_schema.py 补字段")
+    for p in problems:
+        logger_.warning("[Dashboard] %s", p)
+    return problems
+
+
 # 向后兼容：旧调用点使用 get_dashboard_config
 get_dashboard_config = get_dashboard_category
 

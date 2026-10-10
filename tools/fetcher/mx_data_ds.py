@@ -9,6 +9,7 @@ import os
 import sys
 from typing import Optional
 from .base import DataSource
+from tools.other_skills.eastmoney.mx_common import as_dict
 
 logger = logging.getLogger("radar.fetcher")
 
@@ -143,10 +144,10 @@ class MXDataDataSource(DataSource):
                 logger.warning(f"mx_xuangu 状态码错误: {status}")
                 return pd.DataFrame()
 
-            data = result.get("data", {}).get("data", {})
-            all_results = data.get("allResults", {}).get("result", {})
-            data_list = all_results.get("dataList", [])
-            columns = all_results.get("columns", [])
+            data = as_dict(as_dict(result.get("data")).get("data"))
+            all_results = as_dict(as_dict(data.get("allResults")).get("result"))
+            data_list = all_results.get("dataList") or []
+            columns = all_results.get("columns") or []
 
             if not data_list:
                 return pd.DataFrame()
@@ -183,8 +184,10 @@ class MXDataDataSource(DataSource):
     def _extract_entity_name(raw_result) -> str:
         """从 MX 原始响应中提取证券名称。"""
         try:
-            search = raw_result.get("data", {}).get("data", {}).get("searchDataResultDTO", {})
-            dto_list = search.get("dataTableDTOList", []) or []
+            search = as_dict(
+                as_dict(as_dict(raw_result.get("data")).get("data")).get("searchDataResultDTO")
+            )
+            dto_list = search.get("dataTableDTOList") or []
             for dto in dto_list:
                 entity = dto.get("entityTagDTO") or {}
                 for key in ("fullName", "shortName"):
@@ -289,10 +292,10 @@ class MXDataDataSource(DataSource):
             mx = MXSearch()
             result = mx.search(query)
             # 解析响应
-            data = result.get("data", {})
-            inner = data.get("data", {})
-            search_resp = inner.get("llmSearchResponse", {})
-            items = search_resp.get("data", [])
+            data = as_dict(result.get("data"))
+            inner = as_dict(data.get("data"))
+            search_resp = as_dict(inner.get("llmSearchResponse"))
+            items = search_resp.get("data") or []
             if not items:
                 return pd.DataFrame()
             rows = []
@@ -359,8 +362,14 @@ class MXDataDataSource(DataSource):
 
     @classmethod
     def get_north_fund_flow(cls, symbol: str = "北向资金") -> pd.DataFrame:
-        """通过妙想API获取北向资金数据"""
-        return cls._query_mx(f"北向资金{symbol}净买入 持仓变动")
+        """通过妙想API获取北向资金数据（市场级：北向/沪股通/深股通序列）。
+
+        注意：原实现写成 `f"北向资金{symbol}净买入 持仓变动"`，默认参数下会拼成
+        「北向资金北向资金净买入」，问句重复导致返回表更像泛指数行情；这里去掉重复，
+        并把指标限定到资金口径。
+        """
+        label = "" if symbol in ("北向资金", "") else symbol
+        return cls._query_mx(f"{label or '北向资金'}净买入 成交额 历史累计净买额 资金余额")
 
     # ── 融资融券 ──
 

@@ -17,7 +17,7 @@
   ],
   "fallback_skills": [
     "money_flow",
-    "technical_analysis"
+    "stock_analysis"
   ],
   "output_blocks": [
     "core_summary",
@@ -139,7 +139,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "position_holding",
     "trading_discipline"
   ],

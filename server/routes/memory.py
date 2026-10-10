@@ -149,7 +149,8 @@ async def memory_reset(request: Request):
 # ── 后端信息 ────────────────────────────────────────────
 
 class MemoryConfigUpdateRequest(BaseModel):
-    min_similarity: Optional[float] = None  # 语义相似度门槛，[0, 1]，0 表示关闭
+    min_similarity: Optional[float] = None      # 语义相似度绝对下限（floor），[0, 1]，0 表示关闭
+    similarity_margin: Optional[float] = None   # 语义相似度相对带宽（margin），>= 0，0=纯绝对门槛
 
 
 @router.get("/api/memory/backend")
@@ -176,6 +177,7 @@ async def memory_config_get(request: Request):
     sdk = _get_sdk(request)
     return {
         "min_similarity": sdk.get_min_similarity(),
+        "similarity_margin": sdk.get_similarity_margin(),
         "retrieval_top_k": getattr(sdk._config, "retrieval_top_k", None),
         "backend": sdk.backend.name(),
     }
@@ -183,7 +185,7 @@ async def memory_config_get(request: Request):
 
 @router.post("/api/memory/config")
 async def memory_config_update(request: Request, payload: MemoryConfigUpdateRequest):
-    """更新记忆系统运行时配置（当前支持 min_similarity）。"""
+    """更新记忆系统运行时配置（min_similarity=floor / similarity_margin=相对带宽）。"""
     sdk = _get_sdk(request)
     updated = {}
     if payload.min_similarity is not None:
@@ -192,6 +194,12 @@ async def memory_config_update(request: Request, payload: MemoryConfigUpdateRequ
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         updated["min_similarity"] = value
+    if payload.similarity_margin is not None:
+        try:
+            value = sdk.set_similarity_margin(payload.similarity_margin)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        updated["similarity_margin"] = value
     return {"success": True, **updated}
 
 
@@ -214,6 +222,7 @@ async def memory_profile_get(request: Request):
         "risk_tolerance": p.risk_tolerance,
         "investment_horizon": p.investment_horizon,
         "analysis_style": p.analysis_style,
+        "allocation_notes": p.allocation_notes,
         "watched_sectors": dict(sorted(p.watched_sectors.items(), key=lambda x: x[1], reverse=True)[:10]),
         "watched_stocks": dict(sorted(p.watched_stocks.items(), key=lambda x: x[1], reverse=True)[:10]),
         "recent_queries": [{"query": q["query"], "date": q.get("date", "")} for q in p.recent_queries[-10:]],

@@ -155,6 +155,71 @@ def _schedule_semantic_cleanup(sdk, interval_minutes: int):
         _logger.warning("[Memory] 无 event loop，跳过语义记忆自动清理注册")
 
 
+def _schedule_market_monitor(state):
+    """asyncio 后台盯盘循环：交易时段轮询自选股 → 规则判定 → 告警推送。
+
+    总开关 MARKET_MONITOR_ENABLED 默认 false（升级后行为与现状完全一致）；
+    调度任务异常全吞（单轮失败只记日志），最坏情况 = 功能不工作，不影响主服务。
+    """
+    if not Config.MARKET_MONITOR_ENABLED:
+        return
+    from server.monitoring.scheduler import MonitorScheduler, set_scheduler
+    try:
+        loop = asyncio.get_running_loop()
+        scheduler = MonitorScheduler(storage=state["storage"])
+        set_scheduler(scheduler)
+        loop.create_task(scheduler.run(Config.MARKET_MONITOR_INTERVAL_S))
+        _logger.info("[Monitor] 盯盘告警已启动（间隔 %ds）",
+                     Config.MARKET_MONITOR_INTERVAL_S)
+    except RuntimeError:
+        _logger.warning("[Monitor] 无 event loop，跳过盯盘调度注册")
+    except Exception:
+        _logger.warning("[Monitor] 盯盘调度注册失败（不影响主服务）", exc_info=True)
+
+
+def _schedule_market_dashboard_prewarm():
+    """启动后台预热市场面板快照：情绪首次聚合约 6s，预热后首屏秒开；失败静默。"""
+    if not Config.MARKET_DASHBOARD_ENABLED:
+        return
+
+    async def _prewarm():
+        await asyncio.sleep(5)
+        try:
+            from server import market_dashboard_service as svc
+            await asyncio.to_thread(svc.build_snapshot)
+            _logger.info("[MarketDashboard] 快照预热完成")
+        except Exception:
+            _logger.warning("[MarketDashboard] 快照预热失败（忽略，前端会自行加载）", exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_prewarm())
+    except RuntimeError:
+        _logger.warning("[MarketDashboard] 无 event loop，跳过快照预热")
+
+
+def _schedule_background_scans():
+    """注册后台巡检作业（台账刷新 / 存储监控扫描 / 拥挤度扫描 / 短线情绪预热）。
+
+    只在 event loop 内调用（bootstrap_web 由 lifespan 触发）。这里**只注册 task**，
+    不 await、不 join —— 每个作业的首次延迟由 Config 决定（默认 45/90/150/180 秒），
+    目的是错开路由导入与三个 warmup 的 GIL 争抢，启动路径完全不受影响。
+
+    整段包在 try 里：巡检注册失败最多是「后台不跑」，绝不能让服务起不来。
+    """
+    try:
+        from server.background_scans import get_manager
+        from server.scan_jobs import register_default_jobs
+        loop = asyncio.get_running_loop()
+        keys = register_default_jobs()
+        started = get_manager().schedule(loop)
+        _logger.info("[Scans] 后台巡检已注册：定义 %s / 已调度 %s", keys, started)
+    except RuntimeError:
+        _logger.warning("[Scans] 无 event loop，跳过后台巡检注册")
+    except Exception:
+        _logger.warning("[Scans] 后台巡检注册失败（不影响主服务）", exc_info=True)
+
+
 def bootstrap_web() -> WebAppState:
     """初始化 Web server 运行依赖。"""
     from utils.bootstrap_common import init_common
@@ -164,21 +229,24 @@ def bootstrap_web() -> WebAppState:
     # 让 torch 链推迟到 lifespan 启动阶段（已在 "Started server process" 之后）。
     from server.agent_runner import WebAgentContext
 
-    result = init_common()
+    result = init_common(start_warmups=False)
 
     # 限制 event loop 默认线程池（必须在任何 run_in_executor(None) 之前）
     _apply_bounded_default_executor()
 
     storage = WebStorage()
     storage.mark_interrupted_messages()
-    # 清理重启前未完成的回测任务（避免 SSE 永远显示 running）
-    try:
-        from utils.cache.backtest_db import mark_interrupted_runs
-        counts = mark_interrupted_runs()
-        if any(counts.values()):
-            _logger.info("[Backtest] 清理中断回测: %s", counts)
-    except Exception as e:
-        _logger.warning("[Backtest] 清理中断回测失败: %s", e)
+    # 清理重启前未完成的回测任务（后台执行 ~2s，不占用启动关键路径；幂等可并发）
+    def _cleanup_interrupted_runs():
+        try:
+            from utils.cache.backtest_db import mark_interrupted_runs
+            counts = mark_interrupted_runs()
+            if any(counts.values()):
+                _logger.info("[Backtest] 清理中断回测: %s", counts)
+        except Exception as e:
+            _logger.warning("[Backtest] 清理中断回测失败: %s", e)
+    threading.Thread(target=_cleanup_interrupted_runs, daemon=True,
+                     name="backtest-interrupted-cleanup").start()
     runtime = TaskRuntime()
     agent_context = WebAgentContext(
         skill_register=result.skill_register,
@@ -190,8 +258,8 @@ def bootstrap_web() -> WebAppState:
     memory_sdk = _init_memory_sdk()
     agent_context.memory_sdk = memory_sdk
 
-    # Agent 预热已由 bootstrap_common.init_common() 在后台启动
-    # （无需再次调用 _warmup_langgraph_async）
+    # Agent 预热改由 lifespan 在路由注册完成后启动（server/app.py::lifespan），
+    # 避免预热线程与路由导入在 GIL 下争抢，导致启动时间翻倍变慢。
 
     # 定期 GC：预热完成后每 10 分钟触发一次，防止长运行进程内存堆积
     _schedule_periodic_gc()
@@ -199,6 +267,15 @@ def bootstrap_web() -> WebAppState:
     # 定时清理过期情景记忆
     _schedule_episodic_cleanup(memory_sdk, Config.MEMORY_EPISODIC_RETENTION_DAYS)
     _schedule_semantic_cleanup(memory_sdk, Config.MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES)
+
+    # 盯盘告警（MARKET_MONITOR_ENABLED 默认 false）
+    _schedule_market_monitor({"storage": storage})
+
+    # 市场面板快照预热（默认开启；首屏温度计免等 6s）
+    _schedule_market_dashboard_prewarm()
+
+    # 后台巡检：台账刷新 / 存储扫描 / 拥挤度扫描 / 短线情绪预热（异步、不阻塞启动）
+    _schedule_background_scans()
 
     return WebAppState(
         storage=storage,
@@ -239,7 +316,9 @@ def _init_memory_sdk():
             from memory.sdk import MemorySDK, MemoryConfig, load_memory_config
             _mem_cfg = MemoryConfig(
                 backend_mode=Config.STOCK_MEMORY_BACKEND,
-                embedding_fn=_build_embedding_fn(),
+                # embedding_fn 延迟到后台预热线程再构造（_build_embedding_fn 会 import
+                # utils.llm → langchain，~10s；放前台会拖慢互相阻塞首字节）
+                embedding_fn=None,
                 user_id="default",
                 retrieval_top_k=Config.MEMORY_RETRIEVAL_TOP_K,
                 max_prompt_tokens=Config.MEMORY_MAX_PROMPT_TOKENS,
@@ -260,8 +339,9 @@ def _init_memory_sdk():
 
             _memory_sdk_instance = sdk
             set_sdk(sdk)
-            # 后台预热：SQLite + ChromaDB + embedding 冷启动 + reranker 全部异步
-            _warmup_memory_async(sdk)
+            # Memory 后台预热（SQLite + ChromaDB + embedding 冷启动 + reranker）推迟到
+            # lifespan 路由注册完成后启动（start_memory_warmup）：若在这里先拉起预热线程，
+            # 会与路由导入在 GIL 下争抢，拖慢 web 首字节时间（实测启动翻倍变慢）。
             return sdk
         except Exception as e:
             _logger.debug("[Memory] 初始化跳过: %s", e)
@@ -276,6 +356,14 @@ def _init_memory_sdk():
             return None
 
 
+def start_memory_warmup(sdk):
+    """公开入口：后台预热 Memory 后端（由 lifespan 在路由注册完成后调用，避免 GIL 争抢）。"""
+    if sdk is None:
+        # 记忆禁用：标记就绪即可（_init_memory_sdk 已处理），无需预热
+        return
+    _warmup_memory_async(sdk)
+
+
 def _warmup_memory_async(sdk):
     """后台线程预热 Memory 后端（不阻塞启动）。
 
@@ -285,6 +373,14 @@ def _warmup_memory_async(sdk):
     """
     def _warm():
         try:
+            # 延迟构造 embedding_fn（首次会 import utils.llm → langchain，~10s）。
+            # 放这里既不影响首字节时间，也能在重启后由记忆预热线程真正加载。
+            try:
+                _cfg = getattr(sdk, "_config", None)
+                if _cfg is not None and getattr(_cfg, "embedding_fn", None) is None:
+                    _cfg.embedding_fn = _build_embedding_fn()
+            except Exception:
+                _logger.debug("[Memory] embedding_fn 延迟构造失败（降级 FTS5）", exc_info=True)
             t0 = time.time()
             sdk.warmup()
             _logger.info("[Memory] 后台预热完成 (backend=%s, %.1fs)",

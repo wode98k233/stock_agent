@@ -22,7 +22,8 @@ from agents.react.utils import (
 )
 from agents.common import generate_partial_summary
 from agents.prompts import REACT_SYSTEM_PROMPT, get_skill_selector_prompt
-from utils.llm_factory import ainvoke_with_retry
+from utils.cancellation import raise_if_cancelled
+from utils.llm_factory import ainvoke_with_retry, _set_recorder_label
 from tools.skills import SkillPromptBuilder
 from tools.tool_capabilities import (
     filter_tools_for_market,
@@ -35,6 +36,7 @@ from tools.tool_capabilities import (
 from utils.budget import BudgetExceeded
 from utils.llm_factory import llm_json_with_retry
 from utils.logger import ensure_radar
+from utils.agent_trace.core import get_active_recorder
 from config import Config
 
 
@@ -71,6 +73,10 @@ class BaseAgentNode:
     - _prepare_messages: 在 LLM 调用前处理消息（去重提示、上下文压缩等）
     """
 
+    # LLM 调用记在哪个 step 名下（TokenRecorder label）。必须在每次调用前刷新，
+    # 否则会沿用上一个节点残留的 label（曾导致 agent 消耗被记成 skill-selector）。
+    llm_label = "agent"
+
     def __init__(self, llm, budget, exec_state, tools=None, logger=None, loop_threshold: int = 2):
         self.llm = llm
         self.budget = budget
@@ -92,6 +98,7 @@ class BaseAgentNode:
         return messages
 
     async def __call__(self, state: dict, config: RunnableConfig | None = None) -> dict:
+        raise_if_cancelled()
         messages = list(state["messages"])
         budget = self.budget
         exec_state = self.exec_state
@@ -146,7 +153,7 @@ class BaseAgentNode:
         else:
             llm_with_tools = self.llm.bind_tools(all_tools) if all_tools else self.llm
         response = await ainvoke_with_retry(llm_with_tools, messages, config=config,
-                                            logger=logger)
+                                            logger=logger, label=self.llm_label)
 
         # 7.5 检测 LLM 将 tool_call 以 XML 文本输出的异常情况
         content = getattr(response, "content", "") or ""
@@ -157,6 +164,7 @@ class BaseAgentNode:
                  "不要将 tool_call 以文本形式输出在回复内容中。")
             ]
             try:
+                _set_recorder_label(config, self.llm_label)
                 response = await llm_with_tools.ainvoke(retry_messages, config=config)
             except Exception as e:
                 logger.warning("R", f"重试失败: {e}")
@@ -179,6 +187,7 @@ class BaseAgentNode:
                 summary_prompt = ("基于以上已获取的所有数据，直接生成最终分析总结报告。"
                                   "不要调用任何工具，直接输出分析结论。")
                 summary_messages = list(messages) + [("system", summary_prompt)]
+                _set_recorder_label(config, self.llm_label)
                 response = await self.llm.ainvoke(summary_messages, config=config)
             except Exception as e:
                 logger.warning("R", f"强制总结生成失败: {e}")
@@ -208,7 +217,27 @@ class AgentNode(BaseAgentNode):
 
     差异点（相对于 BaseAgentNode）：
     - _prepare_messages: 迭代间去重（工具签名 + 覆盖主题）+ 上下文压缩
+    - checkpoint 恢复时按 active_skill 重建闭包 tools_ref
     """
+
+    def __init__(self, llm, budget, exec_state, tools=None, logger=None,
+                 skill_registry=None, loop_threshold: int = 2):
+        super().__init__(llm, budget, exec_state, tools=tools, logger=logger,
+                         loop_threshold=loop_threshold)
+        self.skill_registry = skill_registry
+
+    async def __call__(self, state: dict, config: RunnableConfig | None = None) -> dict:
+        _loaded = state.get("loaded_skills") or (
+            [state.get("active_skill")] if state.get("active_skill") else [])
+        if not self.tools and _loaded and self.skill_registry:
+            from agents.shared.tool_utils import activate_skills
+            activate_skills(
+                self.skill_registry, self.tools, _loaded,
+                selected_skills=state.get("candidate_skills"),
+                market=infer_market_from_text(state.get("user_input", "")),
+                allow_all_fallback=False,
+            )
+        return await super().__call__(state, config)
 
     def _get_user_goal(self, state: dict) -> str:
         return state.get("user_input", "")
@@ -320,7 +349,11 @@ class ClassifyNode:
                 "is_stock_related": False,
                 "classify_response": result["response"],
             }
-        return {"is_stock_related": True}
+        out = {"is_stock_related": True}
+        if result.get("clarified_input"):
+            # ReactAgentState 用 user_input（非 input）；模板路由继续用未 enrich 的 raw_user_input
+            out["user_input"] = result["clarified_input"]
+        return out
 
 
 class SelectTemplateNode:
@@ -332,6 +365,9 @@ class SelectTemplateNode:
 
     async def __call__(self, state: ReactAgentState, config: RunnableConfig | None = None) -> dict:
         user_input = state["user_input"]
+        # 模板路由用**原始输入**（不含 enrich 的画像/记忆），与 plan 家族对齐；
+        # enrich 文本里的历史分析关键词会污染场景匹配（2026-09-23 实测）。
+        route_input = state.get("raw_user_input") or user_input
         logger = self.logger
         selected_template_id = Config.REPORT_TEMPLATE
         selected_template = None
@@ -340,7 +376,7 @@ class SelectTemplateNode:
                 from agents.common import select_and_load_template
                 from agents.analysis.template_store import load_template
                 history = self.memory.get_history() if self.memory and getattr(self.memory, "enabled", False) else []
-                selected_template_id, _ = select_and_load_template(user_input, logger, history=history)
+                selected_template_id, _ = select_and_load_template(route_input, logger, history=history)
                 selected_template = load_template(selected_template_id)
             except Exception as e:
                 logger.warning("A", f"报告模板选择失败，回退默认模板: {e}")
@@ -385,6 +421,9 @@ class SelectSkillsNode:
         result = llm_json_with_retry(self.llm, messages, logger, label="skill-selector", budget=budget, metadata=metadata, run_config=config)
 
         selected = []
+        reason = ""
+        if isinstance(result, dict):
+            reason = result.get("reason", "") or ""
         if result and isinstance(result.get("selected_skills"), list):
             selected = result["selected_skills"]
             reason = result.get("reason", "")
@@ -407,25 +446,61 @@ class SelectSkillsNode:
             except Exception as e:
                 logger.warning("A", f"模板必需技能合并失败: {e}")
 
-        all_tools = []
-        if selected:
-            for skill_name in selected:
-                tools = self.skill_registry.get_tools(skill_name)
-                if tools:
-                    all_tools.extend(tools)
-        if not all_tools:
-            logger.warning("R", "未选中任何技能，加载全部工具")
-            all_tools = self.skill_registry.get_all_tools()
-        all_tools, filtered_tool_names = filter_tools_for_market(all_tools, market)
-        if filtered_tool_names:
-            logger.info("R", f"按市场过滤工具 market={market}: {filtered_tool_names}")
+        try:
+            catalog_names = {item.get("skill_name") for item in (self.skill_registry.get_skill_catalog() or [])}
+        except Exception:
+            catalog_names = set()
+        if catalog_names:
+            filtered = [s for s in selected if s in catalog_names]
+            if len(filtered) != len(selected):
+                self.logger.warning("R", f"选择器返回未注册技能已剔除: {set(selected) - catalog_names}")
+            selected = filtered
 
-        # 写入共享引用供后续闭包节点使用
-        if self.tools_ref is not None:
-            self.tools_ref.clear()
-            self.tools_ref.extend(all_tools)
+        candidate_skills = list(selected)
+        active_skill = candidate_skills[0] if candidate_skills else ""
+        if not candidate_skills:
+            logger.warning("R", "技能选择为空且模板无必需技能，本轮不使用工具")
 
-        return {"selected_skills": selected, "all_tool_names": [t.name for t in all_tools]}
+        # 批量装载：一次装候选前 N 个技能的工具（N<=0 = 全量）。见
+        # docs/superpowers/plans/2026-09-22-react-skill-batch-loading.md
+        from config import Config
+        from agents.shared.tool_utils import activate_skills
+        _n = getattr(Config, "REACT_SKILL_BATCH_SIZE", 3)
+        loaded_skills = candidate_skills if _n <= 0 else candidate_skills[:_n]
+        _ref = self.tools_ref if self.tools_ref is not None else []
+        names = activate_skills(
+            self.skill_registry, _ref, loaded_skills,
+            selected_skills=candidate_skills, logger=logger,
+            market=market, allow_all_fallback=False,
+        )
+        all_tools = list(_ref)
+        logger.info("R", f"批量装载技能 {loaded_skills} → {len(names)} 个工具")
+
+        self._record_skill_event(selected, reason, market, all_tools, active_skill, candidate_skills)
+
+        return {
+            "selected_skills": selected,
+            "all_tool_names": [t.name for t in all_tools],
+            "active_skill": active_skill,
+            "candidate_skills": candidate_skills,
+            "loaded_skills": loaded_skills,
+        }
+
+    def _record_skill_event(self, selected, reason, market, tools, active_skill="", candidates=None):
+        try:
+            recorder = get_active_recorder()
+            if recorder is None:
+                return
+            recorder.record_skill_event("select", {
+                "selected": selected,
+                "reason": reason,
+                "market": market,
+                "tools": [t.name for t in tools],
+                "active_skill": active_skill,
+                "candidates": list(candidates or []),
+            })
+        except Exception as e:
+            self.logger.debug("R", f"技能选择事件记录失败（忽略）: {e}")
 
 
 class PrepareNode:
@@ -447,16 +522,18 @@ class PrepareNode:
         )
         system_prompt = REACT_SYSTEM_PROMPT + "\n\n## 可用工具\n\n" + tool_descriptions
 
-        # 注入选中技能的详细使用指南（与 Plan/PDOR executor 对齐）
-        selected_skills = state.get("selected_skills", [])
-        if self.skill_registry and selected_skills:
-            details = []
-            for skill_name in selected_skills:
-                detail = SkillPromptBuilder.build_tools_detail_prompt(self.skill_registry, skill_name)
+        # 注入已装载技能的使用指南（L1 用法层；批量时逐个注入，去重保序）
+        _loaded = state.get("loaded_skills") or (
+            [state.get("active_skill")] if state.get("active_skill") else [])
+        if self.skill_registry:
+            _seen = set()
+            for _sk in _loaded:
+                if not _sk or _sk in _seen:
+                    continue
+                _seen.add(_sk)
+                detail = SkillPromptBuilder.build_tools_detail_prompt(self.skill_registry, _sk)
                 if detail:
-                    details.append(detail)
-            if details:
-                system_prompt += "\n\n" + "\n\n".join(details)
+                    system_prompt += "\n\n" + detail
 
         # 模板 guidance 作为独立动态 system 消息，放在历史之后
         guidance = ""

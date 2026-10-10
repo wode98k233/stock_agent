@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=['flow'])
 
 _SKILL_NAME = "hithink_market_query"
-_TOOL_NAME = "iwc_market_query"
+_TOOL_NAME = "iwc_query"  # 问财工具已收敛为统一入口（见 tools/other_skills/10jqka/skills.py）
 _CACHE_PREFIX = "flow"
 _CACHE_TTL = 1  # 小时
 

@@ -10,9 +10,13 @@ from server.routes import memory as memory_routes
 class _FakeEmb:
     def __init__(self):
         self.v = None
+        self.m = None
 
     def set_min_similarity(self, x):
         self.v = x
+
+    def set_similarity_margin(self, x):
+        self.m = x
 
 
 class _FakeBackend:
@@ -49,7 +53,8 @@ def client(tmp_path, monkeypatch):
 def test_get_config_default(client):
     r = client.get("/api/memory/config")
     assert r.status_code == 200
-    assert r.json()["min_similarity"] == 0.72
+    assert r.json()["min_similarity"] == 0.30
+    assert r.json()["similarity_margin"] == 0.12
 
 
 def test_post_config_updates_and_persists(client, tmp_path):
@@ -67,3 +72,13 @@ def test_post_config_updates_and_persists(client, tmp_path):
 def test_post_config_invalid_rejected(client):
     r = client.post("/api/memory/config", json={"min_similarity": 1.5})
     assert r.status_code == 400
+
+
+def test_post_similarity_margin(client, tmp_path):
+    r = client.post("/api/memory/config", json={"similarity_margin": 0.2})
+    assert r.status_code == 200
+    assert r.json()["similarity_margin"] == 0.2
+    import json
+    data = json.loads((tmp_path / "memory_config.json").read_text(encoding="utf-8"))
+    assert data["similarity_margin"] == 0.2
+    assert client.get("/api/memory/config").json()["similarity_margin"] == 0.2

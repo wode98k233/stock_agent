@@ -4,6 +4,10 @@ from typing import Optional, List
 
 logger = logging.getLogger("radar.fetcher")
 
+# 历史K线的行数下限：低于此值视为「非历史数据」（如仅返回当日一行的实时快照），
+# 主动判为数据源失败以触发 @retry 的换源降级。取 2 以免误伤极小请求。
+_MIN_HISTORY_ROWS = 2
+
 # ── 轻量级导入（不触发 akshare）──
 from .config import Config
 from .base import DataSource, DataSourceManager, retry
@@ -63,11 +67,22 @@ def _get_source():
     return source
 
 
-@retry()
+@retry(capability="hist")
 def ak_stock_hist(symbol: str, period: str = "daily", start: str = "", end: str = "") -> pd.DataFrame:
     source = _get_source()
     logger.debug(f"[{source.name}] 获取历史K线: {symbol}")
-    return source.get_stock_hist(symbol, period, start, end)
+    df = source.get_stock_hist(symbol, period, start, end)
+    # 行数下限守护：数据源可能返回「非空但只有当日一行」的快照（2026-09-20 实测
+    # mx_data 路径会把实时快照当历史返回）。非空结果不会触发 @retry 的换源，
+    # 于是坏数据一路带下去（下游 calc_indicators 在 obv[-6] 越界）。
+    # 此处主动抛错 → 交给 @retry 换下一个数据源重试。
+    if df is None or len(df) < _MIN_HISTORY_ROWS:
+        got = 0 if df is None else len(df)
+        raise ValueError(
+            f"[{source.name}] 历史K线行数不足: {symbol} 仅 {got} 行"
+            f"（阈值 {_MIN_HISTORY_ROWS}），按数据源失败处理以触发降级"
+        )
+    return df
 
 
 @retry()
@@ -192,6 +207,43 @@ def ak_margin_trading(market: str = "sh", start_date: str = "", end_date: str = 
     source = _get_source()
     logger.debug(f"[{source.name}] 获取融资融券汇总: {market}")
     return source.get_margin_trading(market, start_date, end_date)
+
+
+@retry()
+def ak_macro_indicator(indicator: str) -> pd.DataFrame:
+    """宏观指标时序（统一列 report_date/value，升序）。
+
+    逐指标选源见 AkshareDataSource._MACRO_APIS；金十系指标滞后约 1 年，
+    调用方可用 akshare_ds.macro_freshness_days 判断是否标注「源数据滞后」。
+    """
+    source = _get_source()
+    logger.debug(f"[{source.name}] 获取宏观指标: {indicator}")
+    return source.get_macro_indicator(indicator)
+
+
+# ── 指数估值与中证指数日线 ──────────────────────────────
+
+@retry()
+def ak_index_valuation(code: str) -> pd.DataFrame:
+    """中证指数公司指数估值时序（列 report_date/dy/pe[/dy_alt/pe_alt]，升序）。
+
+    仅覆盖中证指数代码（H30269 红利低波等）。该源只返回近 20 个交易日，
+    长期历史分位需用 utils/cache/macro_db.upsert_indicator_series 逐期累积。
+    """
+    source = _get_source()
+    logger.debug(f"[{source.name}] 获取指数估值: {code}")
+    return source.get_index_valuation(code)
+
+
+@retry()
+def ak_index_hist_csindex(code: str, start: str = "", end: str = "") -> pd.DataFrame:
+    """中证指数公司指数日线（点位口径，含滚动市盈率）。
+
+    交易所指数（沪深300 等）不走本出口，见 AkshareDataSource.get_stock_hist。
+    """
+    source = _get_source()
+    logger.debug(f"[{source.name}] 获取中证指数日线: {code}")
+    return source.get_index_hist_csindex(code, start, end)
 
 
 @retry()
@@ -364,6 +416,10 @@ __all__ = [
     'ak_individual_fund_flow', 'ak_sector_fund_flow_rank', 'ak_north_fund_flow',
     # 融资融券
     'ak_margin_trading', 'ak_margin_detail',
+    # 宏观数据
+    'ak_macro_indicator',
+    # 指数估值与中证指数日线
+    'ak_index_valuation', 'ak_index_hist_csindex',
     # 大宗交易
     'ak_block_trades', 'ak_block_trade_stats',
     # 板块轮动

@@ -132,6 +132,15 @@ def set_margin_cache(key: str, data):
     _set('cache_margin', key, data, expire_hours)
 
 
+# 宏观指标（DataFrame 时序，24h TTL，见 policies.macro）
+def get_macro_cache(key: str):
+    return _get_df('cache_macro', key)
+
+def set_macro_cache(key: str, df):
+    expire_hours = _get_expire_hours("macro")
+    _set_df('cache_macro', key, df, expire_hours)
+
+
 # 大宗交易
 def get_block_trade_cache(key: str):
     return _get('cache_block_trade', key)
@@ -157,3 +166,12 @@ def get_risk_metrics_cache(key: str):
 def set_risk_metrics_cache(key: str, data):
     expire_hours = _get_expire_hours("risk_metrics")
     _set('cache_risk_metrics', key, data, expire_hours)
+
+
+# 筹码分布（AKShare 备源；妙想额度耗尽时的主要取数路径）
+def get_chip_distribution_cache(symbol: str):
+    return _get('cache_chip_distribution', symbol)
+
+def set_chip_distribution_cache(symbol: str, data):
+    expire_hours = _get_expire_hours("chip_distribution")
+    _set('cache_chip_distribution', symbol, data, expire_hours)

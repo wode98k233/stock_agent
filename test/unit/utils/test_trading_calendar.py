@@ -262,6 +262,65 @@ class TestGetNextTradingDate:
         assert result == date(2026, 6, 1)
 
 
+class TestIsTradingHours:
+    """is_trading_hours 盘中时段判断（A股 9:30-11:30 / 13:00-15:00）。
+
+    节假日判断由 is_market_open 负责，本函数只管时段 + 周末 fail-safe。
+    """
+
+    # 2026-05-29 是周四（交易日）、05-30 周六、05-31 周日
+
+    def _hours(self, dt):
+        from utils.trading_calendar import is_trading_hours
+        return is_trading_hours("cn", dt)
+
+    def test_before_open_929(self):
+        assert self._hours(datetime(2026, 5, 29, 9, 29)) is False
+
+    def test_open_930(self):
+        assert self._hours(datetime(2026, 5, 29, 9, 30)) is True
+
+    def test_morning_1129(self):
+        assert self._hours(datetime(2026, 5, 29, 11, 29)) is True
+
+    def test_morning_close_1130(self):
+        assert self._hours(datetime(2026, 5, 29, 11, 30)) is True
+
+    def test_lunch_break_1131(self):
+        assert self._hours(datetime(2026, 5, 29, 11, 31)) is False
+
+    def test_lunch_break_1230(self):
+        assert self._hours(datetime(2026, 5, 29, 12, 30)) is False
+
+    def test_afternoon_open_1300(self):
+        assert self._hours(datetime(2026, 5, 29, 13, 0)) is True
+
+    def test_afternoon_1459(self):
+        assert self._hours(datetime(2026, 5, 29, 14, 59)) is True
+
+    def test_close_1500(self):
+        assert self._hours(datetime(2026, 5, 29, 15, 0)) is True
+
+    def test_after_close_1501(self):
+        assert self._hours(datetime(2026, 5, 29, 15, 1)) is False
+
+    def test_saturday_false(self):
+        assert self._hours(datetime(2026, 5, 30, 10, 0)) is False
+
+    def test_sunday_false(self):
+        assert self._hours(datetime(2026, 5, 31, 10, 0)) is False
+
+    def test_us_market_not_supported(self):
+        """一期仅支持 A 股盘中时段，其他市场返回 False。"""
+        from utils.trading_calendar import is_trading_hours
+        assert is_trading_hours("us", datetime(2026, 5, 29, 10, 0)) is False
+
+    def test_default_uses_current_time(self):
+        """不传 current_time 时按市场本地当前时间判断，不抛异常。"""
+        from utils.trading_calendar import is_trading_hours
+        assert isinstance(is_trading_hours("cn"), bool)
+
+
 class TestGetMarketNow:
     """get_market_now 时区转换。"""
 

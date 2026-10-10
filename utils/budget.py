@@ -69,6 +69,7 @@ class BudgetController:
         self._tokens_used = 0
         self._llm_calls = 0
         self._start_time = time.time()
+        self._excluded_time = 0.0  # 扣除的等待耗时（澄清反问等用户交互阻塞）
         self._enabled = True
         self.exempt_window: Optional[BudgetExemptWindow] = None
 
@@ -77,7 +78,21 @@ class BudgetController:
         self._tokens_used = 0
         self._llm_calls = 0
         self._start_time = time.time()
+        self._excluded_time = 0.0
         self.exempt_window = None
+
+    def exclude_seconds(self, seconds: float) -> None:
+        """从 elapsed 里扣掉一段等待时间。
+
+        用于「等用户作答」这类不消耗算力的阻塞（澄清反问最长 5 分钟），
+        否则会白白吃掉 MAX_TIME_SECONDS 时间预算。
+        """
+        try:
+            sec = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if sec > 0:
+            self._excluded_time += sec
 
     def disable(self):
         """禁用预算检查（用于测试）"""
@@ -102,7 +117,7 @@ class BudgetController:
         return self._llm_calls
 
     def get_elapsed(self) -> float:
-        return time.time() - self._start_time
+        return max(0.0, time.time() - self._start_time - getattr(self, "_excluded_time", 0.0))
 
     def set_exempt_window(self, window: BudgetExemptWindow):
         """设置预算豁免窗口"""

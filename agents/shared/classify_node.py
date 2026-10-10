@@ -32,11 +32,15 @@ class ClassifyNode:
         )
         if result.get("response"):
             return {"is_stock_related": False, "response": result["response"]}
-        return {"is_stock_related": True, "response": None}
+        out = {"is_stock_related": True, "response": None}
+        if result.get("clarified_input"):
+            out["clarified_input"] = result["clarified_input"]
+        return out
 
 
 def make_classify_from_ctx(ctx: AgentContext):
     """从 AgentContext 创建 ClassifyNode 实例（Plan/PDOR 共用）"""
     from utils.llm_factory import get_llm
     llm = get_llm()
-    return ClassifyNode(llm=llm, memory=ctx.memory, logger=ctx.logger)
+    # budget 必须传：澄清反问的等待时间要从预算耗时里扣除
+    return ClassifyNode(llm=llm, memory=ctx.memory, budget=ctx.budget, logger=ctx.logger)

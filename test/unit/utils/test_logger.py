@@ -168,6 +168,60 @@ def test_summarize_utils():
     print("[OK] 摘要工具正确")
 
 
+def test_metrics_summary_cache_by_label():
+    """metrics_summary 输出按 label 的缓存命中明细（ctx 与 snapshot 两种入口）。"""
+    from utils.logger import RadarLogger, RequestContext
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    raw_logger = logging.getLogger("test.cache_by_label")
+    raw_logger.setLevel(logging.DEBUG)
+    raw_logger.handlers.clear()
+    raw_logger.addHandler(_Capture())
+
+    logger = RadarLogger(raw_logger, "cache01")
+    ctx = RequestContext("cache01", raw_logger)
+    ctx.record_llm(89000, 4000, 51000, 1000, label="react-sub")
+    ctx.record_llm(36000, 12000, 0, 2000, label="react-tool-compress")
+    logger.metrics_summary(ctx)
+
+    details = [r for r in records if getattr(r, "_msg", "") == "缓存明细"]
+    assert details, "ctx 路径应输出缓存明细行"
+    detail = details[-1]._kv.get("按调用", "")
+    assert "react-sub 57% (51k/89k)" in detail, f"实际: {detail}"
+    assert "react-tool-compress 0% (0/36k)" in detail, f"实际: {detail}"
+
+    records.clear()
+    logger.metrics_summary({
+        "elapsed_seconds": 1.0,
+        "metrics": {
+            "llm_calls": 2, "llm_tokens_in": 114527, "llm_tokens_out": 16000,
+            "llm_tokens_reasoning": 3000, "llm_cached_tokens": 51000,
+            "llm_cache_by_label": {
+                "react-sub": {"in": 89000, "cached": 51000},
+                "report-fast": {"in": 25527, "cached": 0},
+            },
+            "tool_calls": 19, "steps_total": 0, "steps_success": 0,
+            "steps_failed": 0, "retries": 0,
+        },
+        "trace_totals": {},
+        "budget": None,
+        "consistency": {},
+    })
+
+    details = [r for r in records if getattr(r, "_msg", "") == "缓存明细"]
+    assert details, "snapshot 路径应输出缓存明细行"
+    detail = details[-1]._kv.get("按调用", "")
+    assert "react-sub 57% (51k/89k)" in detail, f"应按输入量降序且紧凑格式化: {detail}"
+    assert "report-fast 0% (0/25.5k)" in detail, f"应含 report-fast: {detail}"
+
+    print("[OK] 缓存明细正确")
+
+
 def _make_test_record(msg="原始消息", kv=None):
     """创建带 relpath 属性的测试 record"""
     record = logging.LogRecord(
@@ -230,6 +284,7 @@ if __name__ == "__main__":
         test_child_logger_inheritance()
         test_logger_req_id_prefix()
         test_summarize_utils()
+        test_metrics_summary_cache_by_label()
         print("\n" + "=" * 60)
         print("[PASS] All radar logger tests passed!")
         print("=" * 60)

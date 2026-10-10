@@ -25,6 +25,11 @@ def _fund_list_df():
 
 
 class TestSearchFunds(unittest.TestCase):
+    def setUp(self):
+        # 隔离同花顺通道：默认走 akshare mock 路径（hithink 优先路径见 TestHithinkPriority）
+        p = patch.object(fund_data, "_hithink", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_search_by_name(self):
         with patch.object(fund_data, "_fund_list_df", return_value=_fund_list_df()):
@@ -49,6 +54,11 @@ class TestSearchFunds(unittest.TestCase):
 
 
 class TestEtfSpot(unittest.TestCase):
+    def setUp(self):
+        # 隔离同花顺通道：默认走 akshare mock 路径（hithink 优先路径见 TestHithinkPriority）
+        p = patch.object(fund_data, "_hithink", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _spot_df(self):
         return pd.DataFrame([{
@@ -81,6 +91,11 @@ class TestEtfSpot(unittest.TestCase):
 
 
 class TestEtfHistory(unittest.TestCase):
+    def setUp(self):
+        # 隔离同花顺通道：默认走 akshare mock 路径（hithink 优先路径见 TestHithinkPriority）
+        p = patch.object(fund_data, "_hithink", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _em_df(self):
         return pd.DataFrame([{
@@ -120,6 +135,11 @@ class TestEtfHistory(unittest.TestCase):
 
 
 class TestOpenFundNav(unittest.TestCase):
+    def setUp(self):
+        # 隔离同花顺通道：默认走 akshare mock 路径（hithink 优先路径见 TestHithinkPriority）
+        p = patch.object(fund_data, "_hithink", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_nav_history(self):
         df = pd.DataFrame([
@@ -140,3 +160,94 @@ class TestOpenFundNav(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeHithink:
+    """同花顺数据源替身（结构对齐 HithinkDataSource 的被消费面）。"""
+
+    calls = []
+
+    @staticmethod
+    def is_available():
+        return True
+
+    @staticmethod
+    def _get(path, params=None):
+        _FakeHithink.calls.append(path)
+        return {"item": [{"thscode": "510300.SH", "ticker": "510300", "name": "沪深300ETF",
+                          "last_price": 4.68, "price_change_ratio_pct": 0.58,
+                          "volume": 100, "turnover": 500}]}
+
+    @staticmethod
+    def _to_thscode(symbol):
+        s = str(symbol).strip().upper()
+        return s if "." in s else f"{s}.SH"
+
+    @staticmethod
+    def get_stock_hist(symbol, start="", end=""):
+        _FakeHithink.calls.append("fund/hist")
+        return pd.DataFrame([
+            {"日期": "2026-09-08", "开盘": 4.6, "最高": 4.7, "最低": 4.59, "收盘": 4.653,
+             "成交量": 10, "成交额": 46},
+            {"日期": "2026-09-09", "开盘": 4.65, "最高": 4.7, "最低": 4.64, "收盘": 4.68,
+             "成交量": 20, "成交额": 93},
+        ])
+
+    @staticmethod
+    def get_fund_nav(symbol, range_="", nav_type=""):
+        _FakeHithink.calls.append("fund/nav")
+        return [{"nav_date": "2026-09-08", "unit_nav": 1.0, "adj_nav": 1.0},
+                {"nav_date": "2026-09-09", "unit_nav": 1.01, "adj_nav": 1.01}]
+
+    @staticmethod
+    def search_ticker(q, exchange="", asset_type="", limit=10):
+        _FakeHithink.calls.append("meta/search")
+        return [{"thscode": "510300.SH", "code": "510300", "name": "沪深300ETF",
+                 "asset_type": "fund-etf"}]
+
+
+class TestHithinkPriority(unittest.TestCase):
+    """同花顺官方源优先，akshare 为兜底（返回形状与既有契约一致）。"""
+
+    def setUp(self):
+        fund_data._cache.clear()
+        _FakeHithink.calls = []
+        p = patch.object(fund_data, "_hithink", return_value=_FakeHithink)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_etf_spot_hithink_first(self):
+        r = fund_data.get_etf_spot("510300")
+        self.assertEqual(r["source"], "同花顺ETF行情")
+        self.assertEqual(r["price"], 4.68)
+        self.assertIn("/api/fund/market/snapshot", _FakeHithink.calls)
+
+    def test_etf_history_hithink_first(self):
+        rows = fund_data.get_etf_history("510300", days=2)
+        self.assertEqual(rows[-1]["close"], 4.68)
+        self.assertIn("fund/hist", _FakeHithink.calls)
+
+    def test_open_fund_nav_daily_change_computed(self):
+        rows = fund_data.get_open_fund_nav("000001", limit=1)
+        self.assertEqual(rows[0]["nav"], 1.01)
+        self.assertAlmostEqual(rows[0]["daily_change"], 1.0)  # (1.01-1.0)/1.0*100
+        self.assertIn("fund/nav", _FakeHithink.calls)
+
+    def test_search_funds_hithink_first(self):
+        rows = fund_data.search_funds("沪深300")
+        self.assertEqual(rows[0]["code"], "510300")
+        self.assertEqual(rows[0]["type"], "ETF")
+        self.assertIn("meta/search", _FakeHithink.calls)
+
+    def test_hithink_failure_degrades_to_akshare(self):
+        """同花顺异常时不吞错降级到东财 mock 路径（需本机装 akshare 才可执行）。"""
+        try:
+            import akshare  # noqa: F401
+        except ImportError:
+            self.skipTest("akshare 未安装")
+        with patch.object(_FakeHithink, "_get", side_effect=RuntimeError("api down")), \
+             patch("akshare.fund_etf_spot_em", return_value=pd.DataFrame(
+                 [{"代码": "510300", "名称": "沪深300ETF", "最新价": 4.68,
+                   "涨跌幅": 0.58, "成交量": 100, "成交额": 500}])):
+            r = fund_data.get_etf_spot("510300")
+        self.assertEqual(r["source"], "东财ETF行情")

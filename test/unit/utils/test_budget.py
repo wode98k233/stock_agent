@@ -156,6 +156,34 @@ def test_budget_within_limits():
     print("[OK] 预算内正常运行")
 
 
+def test_budget_exclude_seconds(monkeypatch):
+    """澄清反问等「等用户作答」的时间不计入时间预算。"""
+    from utils.budget import BudgetController, BudgetLimits, BudgetExceeded
+
+    bc = BudgetController(BudgetLimits(max_time_seconds=60))
+    # 墙钟已过去 300s，但全是在等用户作答 → 扣掉后仍在预算内
+    monkeypatch.setattr("utils.budget.time.time", lambda: bc._start_time + 300)
+    bc.exclude_seconds(300)
+    assert bc.get_elapsed() == 0
+    assert bc.check() is True
+
+    # 再过 61s 真实执行 → 超限
+    monkeypatch.setattr("utils.budget.time.time", lambda: bc._start_time + 361)
+    try:
+        bc.check()
+        assert False, "应该抛出 BudgetExceeded"
+    except BudgetExceeded as e:
+        assert e.reason == "time"
+
+    # 非法入参不炸
+    bc.exclude_seconds("junk")
+    bc.exclude_seconds(-5)
+
+    # reset 一并清零扣除
+    bc.reset()
+    assert bc.get_elapsed() >= 0
+
+
 if __name__ == "__main__":
     try:
         test_budget_token_exceeded()

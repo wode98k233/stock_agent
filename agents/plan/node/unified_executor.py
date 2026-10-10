@@ -8,7 +8,8 @@ from config import Config
 from agents.state import PlanExecute
 from agents.agent_context import AgentContext
 from agents.user_decision import ask_user_decision, format_step_status
-from agents.shared.tool_utils import merge_tools_for_skills
+from agents.shared.tool_utils import merge_tools_for_skills, normalize_skill_names
+from tools.skills import SkillPromptBuilder
 from memory.metadata import extract_tool_metadata, push_tool_extract
 from utils.budget import BudgetExceeded
 from utils.llm_factory import classify_llm_error
@@ -35,10 +36,10 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
     step_strs = []
     plan_skills = []
     for s in plan:
-        skill = s.get("skill", "")
-        if skill:
-            plan_skills.append(skill)
-        step_strs.append(f"  {s.get('step', '?')}. [{skill}] {s.get('instruction', '')}")
+        step_skills = normalize_skill_names(s.get("skills") or s.get("skill"))
+        if step_skills:
+            plan_skills.extend(step_skills)
+        step_strs.append(f"  {s.get('step', '?')}. [{', '.join(step_skills)}] {s.get('instruction', '')}")
     plan_text = "\n".join(step_strs)
 
     all_tools = merge_tools_for_skills(
@@ -70,6 +71,21 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
     try:
         task = f"执行计划:\n{plan_text}"
         context_messages = [*history]
+
+        # L1 渐进披露：注入计划涉及技能的用法详情（与 plan_solve/PDOR executor 对齐）。
+        # unified 一次执行全部 step，故注入全部涉及技能的详情（去重保序）。
+        detail_skills = list(dict.fromkeys(s for s in plan_skills if s))
+        if not detail_skills:
+            detail_skills = list(dict.fromkeys(
+                s for s in (state.get("selected_skills") or []) if s
+            ))
+        for sk in detail_skills:
+            try:
+                detail = SkillPromptBuilder.build_tools_detail_prompt(registry, sk)
+                if detail:
+                    context_messages.append(("system", f"可用工具详情：\n{detail}"))
+            except Exception as e:
+                logger.debug("U", f"技能详情注入失败 {sk}: {e}")
 
         # 注入用户约束
         user_constraints = state.get("user_constraints", "")

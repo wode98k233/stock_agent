@@ -289,7 +289,7 @@ window.StockRadar.timeline = (() => {
         if (!loaded) {
           detailInner.innerHTML = '<div class="tl-loading">加载中…</div>';
           try {
-            const d = await window.StockRadar.api.getStepDetail(currentStep.id);
+            const d = await window.StockRadar.api.getStepDetail(currentStep.run_id, currentStep.id);
             detailInner.innerHTML = _renderStepBody(d, currentStep);
             loaded = true;
           } catch {
@@ -350,7 +350,7 @@ window.StockRadar.timeline = (() => {
     });
     if (record.loaded && record.item.classList.contains("tl-open")) {
       record.detailInner.innerHTML = '<div class="tl-loading">刷新中…</div>';
-      window.StockRadar.api.getStepDetail(step.id).then((d) => {
+      window.StockRadar.api.getStepDetail(step.run_id, step.id).then((d) => {
         record.detailInner.innerHTML = _renderStepBody(d, step);
       }).catch(() => {
         record.detailInner.innerHTML = '<div class="tl-error-box">加载失败</div>';

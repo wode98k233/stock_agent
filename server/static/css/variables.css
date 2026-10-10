@@ -9,6 +9,9 @@
   --border-main: #e2e6ec;
   --border: #e5e7eb;
   --border-light: #f0f0f0;
+  /* 交互底色（补齐 eval 等页面长期引用但未定义的变量） */
+  --hover: #f0f2f5;
+  --active: rgba(23, 107, 91, 0.08);
   --text: #1c2430;
   --text-secondary: #6b7280;
   --muted: #667085;

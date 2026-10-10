@@ -27,8 +27,31 @@ def safe_float(val) -> float | None:
     return None
 
 
+def pick_quote_source(source_name: str):
+    """查找支持批量按需报价（fetch_quotes）的数据源。
+
+    - 指定源名：返回该源（若无 fetch_quotes 能力则由调用方回退全市场快照）。
+    - auto：按 DataSourceManager 优先级顺序，返回**第一个支持 fetch_quotes 的
+      已启用源**（当前为 hithink）。返回 None 表示无快通道可用。
+
+    为什么 auto 不能直接返回 None：`fetch_quotes_for_symbols` 在 source=None 时
+    会落到 `ak_spot_em()`（全市场快照），仅取自选列表几只要拉全市场 5000+ 行，
+    实测慢源（sina_direct）会吃满 20s 超时，直接顶爆总览区块预算。
+    """
+    from tools.fetcher.base import DataSourceManager
+    if source_name and source_name != "auto":
+        for s in DataSourceManager._sources:
+            if s.name == source_name and s.enabled:
+                return s
+        return None
+    for s in DataSourceManager._sources:
+        if s.enabled and hasattr(s, "fetch_quotes"):
+            return s
+    return None
+
+
 def pick_source(source_name: str):
-    """按名称查找数据源，auto 返回 None。"""
+    """按名称查找数据源（历史接口，保留向后兼容）；auto 返回 None。"""
     from tools.fetcher.base import DataSourceManager
     if source_name == "auto":
         return None
@@ -76,6 +99,43 @@ def df_to_quotes(df, symbols: set[str]) -> dict:
             "prev_close": prev_close,
         }
     return quotes
+
+
+def fetch_quotes_for_symbols(symbols: list[str], source: str = "auto") -> dict:
+    """批量行情：优先按需快通道（fetch_quotes），否则回退全市场快照。
+
+    取数路径（2026-09-29 修正）：
+    - `auto`：挑选**支持 fetch_quotes 的源**（当前 hithink，一次请求多标的），
+      只有快通道不存在/抛错时才回退 `ak_spot_em()` 全市场快照。
+      旧实现在 auto 下直接走全市场快照——仅取自选几只要拉全市场 5000+ 行，
+      慢源（sina_direct）会吃满 20s 源码超时，顶爆总览区块的 20s 软超时。
+    - 指定源名：该源有 fetch_quotes 则用快通道，否则用它的 get_spot_em()。
+
+    异常直接抛出（调用方降级）；快通道异常时在此内部回退，不回抛。
+    """
+    if not symbols:
+        return {}
+    from tools.fetcher import ak_spot_em
+
+    target = pick_quote_source(source)
+    if target is not None and hasattr(target, "fetch_quotes"):
+        try:
+            df = target.fetch_quotes(symbols)
+            quotes = df_to_quotes(df, set(symbols))
+            if quotes:
+                return quotes
+            # 快通道空结果（接口可用但无数据）→ 继续回退，避免"有源却无报价"
+            logger.debug("[watchlist] %s 快通道空结果，回退全市场快照", target.name)
+        except Exception as e:
+            logger.warning("[watchlist] %s 快通道失败，回退全市场快照: %s",
+                           getattr(target, "name", "?"), e)
+
+    # 回退：指定源自带的 get_spot_em()，或默认优先级链的全市场快照
+    if target is not None and not hasattr(target, "fetch_quotes"):
+        df = target.get_spot_em()
+    else:
+        df = ak_spot_em()
+    return df_to_quotes(df, set(symbols))
 
 
 def persist_quotes(watchlist, quotes: dict):

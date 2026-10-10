@@ -402,3 +402,175 @@ def test_build_prompt_stable_system_before_dynamic_user():
     # 动态内容在后续 user 消息中
     dynamic_contents = " ".join(m[1] for m in messages if m[0] == "user")
     assert "DYNAMIC_INPUT_MARKER" in dynamic_contents
+
+
+# ══════════════════════════════════════════════════════════════
+# 原始数据通道（2026-10-01：raw_result 与 step_results 曾硬二选一，
+#   导致 group 的 step_results 把含数据底版的 raw_result 整体挤掉）
+# ══════════════════════════════════════════════════════════════
+
+def _rich_raw() -> str:
+    return "数据底版：深证成指 -8.044%，全A主力净流出 4294亿。" * 20
+
+
+def test_build_prompt_keeps_raw_result_when_no_evidence():
+    """无工具/条目证据 → raw_result 作为原始素材注入（保底通道）"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    template = evaluate(load_template("theme_trading"), {})
+    raw = _rich_raw()
+    messages = _build_prompt(template, {}, "9月市场总结", raw_result=raw)
+    all_text = " ".join(m[1] for m in messages)
+
+    assert "## 原始素材" in all_text          # 消息头只在真正注入时出现
+    assert all_text.count(raw) == 1
+
+
+def test_build_prompt_does_not_duplicate_raw_result_with_seed_flag():
+    """raw_result_is_seed=True（仅 group）且条目证据已载入 → raw_result 不再重复注入"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    template = evaluate(load_template("theme_trading"), {})
+    raw = _rich_raw()
+    evidence = "### 数据底版 · 数据采集员\n输出:\n" + raw
+    messages = _build_prompt(
+        template, {}, "9月市场总结",
+        raw_result=raw, tool_evidence=evidence, raw_result_is_seed=True,
+    )
+    all_text = " ".join(m[1] for m in messages)
+
+    assert all_text.count(raw) == 1           # 只来自 evidence
+    assert "## 原始素材" not in all_text      # 未重复注入 raw_result
+
+
+def test_build_prompt_seed_flag_still_injects_without_evidence():
+    """raw_result_is_seed=True 但没有任何条目证据 → 仍注入（保底，不能变成零数据）"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    template = evaluate(load_template("theme_trading"), {})
+    raw = _rich_raw()
+    messages = _build_prompt(template, {}, "9月市场总结",
+                             raw_result=raw, raw_result_is_seed=True)
+    all_text = " ".join(m[1] for m in messages)
+    assert "## 原始素材" in all_text
+    assert all_text.count(raw) == 1
+
+
+# ── 跨模式矩阵：raw_result 注入规则是五个模式共享的判断（2026-10-01）──
+# 背景：曾把判断写成 `elif not tool_evidence`，结果 React / Unified 模式
+# （step_results 为空、tool_calls 非空、raw_result 是报告草稿）的 raw_result 被整段挡掉。
+# 这条矩阵把每个模式的输入形状与期望行为钉死，防止再犯。
+
+def test_raw_result_injection_matrix_across_modes():
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    template = evaluate(load_template("theme_trading"), {})
+    raw = _rich_raw()
+    evidence = "### mx_data_query\n输出:\n" + _rich_raw()
+    one_step = [{"step": 1, "skill": "mx_data", "purpose": "取数", "result": "步骤结果" * 30}]
+
+    cases = [
+        # (模式, step_results, tool_evidence, raw_result_is_seed, 期望注入)
+        ("react",   [],      evidence, False, True),   # 报告草稿必须注入
+        ("unified", [],      evidence, False, True),   # 同上
+        ("plan",    one_step, "",      False, False),  # 走 ai Step 通道
+        ("pdor",    one_step, "",      False, False),  # 同上
+        ("group",   None,    evidence, True,  False),  # 原始数据走条目通道
+        # 兜底：即使声明是种子，没有条目证据也必须注入，否则报告零数据
+        ("group_无证据", None, "", True, True),
+    ]
+
+    for mode, steps, ev, is_seed, expect_raw in cases:
+        messages = _build_prompt(
+            template, {}, "9月市场总结",
+            raw_result=raw, tool_evidence=ev, step_results=steps,
+            raw_result_is_seed=is_seed,
+        )
+        all_text = " ".join(m[1] for m in messages)
+        got = "## 原始素材" in all_text
+        assert got is expect_raw, f"{mode}: 期望 raw_result 注入={expect_raw}，实际={got}"
+
+        if steps:
+            assert any(m[0] == "ai" and m[1].startswith("### Step 1") for m in messages), \
+                f"{mode}: 有 step_results 时必须走 ai Step 通道"
+        if ev:
+            assert "## 原始工具数据" in all_text, f"{mode}: 有证据时必须注入条目通道"
+
+
+def test_build_prompt_req_mentions_raw_material():
+    """核心要求 1 的措辞需覆盖「原始素材」，否则 tool_evidence 为空时自相矛盾"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    template = evaluate(load_template("theme_trading"), {})
+    messages = _build_prompt(template, {}, "9月市场总结", raw_result=_rich_raw())
+    assert "原始素材" in messages[1][1]
+
+
+# ══════════════════════════════════════════════════════════════
+# 模板级 min_report_tokens（2026-10-01：轻量模板 quick_lookup）
+# 背景：REPORT_MIN_TOKENS=3500 会让「只要股价」这类请求的报告被
+# `_expand_report_if_short` 主动扩写拉长（实测 7283 字符）。
+# ══════════════════════════════════════════════════════════════
+
+def test_min_report_tokens_template_override():
+    """模板可用 min_report_tokens 覆盖全局；0=轻量；非法值回退全局"""
+    from agents.analysis.report_builder import _min_report_tokens
+    assert _min_report_tokens(None) >= 1000                       # 全局默认
+    assert _min_report_tokens({}) >= 1000
+    assert _min_report_tokens({"min_report_tokens": 0}) == 0      # 轻量模板
+    assert _min_report_tokens({"min_report_tokens": 800}) == 800
+    assert _min_report_tokens({"min_report_tokens": "abc"}) >= 1000   # 非法回退
+    assert _min_report_tokens({"min_report_tokens": None}) >= 1000
+
+
+def test_quick_template_skips_expand(monkeypatch):
+    """轻量模板不得触发扩写 LLM 调用（否则报告又被拉长、多花一次调用）"""
+    from agents.analysis import report_builder as rb
+    from agents.analysis.template_store import load_template, evaluate
+
+    t = evaluate(load_template("quick_lookup"), {})
+    calls = {"n": 0}
+
+    def _boom(*args, **kwargs):
+        calls["n"] += 1
+        raise AssertionError("轻量模板不应触发扩写 LLM 调用")
+
+    # 注意：tracked_invoke 是在 _expand_report_if_short **函数体内**导入的，
+    # 必须 patch 源头 utils.llm_factory.tracked_invoke 才拦得住。
+    monkeypatch.setattr("utils.llm_factory.tracked_invoke", _boom)
+    short = "今世缘(603369) 2026-09-30 收盘 28.09 元，涨跌幅 +3.54%。"
+    out = rb._expand_report_if_short(short, t, "给我获取下今世缘最新的股价，只需要这个就行了",
+                                    MagicMock(), MagicMock())
+    assert out == short                       # 原样返回，未扩写
+    assert calls["n"] == 0
+
+
+def test_quick_template_prompt_requests_brevity():
+    """轻量模板的提示词必须反向要求「简洁优先」，且不带长文目标"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    t = evaluate(load_template("quick_lookup"), {})
+    messages = _build_prompt(t, {}, "给我获取下今世缘最新的股价，只需要这个就行了", raw_result="")
+    sys_all = " ".join(c for r, c in messages if r == "system")
+
+    assert "简洁优先" in sys_all
+    assert "禁止补充用户没要的板块" in sys_all
+    assert "长文与版式要求" not in sys_all      # 长文要求不得出现
+
+
+def test_normal_template_keeps_long_form_requirement():
+    """对照组：普通模板仍保留长文要求（防止改坏既有行为）"""
+    from agents.analysis.report_builder import _build_prompt
+    from agents.analysis.template_store import load_template, evaluate
+
+    t = evaluate(load_template("sector_timing"), {})
+    messages = _build_prompt(t, {}, "板块还能追吗", raw_result="")
+    sys_all = " ".join(c for r, c in messages if r == "system")
+    assert "长文与版式要求" in sys_all
+    assert "全文目标" in sys_all

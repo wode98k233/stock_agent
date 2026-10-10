@@ -118,9 +118,10 @@ class ReactSubGraph:
                 system_prompt = (
                     f"执行以下任务：{step_purpose}\n\n"
                     "执行规则：\n"
-                    "1. 同一工具调用失败后，不要用相同参数重试\n"
+                    "1. 同一工具调用失败后，不要用相同参数重试；但若失败为限流/超时类（错误含 122、429、操作过于频繁），等待几秒后换表述重试 1 次\n"
                     "2. 如果某个工具不可用，尝试用其他工具获取类似信息\n"
-                    "3. 最多调用 {max_iter} 次工具，达到上限后必须生成总结\n\n"
+                    "3. 若关键数据因接口失败缺失，在剩余预算内允许补查 1-2 次（换关键词/换工具），不要缺着数据提前收尾\n"
+                    "4. 最多调用 {max_iter} 次工具，达到上限后必须生成总结\n\n"
                     "【目标达成判定 — 严格执行】\n"
                     "- 每次工具调用返回结果后，立即判断：本次结果是否已经包含任务所需的数据？\n"
                     "- 如果是，**立刻停止调用工具，直接生成总结**。不得以\"更全面\"、\"交叉验证\"、\"补充数据\"为由继续调用\n"
@@ -130,17 +131,29 @@ class ReactSubGraph:
                     "- 如果连续 2 次工具调用返回的数据与已有所得实质相同，必须立即总结"
                 ).format(max_iter=self.max_iterations)
                 if failed_tools:
-                    system_prompt += f"\n6. 以下工具已尝试失败，请勿重试：{', '.join(failed_tools)}"
+                    system_prompt += f"\n5. 以下工具已尝试失败，请勿重试：{', '.join(failed_tools)}"
 
                 # 注入模板指引（与 React 主循环对齐）
+                # 注意：这里是**子步执行器**（group 子 Agent / pdor / plan / unified 共用本函数），
+                # 只负责一个维度，因此传 include_report_structure=False 剔除报告级约束
+                # （报告输出结构 + 质量门禁，实测占指引 72%）。
+                # 2026-10-01 事故：报告结构泄漏导致每个子 Agent 都写了一份完整 10 段报告。
                 _tid = template_id or self.template_id
                 if _tid and getattr(Config, "REPORT_ENABLE_ANALYSIS_ENGINE", True):
                     try:
                         from agents.analysis.template_store import load_template, build_guidance
                         template = load_template(_tid)
-                        guidance = build_guidance(template, step_purpose or "")
+                        guidance = build_guidance(
+                            template, step_purpose or "", include_report_structure=False)
                         if guidance:
                             system_prompt += guidance
+                            system_prompt += (
+                                "\n\n## 你的输出边界（重要）\n"
+                                "你是子 Agent，只负责上述这一个维度。禁止输出完整报告结构；"
+                                "禁止编写「仓位与风险预算 / 交易纪律 / 五类投资者适配 / 行动方案 / "
+                                "小白版翻译」等报告级板块——这些由报告节点统一完成。"
+                                "只输出本维度的数据与判断。"
+                            )
                     except Exception:
                         pass
 

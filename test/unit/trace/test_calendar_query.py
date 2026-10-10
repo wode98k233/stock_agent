@@ -1,8 +1,19 @@
+"""trace 日历查询（分库形态）：逐月库查询合并 + 月界过滤走索引。"""
 import json
 import sqlite3
 from types import SimpleNamespace
 
-from utils.agent_trace.models import _ensure_db
+from utils.agent_trace.models import ensure_month_schema
+from utils.agent_trace.store import TraceStore, store
+
+
+def _make_month_db(tmp_path, ym: str) -> sqlite3.Connection:
+    month_dir = tmp_path / "agent_trace"
+    month_dir.mkdir(exist_ok=True)
+    conn = sqlite3.connect(str(month_dir / f"agent_trace_{ym}.db"))
+    conn.row_factory = sqlite3.Row
+    ensure_month_schema(conn)
+    return conn
 
 
 def _insert_run(conn, run_id: str, created_at: str):
@@ -44,13 +55,12 @@ def _insert_llm_step(conn, run_id: str, total_tokens: int):
     )
 
 
-def test_trace_calendar_aggregates_reasoning_tokens(tmp_path):
+def test_trace_calendar_aggregates_reasoning_tokens(tmp_path, monkeypatch):
     """日历聚合应累加 reasoning_tokens（steps.extra.token_usage 为标准化字段）。"""
     from utils.agent_trace import cli
 
-    db_path = tmp_path / "trace.db"
-    _ensure_db(db_path)
-    conn = sqlite3.connect(db_path)
+    monkeypatch.setattr(TraceStore, "trace_dir", lambda self: str(tmp_path / "agent_trace"))
+    conn = _make_month_db(tmp_path, "202608")
     try:
         _insert_run(conn, "run-r", "2026-08-14T01:00:00+00:00")
         # 标准化 usage：顶层含 reasoning_tokens（extract_token_usage 输出形态）
@@ -77,28 +87,33 @@ def test_trace_calendar_aggregates_reasoning_tokens(tmp_path):
     finally:
         conn.close()
 
-    result = cli.cmd_calendar_json(SimpleNamespace(db=str(db_path), year=2026, month=8))
-    run = result["run_days"]["2026-08-14"][0]
-    assert run["input_tokens"] == 100
-    assert run["output_tokens"] == 80
-    assert run["cached_tokens"] == 20
-    assert run["reasoning_tokens"] == 45
+    try:
+        result = cli.cmd_calendar_json(SimpleNamespace(db="", year=2026, month=8))
+        run = result["run_days"]["2026-08-14"][0]
+        assert run["input_tokens"] == 100
+        assert run["output_tokens"] == 80
+        assert run["cached_tokens"] == 20
+        assert run["reasoning_tokens"] == 45
+    finally:
+        store.close_thread_conns()
 
 
 def test_trace_calendar_uses_indexable_range_and_join_query(tmp_path, monkeypatch):
     from utils.agent_trace import cli
 
-    db_path = tmp_path / "trace.db"
-    _ensure_db(db_path)
-    conn = sqlite3.connect(db_path)
+    monkeypatch.setattr(TraceStore, "trace_dir", lambda self: str(tmp_path / "agent_trace"))
+    conn_may = _make_month_db(tmp_path, "202605")
+    conn_jun = _make_month_db(tmp_path, "202606")
     try:
-      _insert_run(conn, "run-may", "2026-05-15T01:00:00+00:00")
-      _insert_llm_step(conn, "run-may", 100)
-      _insert_run(conn, "run-june", "2026-06-01T01:00:00+00:00")
-      _insert_llm_step(conn, "run-june", 200)
-      conn.commit()
+        _insert_run(conn_may, "run-may", "2026-05-15T01:00:00+00:00")
+        _insert_llm_step(conn_may, "run-may", 100)
+        _insert_run(conn_jun, "run-june", "2026-06-01T01:00:00+00:00")
+        _insert_llm_step(conn_jun, "run-june", 200)
+        conn_may.commit()
+        conn_jun.commit()
     finally:
-      conn.close()
+        conn_may.close()
+        conn_jun.close()
 
     seen_sql: list[str] = []
     original_connect = sqlite3.connect
@@ -114,14 +129,17 @@ def test_trace_calendar_uses_indexable_range_and_join_query(tmp_path, monkeypatc
 
     monkeypatch.setattr(sqlite3, "connect", spy_connect)
 
-    result = cli.cmd_calendar_json(SimpleNamespace(db=str(db_path), year=2026, month=5))
+    try:
+        result = cli.cmd_calendar_json(SimpleNamespace(db="", year=2026, month=5))
 
-    assert "2026-05-15" in result["run_days"]
-    assert "2026-06-01" not in result["run_days"]
-    assert result["run_days"]["2026-05-15"][0]["total_tokens"] == 100
+        assert "2026-05-15" in result["run_days"]
+        assert "2026-06-01" not in result["run_days"]
+        assert result["run_days"]["2026-05-15"][0]["total_tokens"] == 100
 
-    joined_sql = "\n".join(seen_sql)
-    assert "created_at>=?" in joined_sql
-    assert "created_at<?" in joined_sql
-    assert "LIKE ?" not in joined_sql
-    assert "JOIN steps" in joined_sql
+        joined_sql = "\n".join(seen_sql)
+        assert "created_at>=?" in joined_sql
+        assert "created_at<?" in joined_sql
+        assert "LIKE ?" not in joined_sql
+        assert "JOIN steps" in joined_sql
+    finally:
+        store.close_thread_conns()

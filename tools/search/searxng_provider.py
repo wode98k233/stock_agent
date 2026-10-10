@@ -24,6 +24,15 @@ class SearXNGSearchProvider(BaseSearchProvider):
     """SearXNG 搜索引擎"""
 
     name = "SearXNG"
+
+    # SearXNG 不用 API Key（凭据是实例 URL，存在 `_base_urls`/`base_urls` 里）。
+    # 必须显式声明免密，否则基类 `search()` 会走 `_get_next_key()` 分支：
+    # 公共实例模式下 `_base_urls` 为空 → 返回 None → **在进入 `_do_search` 之前
+    # 就被短路成「未配置 API Key」**，而 `_do_search` 里实现好的公共实例发现逻辑
+    # 永远不会执行（2026-10-04 实测：is_available=True 但搜索 0.0s 返回该错误）。
+    # 与 2026-09-21 修的 MX 是同一个坑，当时漏改了这里。
+    requires_api_key = False
+
     PUBLIC_INSTANCES_URL = "https://searx.space/data/instances.json"
     PUBLIC_INSTANCES_CACHE_TTL = 3600  # 1 小时
     PUBLIC_INSTANCES_POOL_LIMIT = 20

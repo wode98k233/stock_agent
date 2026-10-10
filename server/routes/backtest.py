@@ -246,187 +246,25 @@ async def delete_strategy_endpoint(strategy_id: str):
 
 _log = logging.getLogger("server.routes.backtest")
 
-# 策略生成的系统提示词（精简版，告诉 LLM strategy-schema 格式）
-_STRATEGY_GEN_SYSTEM_PROMPT = """你是一个量化策略生成器。根据用户的自然语言描述，输出一个回测策略的 JSON 定义。
+# 策略生成的系统提示词（M4 单源化：约束清单来自 json_compiler.export_llm_schema()，
+# 与 INDICATOR_MAP 天然同步，修复旧手写清单缺 dpo/dma/cyw 的漂移问题）
+from backtest.json_compiler import export_llm_schema
 
-输出格式必须严格遵守以下 schema：
-
-{
-  "meta": {
-    "name": "策略名称",
-    "description": "一句话描述核心逻辑",
-    "tags": ["标签1", "标签2"],
-    "source": "agent"
-  },
-  "params": {
-    "参数名": { "value": 默认值, "min": 最小值, "max": 最大值, "step": 步长, "label": "中文显示名", "type": "int或float" }
-  },
-  "conditions": {
-    "buy": {
-      "logic": "AND",
-      "rules": [
-        {
-          "type": "indicator",
-          "left": { "func": "指标名", "args": ["数据源", 参数值] },
-          "op": "运算符",
-          "right": { "value": 值 或 { "func": "指标名", "args": [...] } }
-        }
-      ]
-    },
-    "sell": { "logic": "AND", "rules": [...] }
-  },
-  "risk": {
-    "stop_loss": { "type": "fixed", "value": 0.05 },
-    "take_profit": { "type": "fixed", "value": 0.15 }
-  },
-  "chart_indicators": [
-    { "type": "MA", "period": "{参数名}" }
-  ]
-}
-
-## 重要：指标函数 vs 数据源
-
-**指标函数 (func)** - 用于计算技术指标，只能使用以下函数：
-ma, ema, wma, rsi, macd, kdj, boll, atr, volume
-
-**数据源 (data)** - K线数据字段，用作指标的输入参数或价格比较：
-close, open, high, low, volume, amount
-
-## 规则类型说明
-
-1. **indicator 类型**: 比较两个指标或指标与数值
-   - 示例: 5日均线上穿20日均线
-   ```json
-   {
-     "type": "indicator",
-     "left": { "func": "ma", "args": ["close", 5] },
-     "op": "cross_above",
-     "right": { "func": "ma", "args": ["close", 20] }
-   }
-   ```
-
-2. **price 类型**: 比较价格与数值（如：价格触及布林带下轨）
-   ```json
-   {
-     "type": "price",
-     "left": {"data": "close"},
-     "op": "<",
-     "right": {"func": "boll", "args": ["close", 20], "field": "lower"}
-   }
-   ```
-
-## 完整示例
-
-**示例1: RSI超卖反弹**
-```json
-{
-  "meta": {"name": "RSI超卖反弹", "description": "RSI低于30后反弹买入", "tags": ["震荡", "RSI"], "source": "agent"},
-  "params": {
-    "rsi_period": {"value": 14, "min": 2, "max": 50, "step": 1, "label": "RSI周期", "type": "int"},
-    "oversold": {"value": 30, "min": 10, "max": 50, "step": 1, "label": "超卖线", "type": "int"}
-  },
-  "conditions": {
-    "buy": {
-      "logic": "AND",
-      "rules": [
-        {
-          "type": "indicator",
-          "left": {"func": "rsi", "args": ["close", "{rsi_period}"]},
-          "op": "<",
-          "right": {"value": "{oversold}"}
-        }
-      ]
-    },
-    "sell": {
-      "logic": "AND",
-      "rules": [
-        {
-          "type": "indicator",
-          "left": {"func": "rsi", "args": ["close", "{rsi_period}"]},
-          "op": ">",
-          "right": {"value": 70}
-        }
-      ]
-    }
-  },
-  "risk": {"stop_loss": {"type": "fixed", "value": 0.05}, "take_profit": {"type": "fixed", "value": 0.15}},
-  "chart_indicators": [{"type": "RSI", "period": "{rsi_period}"}]
-}
-```
-
-**示例2: MACD+RSI多因子共振**
-```json
-{
-  "meta": {"name": "MACD+RSI共振", "description": "MACD金叉且RSI超卖", "tags": ["多因子", "MACD", "RSI"], "source": "agent"},
-  "params": {
-    "fast_period": {"value": 12, "min": 5, "max": 50, "step": 1, "label": "快线周期", "type": "int"},
-    "slow_period": {"value": 26, "min": 10, "max": 100, "step": 1, "label": "慢线周期", "type": "int"},
-    "signal_period": {"value": 9, "min": 5, "max": 30, "step": 1, "label": "信号周期", "type": "int"},
-    "rsi_period": {"value": 14, "min": 2, "max": 50, "step": 1, "label": "RSI周期", "type": "int"}
-  },
-  "conditions": {
-    "buy": {
-      "logic": "AND",
-      "rules": [
-        {
-          "type": "indicator",
-          "left": {"func": "macd", "args": ["close", "{fast_period}", "{slow_period}", "{signal_period}"], "field": "macd"},
-          "op": "cross_above",
-          "right": {"func": "macd", "args": ["close", "{fast_period}", "{slow_period}", "{signal_period}"], "field": "signal"}
-        },
-        {
-          "type": "indicator",
-          "left": {"func": "rsi", "args": ["close", "{rsi_period}"]},
-          "op": "<",
-          "right": {"value": 30}
-        }
-      ]
-    },
-    "sell": {
-      "logic": "OR",
-      "rules": [
-        {
-          "type": "indicator",
-          "left": {"func": "macd", "args": ["close", "{fast_period}", "{slow_period}", "{signal_period}"], "field": "macd"},
-          "op": "cross_below",
-          "right": {"func": "macd", "args": ["close", "{fast_period}", "{slow_period}", "{signal_period}"], "field": "signal"}
-        },
-        {
-          "type": "indicator",
-          "left": {"func": "rsi", "args": ["close", "{rsi_period}"]},
-          "op": ">",
-          "right": {"value": 70}
-        }
-      ]
-    }
-  },
-  "risk": {"stop_loss": {"type": "fixed", "value": 0.05}, "take_profit": {"type": "fixed", "value": 0.15}},
-  "chart_indicators": [
-    {"type": "MACD", "fast_period": "{fast_period}", "slow_period": "{slow_period}", "signal_period": "{signal_period}"},
-    {"type": "RSI", "period": "{rsi_period}"}
-  ]
-}
-```
-
-## 规则清单
-
-- 可用指标函数 (func): ma, ema, wma, rsi, macd, kdj, boll, atr, volume
-- 可用数据源 (args 第一个参数或 price 类型的 data): close, open, high, low, volume, amount
-- 可用运算符 (op): >, <, >=, <=, ==, !=, cross_above, cross_below
-- 可用字段 (field, MACD/KDJ/布林带专用): macd, signal, upper, mid, lower, k, d, j
-- params 中定义的参数，在 rules 中用 "{参数名}" 引用（如 "{fast_period}"）
-
-## 重要提醒
-
-1. ❌ **错误**: `{"func": "close"}` - close不是指标函数
-2. ✅ **正确**: `{"func": "ma", "args": ["close", 5]}` - close作为数据源传入指标
-3. ✅ **正确**: `{"type": "price", "left": {"data": "close"}}` - 使用price类型比较价格
-4. params 中每个参数必须有 value/min/max/label，type 用 int 或 float
-5. conditions.buy 和 conditions.sell 必须同时存在，每个至少一条规则
-6. chart_indicators 列出需要在 K 线图上叠加的指标，参数值用 "{参数名}" 引用
-7. 只输出 JSON，不要任何解释文字
-8. 参数范围要合理（如均线周期 2-250，RSI 周期 2-50）
-9. 止损止盈设为固定百分比（stop_loss: 0.05, take_profit: 0.15 为默认值）"""
+_STRATEGY_GEN_SYSTEM_PROMPT = (
+    "你是一个量化策略生成器。根据用户的自然语言描述，输出一个符合下方 schema 约束的回测策略 JSON 定义。\n"
+    "\n"
+    + export_llm_schema()
+    + "\n\n## 重要提醒\n"
+    "1. ❌ 错误: {\"func\": \"close\"} - close 是数据源不是指标函数；✅ 正确: {\"func\": \"ma\", \"args\": [\"close\", 5]}\n"
+    "2. params 中定义的参数，在 rules 中用 \"{参数名}\" 引用（如 \"{fast_period}\"）；\n"
+    "3. params 中每个参数必须有 value/min/max/label，type 用 int 或 float；\n"
+    "4. conditions.buy 和 conditions.sell 必须同时存在，每个至少一条规则；\n"
+    "5. chart_indicators 列出需要在 K 线图上叠加的指标，参数值用 \"{参数名}\" 引用；\n"
+    "6. 只输出 JSON，不要任何解释文字；\n"
+    "7. 参数范围要合理（如均线周期 2-250，RSI 周期 2-50）；\n"
+    "8. 止损止盈设为固定百分比（stop_loss: 0.05, take_profit: 0.15 为默认值）；\n"
+    "9. 严禁使用「稳赚/必胜/躺赢」等承诺收益的词汇。"
+)
 
 
 class GenerateStrategyRequest(BaseModel):

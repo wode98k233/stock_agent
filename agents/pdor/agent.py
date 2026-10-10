@@ -22,7 +22,7 @@ class PdorAgent(PlanBasedAgent):
             checkpointer=checkpointer,
         )
 
-    def _build_initial_state(self, user_input, template_id, selected_skills) -> dict:
+    def _build_initial_state(self, user_input, template_id, selected_skills, **kwargs) -> dict:
         return {
             "input": user_input,
             "plan_steps": [],

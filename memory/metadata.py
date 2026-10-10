@@ -134,6 +134,12 @@ _NAME_BLACKLIST = (
     "如何", "怎么", "分析", "总结", "行情", "市场", "概念", "行业",
     "出现", "排名", "新闻", "资讯", "研报", "建议", "预测", "复盘",
     "价格", "走势", "操作", "持仓", "买入", "卖出", "关注",
+    # 财务/行情指标名（2026-09-20：曾把「市盈率T」当股票名，导致
+    # 601888 的记忆 stock_name 被污染、`get_by_stock('中国中免')` 查不到）
+    "市盈率", "市净率", "市销率", "市现率", "换手", "量比", "净利",
+    "营收", "毛利率", "净利率", "负债率", "涨跌幅", "振幅", "成交额",
+    "成交量", "市值", "股息", "分红", "现金流", "净资产", "收益",
+    "均线", "支撑", "压力", "筹码", "获利",
 )
 
 
@@ -152,19 +158,55 @@ def _looks_like_stock_name(name: str) -> bool:
     return bool(re.fullmatch(r"[一-龥]{2,6}[A-Z]?", name))
 
 
+def _clean_stock_name(name: str) -> str:
+    """剥掉股票名前的量词/数词前缀：「一手牧原股份」→「牧原股份」，
+    「2000股南方航空」→「南方航空」。A 股无以「手/股」开头的股票名，安全。"""
+    return re.sub(r"^[一两二三四五六七八九十百千\d]*[手股]", "", name).strip()
+
+
+def _normalize_stock_name(raw: str) -> Optional[str]:
+    """清洗正则贪婪匹配出的候选名，两步：
+    1) 剥量词前缀：「一手牧原股份」→「牧原股份」
+    2) 截动词残留前缀：「析下南方航空」→「南方航空」——A 股纯汉字名 ≤4 字，
+       候选超长时从尾部取 4 字/3 字中最长的合法名
+    清洗后不合法 → None。"""
+    name = _clean_stock_name(raw)
+    if not name or not _looks_like_stock_name(name):
+        return None
+    if len(name) > 4 and not re.search(r"[A-Za-z0-9]", name):
+        for cand in (name[-4:], name[-3:]):
+            if _looks_like_stock_name(cand):
+                return cand
+    return name
+
+
 def _extract_stock_name_from_input(tool_input: dict) -> Optional[str]:
     """从工具输入参数中提取股票名称（仅当确实像股票名时才返回）。"""
     for k in ("stock_name", "name", "query"):
         v = tool_input.get(k)
         if v and isinstance(v, str):
-            # 优先：明确带股票名后缀，如 "韦尔股份" "京东方A"
+            # 最高优先：「股票名 + 6 位代码」紧邻（「中国中免601888」「牧原股份002714」、
+            # 「中国中免（601888.SH）」）。这是问句/工具入参里最可靠的形态，
+            # 且天然与 `_extract_stock_code_from_input` 提到的代码对齐。
+            m = re.search(r"([一-龥]{2,4})\s*[\(（]?\s*\d{6}", v)
+            if m:
+                name = _normalize_stock_name(m.group(1))
+                if name:
+                    return name
+            # 次优：明确带股票名后缀，如 "韦尔股份" "京东方A"
             m = re.search(r"([一-龥]{2,4}(?:" + "|".join(_STOCK_SUFFIXES) + r"))", v)
-            if m and _looks_like_stock_name(m.group(1)):
-                return m.group(1)
-            # 简写 "京东方A" "贵州茅台A" 等（中文 + 末尾字母）
-            m = re.search(r"([一-龥]{2,6}[A-Z])", v)
-            if m and _looks_like_stock_name(m.group(1)):
-                return m.group(1)
+            if m:
+                name = _normalize_stock_name(m.group(1))
+                if name:
+                    return name
+            # 简写 "京东方A" "万科B" 等（中文 + 末尾 A/B）。
+            # 限定 A/B：A 股票名末尾字母基本只有 A/B（B 股/增发份额）；
+            # 原来允许任意大写字母，会把「市盈率T」这类指标名误当股票名。
+            m = re.search(r"([一-龥]{2,6}[AB])(?![一-龥A-Za-z0-9])", v)
+            if m:
+                name = _normalize_stock_name(m.group(1))
+                if name:
+                    return name
     return None
 
 
@@ -338,9 +380,14 @@ _SENTIMENT_PATTERNS = [
 
 
 def _extract_stock_codes_from_text(text: str) -> list:
-    """从报告文本中提取所有提及的 6 位股票代码。"""
+    """从报告文本中提取所有提及的 6 位股票代码。
+
+    边界用负向断言（数字前后非数字）而非词边界：词边界基于字母数字下划线判定，
+    而中文字符也算字母（unicode），代码与中文相邻处不是边界 → 词边界漏提
+    （如「601127怎么样」）。
+    """
     import re
-    codes = re.findall(r'\b(\d{6})\b', text)
+    codes = re.findall(r'(?<!\d)(\d{6})(?!\d)', text)
     # 去重，保持顺序
     seen = set()
     result = []
@@ -445,7 +492,7 @@ _MARKET_KEYWORDS = [
     "大盘", "市场", "盘面", "早盘", "午盘", "尾盘", "收盘", "开盘",
     "今日行情", "今日复盘", "今日总结", "今日股市", "市场总结", "复盘",
     "A股", "全市场", "行情综述", "盘后", "盘前", "今日大盘", "今天大盘",
-    "今日", "收盘了", "开盘了", "盘中",
+    "今日", "今天", "收盘了", "开盘了", "盘中",
 ]
 _SECTOR_KEYWORDS = ["板块", "行业", "赛道", "产业链", "概念", "题材"]
 # 常见板块名称，用于从问题文本中提炼板块标签
@@ -586,13 +633,26 @@ def collect_metadata(user_input: str = "", result_text: str = "") -> dict:
                 result["sector_l2"] = primary["sector_l2"]
             # 股票身份：未知主题时由工具决定；股票主题时补全空缺
             if subj_kind == "unknown":
-                if primary.get("stock_code"):
+                # name 与 code 必须来自同一次工具调用，避免跨工具交叉组合
+                # 出现「工商银行 (300857)」这类张冠李戴（A 工具只有 name、
+                # B 工具只有 code 时被错误拼接）。
+                if primary.get("stock_code") and primary.get("stock_name"):
                     result["stock_code"] = primary["stock_code"]
-                if primary.get("stock_name"):
                     result["stock_name"] = primary["stock_name"]
-            elif subj_kind == "stock":
-                if not result.get("stock_code") and primary.get("stock_code"):
+                elif primary.get("stock_code"):
                     result["stock_code"] = primary["stock_code"]
+            elif subj_kind == "stock":
+                # 只从工具记录中找与主题同名的 code，避免把顺路查询的
+                # 其他股票代码安给主题
+                if not result.get("stock_code"):
+                    subj_name = result.get("stock_name", "")
+                    match = next(
+                        (ex for ex in stock_extracts.values()
+                         if ex.get("stock_name") == subj_name and ex.get("stock_code")),
+                        None,
+                    )
+                    if match:
+                        result["stock_code"] = match["stock_code"]
                 if not result.get("stock_name") and primary.get("stock_name"):
                     result["stock_name"] = primary["stock_name"]
 
@@ -626,6 +686,15 @@ def collect_metadata(user_input: str = "", result_text: str = "") -> dict:
     # 4. 补充 source_query
     if user_input:
         result["source_query"] = user_input
+
+    # 5. 原始工具提取列表：`confidence.infer_source` 靠它判定来源类型
+    #    （tool_hard_data 0.9 / dashboard_llm 0.7 / report_fallback 0.5 / llm_speculation 0.3）。
+    #    ⚠️ 此前只把 extracts 的字段合并进顶层、**从不回传列表** → `sdk.archive` 的
+    #    `collected.get("_tool_extracts")` 永远取到空 → 所有新记忆被判「纯 LLM 推测」
+    #    → confidence=0.3 被 0.4 门槛整批丢弃（召回正确、全被筛没了）。
+    #    实测：含 pe/pb/price 硬字段时 confidence 应为 0.9（tool_hard_data）。
+    raw_extracts = _tool_extracts.get()
+    result["_tool_extracts"] = list(raw_extracts) if raw_extracts is not _INIT_SENTINEL else []
 
     return result
 

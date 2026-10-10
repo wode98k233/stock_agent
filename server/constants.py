@@ -19,11 +19,12 @@ TOOL_DOMAIN_MAP = {
     # 数据（综合金融数据查询：行情/财务/关联关系）
     "mx_data_query": {"domain": "数据", "provider": "妙想", "display_name": "妙想数据查询", "icon": "doc"},
     "mx_xuangu_filter": {"domain": "数据", "provider": "妙想", "display_name": "妙想智能选股", "icon": "doc"},
-    "iwc_market_query": {"domain": "数据", "provider": "问财", "display_name": "问财市场查询", "icon": "doc"},
-    "iwc_sector_selector": {"domain": "数据", "provider": "问财", "display_name": "问财板块选择", "icon": "doc"},
+    # 问财统一入口：iwc_query 覆盖选股/行情/财务/指数/行业/宏观/事件/股东/评级等全部查询类技能
+    "iwc_query": {"domain": "数据", "provider": "问财", "display_name": "问财数据查询", "icon": "doc"},
     # 资讯
     "mx_search_news": {"domain": "资讯", "provider": "妙想", "display_name": "妙想新闻检索", "icon": "news"},
-    "iwc_announcement_search": {"domain": "资讯", "provider": "问财", "display_name": "问财公告搜索", "icon": "news"},
+    # 问财统一入口：iwc_search 按 channel 覆盖新闻/公告/研报检索
+    "iwc_search": {"domain": "资讯", "provider": "问财", "display_name": "问财资讯检索", "icon": "news"},
     # 推理（分析引擎，非数据源）
     "llm_tech_interpret": {"domain": "推理", "provider": "LLM", "display_name": "LLM 技术解读", "icon": "brain"},
     "llm_build_report": {"domain": "推理", "provider": "LLM", "display_name": "LLM 报告生成", "icon": "brain"},

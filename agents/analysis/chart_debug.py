@@ -1,4 +1,7 @@
-"""Chart Fragments Debug CLI — 独立验证图表萃取链路（不依赖 agent）
+"""Chart Fragments Debug CLI — 图表萃取链路的独立调试工具（不依赖 agent）
+
+萃取链路已接入 agent 主流程（agents/react/tool_node_base.py 拦截 mx_data_query），
+本 CLI 保留用于离线调试：验证数据格式、萃取正确性与 fragment 渲染。
 
 用法：
   python -m agents.analysis.chart_debug inspect  --query "药明康德 MA5 MA10 MA20 MA60"
@@ -7,7 +10,7 @@
   python -m agents.analysis.chart_debug list
   python -m agents.analysis.chart_debug clear
 
-验证闭环：inspect（数据格式）→ extract（萃取正确性）→ preview（图表渲染效果）。
+调试闭环：inspect（数据格式）→ extract（萃取正确性）→ preview（图表渲染效果）。
 """
 import json
 import os

@@ -17,6 +17,8 @@ async def classifier_node(state: PdorState, ctx: AgentContext, run_config=None) 
     result = await classifier(state["input"], run_config=run_config)
     if not result["is_stock_related"]:
         return {"response": result["response"]}
+    if result.get("clarified_input"):
+        return {"input": result["clarified_input"]}
     return {}
 
 

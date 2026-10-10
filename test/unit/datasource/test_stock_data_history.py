@@ -146,13 +146,11 @@ def test_fetcher_stock_hist_falls_back_when_source_missing_close(monkeypatch):
 
         @classmethod
         def get_stock_hist(cls, symbol, period="daily", start="", end=""):
-            return pd.DataFrame([{
-                "date": "2026-05-22",
-                "open": 10,
-                "high": 11,
-                "low": 9,
-                "volume": 1000,
-            }])
+            # 两行：避免撞上 fetcher 的「历史行数下限」守卫（本用例意图是缺字段降级）
+            return pd.DataFrame([
+                {"date": "2026-05-21", "open": 9.8, "high": 10.5, "low": 9.5, "volume": 900},
+                {"date": "2026-05-22", "open": 10, "high": 11, "low": 9, "volume": 1000},
+            ])
 
     class GoodHistorySource(DataSource):
         name = "good_history"
@@ -161,14 +159,10 @@ def test_fetcher_stock_hist_falls_back_when_source_missing_close(monkeypatch):
 
         @classmethod
         def get_stock_hist(cls, symbol, period="daily", start="", end=""):
-            return pd.DataFrame([{
-                "date": "2026-05-22",
-                "open": 10,
-                "close": 10.5,
-                "high": 11,
-                "low": 9,
-                "volume": 1000,
-            }])
+            return pd.DataFrame([
+                {"date": "2026-05-21", "open": 9.8, "close": 10.2, "high": 10.5, "low": 9.5, "volume": 900},
+                {"date": "2026-05-22", "open": 10, "close": 10.5, "high": 11, "low": 9, "volume": 1000},
+            ])
 
     from utils.circuit_breaker import CircuitBreaker
 
@@ -196,11 +190,11 @@ def test_calc_technical_indicators_accepts_normalized_hk_history(monkeypatch, mo
     import importlib.util
     from pathlib import Path
 
-    module_path = Path("tools/skills/technical_analysis/main.py")
-    spec = importlib.util.spec_from_file_location("technical_analysis_main_for_test", module_path)
+    module_path = Path("tools/skills/stock_analysis/main.py")
+    spec = importlib.util.spec_from_file_location("stock_analysis_main_for_test", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    TechnicalAnalysisSkill = module.TechnicalAnalysisSkill
+    StockAnalysisSkill = module.StockAnalysisSkill
 
     dates = pd.date_range("2026-01-01", periods=120, freq="B")
     close = np.linspace(420, 460, 120)
@@ -219,7 +213,7 @@ def test_calc_technical_indicators_accepts_normalized_hk_history(monkeypatch, mo
     monkeypatch.setattr(stock_data, "set_history_cache", lambda symbol, start, end, df: None)
     monkeypatch.setattr(stock_data, "ak_stock_hist", lambda *args, **kwargs: raw)
 
-    skill = TechnicalAnalysisSkill(mock_logger)
+    skill = StockAnalysisSkill(mock_logger)
     payload = json.loads(skill.calc_technical_indicators("00700"))
 
     assert payload["code"] == "00700"
@@ -233,12 +227,12 @@ def test_calc_technical_indicators_returns_fallback_when_history_unavailable(moc
     import importlib.util
     from pathlib import Path
 
-    module_path = Path("tools/skills/technical_analysis/main.py")
-    spec = importlib.util.spec_from_file_location("technical_analysis_main_for_fallback_test", module_path)
+    module_path = Path("tools/skills/stock_analysis/main.py")
+    spec = importlib.util.spec_from_file_location("stock_analysis_main_for_fallback_test", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    skill = module.TechnicalAnalysisSkill(mock_logger)
+    skill = module.StockAnalysisSkill(mock_logger)
     skill._get_stock_history = lambda symbol, days, logger: (_ for _ in ()).throw(
         ValueError("历史K线缺少必要字段: missing=['close']")
     )
@@ -257,12 +251,12 @@ def test_risk_metrics_returns_fallback_when_history_unavailable(mock_logger):
     import importlib.util
     from pathlib import Path
 
-    module_path = Path("tools/skills/risk_metrics/main.py")
-    spec = importlib.util.spec_from_file_location("risk_metrics_main_for_fallback_test", module_path)
+    module_path = Path("tools/skills/stock_analysis/main.py")
+    spec = importlib.util.spec_from_file_location("stock_analysis_main_for_risk_test", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    skill = module.RiskMetricsSkill(mock_logger)
+    skill = module.StockAnalysisSkill(mock_logger)
     skill._get_stock_history = lambda symbol, days, logger: (_ for _ in ()).throw(
         ValueError("未获取到 00700 的历史数据")
     )

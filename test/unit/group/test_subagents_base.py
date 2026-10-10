@@ -11,6 +11,7 @@ Mock 策略: mock run_react_subgraph、merge_tools_for_skills、AgentRateLimiter
 """
 import sys
 import os
+import contextlib
 import pytest
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -281,14 +282,17 @@ class TestAgentCall:
         assert step["result"] == "基于工具数据生成的总结"
 
     @pytest.mark.asyncio
-    async def test_out_of_range_index_returns_empty(self):
-        """current_step_index >= len(plan) → 返回空 dict"""
+    async def test_out_of_range_index_marks_extra_executed(self):
+        """current_step_index >= len(plan) → 不执行，标记 _extra_executed 供 supervisor 剔除"""
         agent = _make_agent()
         agent.configure(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         state = _make_state(current_step_index=5)
 
         result = await agent(state)
-        assert result == {}
+        assert "plan_steps" not in result
+        assert "current_step_index" not in result
+        assert result["_extra_executed"] == ["test_agent"]
+        assert result["current_agent_names"] == []
 
     @pytest.mark.asyncio
     async def test_dispatch_history_updated(self):
@@ -319,3 +323,76 @@ class TestAgentCall:
         budget = MagicMock()
         agent.configure(MagicMock(), MagicMock(), budget, MagicMock())
         assert agent._budget is budget
+
+
+# ── 重跑结果保护（2026-10-01 事故：空 result 覆盖数据底版）─────
+
+class TestRerunResultProtection:
+    """重跑（补采）不得用空 result 覆盖既有非空 result"""
+
+    async def _run(self, agent, state, raw_result, *, empty_summary=False):
+        patches = [
+            patch("agents.group.subagents.base.AgentRateLimiter"),
+            patch("agents.group.message_logger.GroupMessageLogger"),
+        ]
+        if empty_summary:
+            patches += [
+                patch("agents.group.subagents.base._is_valid_summary", return_value=False),
+                patch("agents.group.subagents.base._generate_summary_from_tools",
+                      new_callable=AsyncMock, return_value=""),
+            ]
+        with contextlib.ExitStack() as stack:
+            mock_limiter_cls = stack.enter_context(patches[0])
+            mock_log_cls = stack.enter_context(patches[1])
+            for extra in patches[2:]:
+                stack.enter_context(extra)
+            mock_limiter = MagicMock()
+            mock_limiter.run_with_retry = AsyncMock(return_value=raw_result)
+            mock_limiter_cls.return_value = mock_limiter
+            mock_log_cls.from_state.return_value = MagicMock()
+            return await agent(state)
+
+    @pytest.mark.asyncio
+    async def test_empty_rerun_keeps_existing_result(self):
+        """本次 result 为空 → 保留既有非空结果，不覆盖（数据底版不被销毁）"""
+        agent = _make_agent()
+        agent.configure(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        state = _make_state()
+        state["plan_steps"][0]["result"] = "数据底版：上证-3.62%，深成-8.044%，主力净流出4294亿"
+        state["plan_steps"][0]["status"] = "partial"
+
+        result = await self._run(
+            agent, state, {"final_result": "", "tool_results": []}, empty_summary=True)
+
+        step = result["plan_steps"][0]
+        assert step["result"] == "数据底版：上证-3.62%，深成-8.044%，主力净流出4294亿"
+        assert step["status"] == "partial"          # 既有状态同样不被空结果冲掉
+        assert result["current_step_index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_nonempty_rerun_overwrites_existing_result(self):
+        """本次 result 非空 → 正常覆盖（防止保护过头）"""
+        agent = _make_agent()
+        agent.configure(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        state = _make_state()
+        state["plan_steps"][0]["result"] = "旧结果"
+
+        result = await self._run(agent, state, {
+            "final_result": "新的补采结果，包含完整的行业涨跌幅与资金流向数据。" * 2,
+            "tool_results": [],
+        })
+
+        assert "新的补采结果" in result["plan_steps"][0]["result"]
+
+    @pytest.mark.asyncio
+    async def test_empty_result_written_when_no_existing(self):
+        """既有结果也为空 → 正常写回（不误判为需保护）"""
+        agent = _make_agent()
+        agent.configure(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        state = _make_state()                        # plan_steps[0].result 默认 ""
+
+        result = await self._run(
+            agent, state, {"final_result": "", "tool_results": []}, empty_summary=True)
+
+        assert result["plan_steps"][0]["result"] == ""
+        assert result["current_step_index"] == 1

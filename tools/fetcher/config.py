@@ -27,6 +27,8 @@ class Config:
     # ── 超时配置 ──
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
     AKSHARE_CALL_TIMEOUT = int(os.getenv("AKSHARE_CALL_TIMEOUT", "30"))
+    # 单个数据源的硬超时（retry 循环里每个源调用；防止某源挂死拖死整轮 agent）
+    FETCH_SOURCE_TIMEOUT = float(os.getenv("FETCH_SOURCE_TIMEOUT", "20"))
 
     # ── Akshare 反爬配置 ──
     AKSHARE_RATE_LIMIT_MIN = float(os.getenv("AKSHARE_RATE_LIMIT_MIN", "2.0"))

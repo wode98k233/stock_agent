@@ -1,0 +1,192 @@
+/* ─────────────────────────────────────────────
+   A3 策略研发面板（镜像 quality.css 弹窗模式 + 原型视图 2，变量走 variables.css）
+   结构：发起表单 → 轮次表（SSE 逐行出现）→ 最优策略卡（OOS 大字 + IS 小字 + 免责声明）→ 三动作
+   ───────────────────────────────────────────── */
+
+.sr-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 1000;
+}
+
+.sr-overlay.open { display: block; }
+
+.sr-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(1020px, 96vw);
+  max-height: 90vh;
+  display: none;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 1001;
+  overflow: hidden;
+}
+
+.sr-modal.open { display: flex; }
+
+/* ── 头部 ── */
+.sr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--detail-bg);
+}
+
+.sr-title { font-size: 15px; font-weight: 700; }
+.sr-sub { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+.sr-close-btn {
+  border: none; background: none; font-size: 18px; cursor: pointer;
+  color: var(--muted); padding: 2px 8px; border-radius: var(--radius-sm);
+}
+.sr-close-btn:hover { background: var(--border-light); color: var(--text); }
+
+/* ── 主体 ── */
+.sr-body { padding: 14px 18px; overflow-y: auto; flex: 1; }
+.sr-empty { color: var(--muted); text-align: center; padding: 32px 0; font-size: 13px; }
+
+/* ── 发起表单 ── */
+.sr-form {
+  display: grid;
+  grid-template-columns: 1fr 130px 130px 130px auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.sr-form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.sr-form textarea, .sr-form input {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--panel);
+  color: var(--text);
+}
+.sr-form textarea { resize: vertical; min-height: 54px; }
+.sr-form input { height: 32px; }
+.sr-start-btn {
+  height: 32px; padding: 0 16px; border: none; border-radius: var(--radius-sm);
+  background: var(--brand); color: #fff; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.sr-start-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sr-start-btn:not(:disabled):hover { background: var(--brand-strong); }
+
+/* ── 区块标题 ── */
+.sr-section { margin-top: 16px; }
+.sr-section-title { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+.sr-tag {
+  font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px;
+}
+
+/* ── 轮次表 ── */
+.sr-iter-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.sr-iter-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.sr-iter-table th, .sr-iter-table td {
+  padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+.sr-iter-table th { background: var(--detail-bg); color: var(--muted); font-weight: 600; }
+.sr-iter-table tbody tr { cursor: pointer; transition: background var(--transition-fast); }
+.sr-iter-table tbody tr:hover { background: var(--brand-bg-light); }
+.sr-iter-table tbody tr.selected { background: var(--brand-light); }
+.sr-iter-table tbody tr.sr-failed-row { color: var(--error); cursor: default; }
+
+.sr-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  font-size: 11px; border: 1px solid transparent;
+}
+.sr-badge-keep { color: var(--success); border-color: var(--success); background: var(--success-bg); }
+.sr-badge-reject { color: var(--error); border-color: var(--error); background: var(--danger-bg); }
+.sr-badge-best { color: var(--brand-strong); border-color: var(--brand); background: var(--brand-light); }
+.sr-badge-failed { color: var(--error); border-color: var(--error); }
+.sr-badge-lowsample { color: var(--warn); border-color: var(--warn); margin-left: 4px; }
+
+.sr-spinner {
+  display: inline-block; width: 12px; height: 12px; vertical-align: -2px;
+  border: 2px solid var(--line-strong); border-top-color: var(--brand);
+  border-radius: 50%; animation: sr-spin 0.8s linear infinite;
+}
+@keyframes sr-spin { to { transform: rotate(360deg); } }
+
+/* ── 轮次详情 ── */
+.sr-detail {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 12px 14px; background: var(--detail-bg); font-size: 12.5px;
+}
+.sr-detail h4 { margin: 0 0 6px; font-size: 13px; }
+.sr-detail .sr-kv { margin: 3px 0; color: var(--text-secondary); }
+.sr-detail .sr-kv b { color: var(--text); }
+.sr-diff, .sr-error {
+  font-family: var(--font-mono); font-size: 11.5px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 8px 10px; margin: 6px 0; white-space: pre-wrap; word-break: break-all;
+}
+.sr-error { color: var(--error); }
+
+/* ── 最优策略卡 ── */
+.sr-card {
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  padding: 14px 16px; background: var(--panel);
+}
+.sr-card-header { display: flex; align-items: center; justify-content: space-between; }
+.sr-card-name { font-size: 14px; font-weight: 700; }
+.sr-card-hypo { color: var(--text-secondary); font-size: 12.5px; margin: 4px 0 10px; }
+
+.sr-metric-row { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 8px; }
+.sr-metric .sr-metric-label { font-size: 11px; color: var(--muted); }
+.sr-metric .sr-metric-big { font-size: 22px; font-weight: 700; line-height: 1.2; }
+.sr-metric .sr-metric-small { font-size: 11px; color: var(--muted); }
+.sr-pos { color: var(--up); }
+.sr-neg { color: var(--down); }
+
+.sr-overfit-note { font-size: 12px; margin: 6px 0; }
+.sr-overfit-note.ok { color: var(--success); }
+.sr-overfit-note.bad { color: var(--error); }
+
+.sr-disclaimer {
+  font-size: 11.5px; color: var(--warn); background: var(--warning-bg);
+  border: 1px solid var(--warning); border-radius: var(--radius-sm);
+  padding: 6px 10px; margin: 10px 0;
+}
+
+.sr-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.sr-action-btn {
+  height: 30px; padding: 0 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong); background: var(--panel);
+  color: var(--text); font-size: 12.5px; cursor: pointer;
+}
+.sr-action-btn:hover { border-color: var(--brand); color: var(--brand); }
+.sr-action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── 失败态 ── */
+.sr-failed-box {
+  border: 1px solid var(--error); background: var(--danger-bg);
+  color: var(--error); border-radius: var(--radius-sm);
+  padding: 12px 14px; font-size: 13px; margin-top: 10px;
+}
+
+/* ── 运行中横条 ── */
+.sr-running-bar {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px;
+  color: var(--text-secondary); font-size: 12.5px;
+}
+
+/* ── 任务历史列表 ── */
+.sr-runs-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.sr-runs-table th, .sr-runs-table td {
+  padding: 6px 10px; border-bottom: 1px solid var(--border-light); text-align: left;
+}
+.sr-runs-table th { background: var(--detail-bg); color: var(--muted); }
+.sr-runs-table tbody tr { cursor: pointer; }
+.sr-runs-table tbody tr:hover { background: var(--brand-bg-light); }

@@ -27,6 +27,14 @@
 }
 /* AI 信号评测模式下：tabbar 变紧凑，内容区尽量占满 */
 .backtest-modal.eval-mode { padding-top: 36px; }
+/* eval-mode 强制全屏：信号评测全宽视图需要完整空间，小窗必挤碎（2026-09-07 列压碎修复） */
+.backtest-modal.eval-mode:not(.maximized) {
+  width: 100vw !important; height: 100vh !important;
+  max-width: none !important; border-radius: 0 !important;
+  transform: none !important;
+}
+/* eval-mode 下隐藏左侧策略栏（bt-left 380px 会挤压全宽视图），页签兜底返回 */
+.backtest-modal.eval-mode .bt-left { display: none !important; }
 .backtest-modal.eval-mode .bt-tabbar {
   padding: 4px 8px 0;
   height: 36px;

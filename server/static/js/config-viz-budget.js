@@ -39,6 +39,7 @@ window.StockRadar.ConfigVizBudget = class ConfigVizBudget {
       handler: '#65a30d',
       regex_match: '#64748b',
       unified_executor: '#0369a1',
+      skill_router: '#8b5cf6',
     };
 
     let nodes = [];
@@ -53,6 +54,12 @@ window.StockRadar.ConfigVizBudget = class ConfigVizBudget {
       // 分类 + 选技能：各 1 次调用，~1500 token
       nodes.push({ label: '意图分类', tokens: 1500, color: COLORS.classify, calls: 1 });
       nodes.push({ label: '选择技能', tokens: 2000, color: COLORS.select_skills, calls: 1 });
+      totalCalls += 2;
+
+      // 子目标路由：入口 1 次 + 每次 gap 后 1 次（≤3）
+      nodes.push({ label: '子目标路由 × ≤3', tokens: 3 * 600, color: COLORS.skill_router || '#8b5cf6', calls: 3 });
+      totalCalls += 3;
+      nodes.push({ label: '技能重选', tokens: 2 * 800, color: COLORS.skill_router || '#8b5cf6', calls: 2 });
       totalCalls += 2;
 
       // Agent 执行：每轮 ~2000 token（含工具输出），输入随轮次增长

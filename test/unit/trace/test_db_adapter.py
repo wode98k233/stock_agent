@@ -122,6 +122,40 @@ def test_sqlite_adapter_delete_run_cascade():
         _cleanup(db_path)
 
 
+def test_sqlite_adapter_delete_run_cleans_reviews():
+    db_path = _tmp_db()
+    try:
+        adapter = SQLiteAdapter(db_path)
+        adapter.insert_run({"id": "test-run-rev", "agent_name": "test", "input": "", "status": "success"})
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO reviews(review_uuid, scope, target_id, rubric_version, status, created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            ("rev-1", "run", "test-run-rev", "v1", "done", "2026-09-18T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO reviews(review_uuid, scope, target_id, rubric_version, status, created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            ("rev-dialog", "dialog", "some-dialog", "v1", "done", "2026-09-18T00:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+        adapter.delete_run("test-run-rev")
+        conn = sqlite3.connect(db_path)
+        left = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE scope='run' AND target_id='test-run-rev'"
+        ).fetchone()[0]
+        other = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE scope='dialog' AND target_id='some-dialog'"
+        ).fetchone()[0]
+        conn.close()
+        adapter.close()
+        assert left == 0
+        assert other == 1
+    finally:
+        _cleanup(db_path)
+
+
 def test_sqlite_adapter_get_steps_with_messages():
     db_path = _tmp_db()
     try:
@@ -200,6 +234,7 @@ if __name__ == "__main__":
         test_sqlite_adapter_update_run,
         test_sqlite_adapter_insert_step_and_messages,
         test_sqlite_adapter_delete_run_cascade,
+        test_sqlite_adapter_delete_run_cleans_reviews,
         test_sqlite_adapter_get_steps_with_messages,
         test_sqlite_adapter_get_runs_with_status_filter,
         test_sqlite_adapter_update_step,

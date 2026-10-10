@@ -1,0 +1,523 @@
+{
+  "version": "1.0",
+  "created_at": "2026-06-27T00:00:00Z",
+  "description": "Stock Radar Agent 评测基准数据集（第一期 20 题）",
+  "cases": [
+    {
+      "id": "basic_001",
+      "category": "basic_query",
+      "difficulty": "easy",
+      "question": "600519 的最新价格是多少？",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "价格",
+        "涨跌"
+      ],
+      "reference_facts": {
+        "stock": "600519"
+      },
+      "judge_criteria": [
+        "是否返回了贵州茅台的实时价格",
+        "是否包含涨跌幅"
+      ],
+      "tags": [
+        "实时行情"
+      ]
+    },
+    {
+      "id": "basic_002",
+      "category": "basic_query",
+      "difficulty": "easy",
+      "question": "查一下比亚迪（002594）今天的行情",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "价格",
+        "涨跌",
+        "成交量"
+      ],
+      "reference_facts": {
+        "stock": "002594"
+      },
+      "judge_criteria": [
+        "是否返回了比亚迪的行情数据"
+      ],
+      "tags": [
+        "实时行情"
+      ]
+    },
+    {
+      "id": "basic_003",
+      "category": "basic_query",
+      "difficulty": "easy",
+      "question": "中国平安 601318 的市盈率是多少",
+      "expected_tools": [
+        "stock_analysis",
+        "valuation"
+      ],
+      "expected_sections": [
+        "市盈率",
+        "PE"
+      ],
+      "reference_facts": {
+        "stock": "601318"
+      },
+      "judge_criteria": [
+        "是否返回了中国平安的PE数据"
+      ],
+      "tags": [
+        "基本面"
+      ]
+    },
+    {
+      "id": "tech_001",
+      "category": "stock_analysis",
+      "difficulty": "easy",
+      "question": "分析一下贵州茅台（600519）最近的 MACD 指标",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "MACD",
+        "信号"
+      ],
+      "reference_facts": {
+        "stock": "600519",
+        "indicators": [
+          "MACD"
+        ]
+      },
+      "judge_criteria": [
+        "是否计算了MACD指标",
+        "是否给出买卖信号判断"
+      ],
+      "tags": [
+        "MACD"
+      ]
+    },
+    {
+      "id": "tech_002",
+      "category": "stock_analysis",
+      "difficulty": "medium",
+      "question": "帮我画一下宁德时代（300750）的 KDJ 图，并分析超买超卖情况",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "KDJ",
+        "超买",
+        "超卖"
+      ],
+      "reference_facts": {
+        "stock": "300750",
+        "indicators": [
+          "KDJ"
+        ]
+      },
+      "judge_criteria": [
+        "是否计算了KDJ指标",
+        "是否判断了超买超卖状态"
+      ],
+      "tags": [
+        "KDJ",
+        "技术分析"
+      ]
+    },
+    {
+      "id": "tech_003",
+      "category": "stock_analysis",
+      "difficulty": "medium",
+      "question": "比亚迪现在是不是 RSI 超卖？",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "RSI",
+        "超卖"
+      ],
+      "reference_facts": {
+        "stock": "002594",
+        "indicators": [
+          "RSI"
+        ]
+      },
+      "judge_criteria": [
+        "是否计算了RSI指标",
+        "是否判断了超卖状态（RSI<30）"
+      ],
+      "tags": [
+        "RSI",
+        "超卖"
+      ]
+    },
+    {
+      "id": "tech_004",
+      "category": "stock_analysis",
+      "difficulty": "medium",
+      "question": "分析一下 600519 的布林带，看是否突破上轨",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "布林带",
+        "上轨",
+        "突破"
+      ],
+      "reference_facts": {
+        "stock": "600519",
+        "indicators": [
+          "BOLL"
+        ]
+      },
+      "judge_criteria": [
+        "是否计算了布林带指标",
+        "是否判断了突破状态"
+      ],
+      "tags": [
+        "BOLL",
+        "布林带"
+      ]
+    },
+    {
+      "id": "tech_005",
+      "category": "stock_analysis",
+      "difficulty": "hard",
+      "question": "帮我做一个茅台的技术面综合分析，包括 MACD、KDJ、RSI、布林带",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "MACD",
+        "KDJ",
+        "RSI",
+        "布林带",
+        "综合"
+      ],
+      "reference_facts": {
+        "stock": "600519",
+        "indicators": [
+          "MACD",
+          "KDJ",
+          "RSI",
+          "BOLL"
+        ]
+      },
+      "judge_criteria": [
+        "是否计算了多个技术指标",
+        "是否有综合分析结论"
+      ],
+      "tags": [
+        "综合分析"
+      ]
+    },
+    {
+      "id": "fund_001",
+      "category": "fundamental_analysis",
+      "difficulty": "medium",
+      "question": "分析一下宁德时代（300750）的 PE 和 PB 估值水平",
+      "expected_tools": [
+        "valuation"
+      ],
+      "expected_sections": [
+        "PE",
+        "PB",
+        "估值"
+      ],
+      "reference_facts": {
+        "stock": "300750"
+      },
+      "judge_criteria": [
+        "是否计算了PE和PB",
+        "是否给出估值水平判断"
+      ],
+      "tags": [
+        "估值",
+        "PE",
+        "PB"
+      ]
+    },
+    {
+      "id": "fund_002",
+      "category": "fundamental_analysis",
+      "difficulty": "medium",
+      "question": "贵州茅台的 ROE 和净利润增长率怎么样？",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "ROE",
+        "净利润",
+        "增长率"
+      ],
+      "reference_facts": {
+        "stock": "600519"
+      },
+      "judge_criteria": [
+        "是否返回了ROE数据",
+        "是否返回了净利润增长率"
+      ],
+      "tags": [
+        "ROE",
+        "基本面"
+      ]
+    },
+    {
+      "id": "fund_003",
+      "category": "fundamental_analysis",
+      "difficulty": "hard",
+      "question": "用 DCF 模型估算一下中国平安的内在价值",
+      "expected_tools": [
+        "valuation"
+      ],
+      "expected_sections": [
+        "DCF",
+        "内在价值",
+        "估值"
+      ],
+      "reference_facts": {
+        "stock": "601318"
+      },
+      "judge_criteria": [
+        "是否进行了DCF估值",
+        "是否给出了内在价值区间"
+      ],
+      "tags": [
+        "DCF",
+        "绝对估值"
+      ]
+    },
+    {
+      "id": "sector_001",
+      "category": "sector_analysis",
+      "difficulty": "medium",
+      "question": "今天新能源板块表现怎么样？",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "新能源",
+        "板块",
+        "涨跌幅"
+      ],
+      "reference_facts": {
+        "sector": "新能源"
+      },
+      "judge_criteria": [
+        "是否返回了新能源板块的整体表现"
+      ],
+      "tags": [
+        "板块分析"
+      ]
+    },
+    {
+      "id": "screen_001",
+      "category": "stock_screening",
+      "difficulty": "medium",
+      "question": "帮我找一下 MACD 金叉的股票",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "金叉",
+        "股票"
+      ],
+      "reference_facts": {},
+      "judge_criteria": [
+        "是否筛选出了MACD金叉的股票",
+        "结果是否包含具体股票代码"
+      ],
+      "tags": [
+        "MACD",
+        "金叉",
+        "选股"
+      ]
+    },
+    {
+      "id": "screen_002",
+      "category": "stock_screening",
+      "difficulty": "medium",
+      "question": "哪些股票 RSI 超卖且成交量放大？",
+      "expected_tools": [
+        "stock_analysis",
+        "money_flow"
+      ],
+      "expected_sections": [
+        "RSI",
+        "超卖",
+        "成交量"
+      ],
+      "reference_facts": {},
+      "judge_criteria": [
+        "是否筛选了RSI超卖股票",
+        "是否考虑了成交量因素"
+      ],
+      "tags": [
+        "RSI",
+        "超卖",
+        "选股"
+      ]
+    },
+    {
+      "id": "screen_003",
+      "category": "stock_screening",
+      "difficulty": "hard",
+      "question": "帮我筛选一下 PE < 20 且 ROE > 15% 的低估值高成长股票",
+      "expected_tools": [
+        "valuation"
+      ],
+      "expected_sections": [
+        "PE",
+        "ROE",
+        "股票"
+      ],
+      "reference_facts": {},
+      "judge_criteria": [
+        "是否按PE和ROE条件筛选",
+        "结果是否合理"
+      ],
+      "tags": [
+        "估值",
+        "选股",
+        "ROE"
+      ]
+    },
+    {
+      "id": "compare_001",
+      "category": "comparison",
+      "difficulty": "medium",
+      "question": "比较一下贵州茅台和五粮液，哪个更值得投资？",
+      "expected_tools": [
+        "stock_analysis",
+        "valuation"
+      ],
+      "expected_sections": [
+        "茅台",
+        "五粮液",
+        "对比",
+        "建议"
+      ],
+      "reference_facts": {
+        "stocks": [
+          "600519",
+          "000858"
+        ]
+      },
+      "judge_criteria": [
+        "是否对两只股票进行了对比",
+        "是否给出了投资建议"
+      ],
+      "tags": [
+        "对比分析"
+      ]
+    },
+    {
+      "id": "compare_002",
+      "category": "comparison",
+      "difficulty": "hard",
+      "question": "宁德时代和比亚迪，从技术面和基本面两个维度对比",
+      "expected_tools": [
+        "stock_analysis",
+        "valuation"
+      ],
+      "expected_sections": [
+        "宁德时代",
+        "比亚迪",
+        "技术面",
+        "基本面"
+      ],
+      "reference_facts": {
+        "stocks": [
+          "300750",
+          "002594"
+        ]
+      },
+      "judge_criteria": [
+        "是否从两个维度对比",
+        "分析是否全面"
+      ],
+      "tags": [
+        "对比分析",
+        "多维度"
+      ]
+    },
+    {
+      "id": "complex_001",
+      "category": "complex_multi_step",
+      "difficulty": "hard",
+      "question": "分析一下光伏板块的龙头股，找出最有投资价值的",
+      "expected_tools": [
+        "stock_analysis",
+        "stock_analysis",
+        "valuation"
+      ],
+      "expected_sections": [
+        "光伏",
+        "龙头",
+        "投资价值"
+      ],
+      "reference_facts": {
+        "sector": "光伏"
+      },
+      "judge_criteria": [
+        "是否识别了光伏板块龙头股",
+        "是否给出了投资价值分析"
+      ],
+      "tags": [
+        "板块",
+        "选股",
+        "综合分析"
+      ]
+    },
+    {
+      "id": "edge_001",
+      "category": "edge_case",
+      "difficulty": "easy",
+      "question": "查一下 999999 这个股票",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "错误",
+        "无效",
+        "不存在"
+      ],
+      "reference_facts": {
+        "stock": "999999"
+      },
+      "judge_criteria": [
+        "是否正确处理了无效股票代码",
+        "是否给出了友好的错误提示"
+      ],
+      "tags": [
+        "边界",
+        "错误处理"
+      ]
+    },
+    {
+      "id": "edge_002",
+      "category": "edge_case",
+      "difficulty": "medium",
+      "question": "分析一下苹果的股价走势",
+      "expected_tools": [
+        "stock_analysis"
+      ],
+      "expected_sections": [
+        "美股",
+        "苹果",
+        "A股"
+      ],
+      "reference_facts": {},
+      "judge_criteria": [
+        "是否正确处理了非A股请求",
+        "是否提示用户本系统面向A股"
+      ],
+      "tags": [
+        "边界",
+        "非A股"
+      ]
+    }
+  ]
+}

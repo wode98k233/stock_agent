@@ -36,6 +36,8 @@ fake_useragent>=2.2.0
 textual>=0.40.0
 # 回测
 backtrader>=1.9.78.123
+# 全市场 Parquet 灌库（同花顺官方批量通道，hithink_dump 任务）
+pyarrow>=14.0.0
 # 系统监控
 psutil>=5.9.0
 # 记忆系统 — 中文分词（FTS5 后端必选）

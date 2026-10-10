@@ -2311,6 +2311,25 @@
         .catch(e => alert('删除失败: ' + (e.message || e)));
     }
 
+    /** 持仓/自选「策略扫描」跳转：打开回测面板并预填批量标的
+     * （多代码自动走批量回测 batch-run；用户选策略后点「开始回测」） */
+    openScanWithCodes(codes) {
+      const list = (codes || []).map(c => String(c).trim()).filter(Boolean);
+      this.show();
+      const input = document.getElementById('btInputCodes');
+      if (input) {
+        input.value = list.join(',');
+        const codesParsed = this._parseCodes(input.value);
+        if (codesParsed.length === 1) this._autoDetectAssetType(codesParsed[0]);
+        this._renderChips();
+      }
+      // 呼入后给用户一句引导
+      if (list.length) {
+        const hint = document.getElementById('btCodesHint');
+        if (hint) hint.textContent = `已载入 ${list.length} 只标的（批量回测）。选择策略后点「开始回测」。`;
+      }
+    }
+
     show() {
       if (this.overlay) this.overlay.classList.add('visible');
       this.refreshTestSets();

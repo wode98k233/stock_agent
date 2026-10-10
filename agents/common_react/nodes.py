@@ -35,6 +35,8 @@ class SubAgentNode(BaseAgentNode):
     - _prepare_messages: 迭代间去重（工具签名）+ 上下文压缩
     """
 
+    llm_label = "react-sub"
+
     def _get_user_goal(self, state: dict) -> str:
         return state.get("step_purpose", "")
 
@@ -112,12 +114,18 @@ class SubToolNode(BaseToolNode):
     def get_config(self):
         return Config
 
-    async def compress_tool_output(self, tool_name: str, content: str) -> str:
+    async def compress_tool_output(self, tool_name: str, content: str, user_goal: str = "") -> str:
+        # 签名必须与基类 ToolNode.compress_tool_output 保持一致：
+        # 基类 _run_one 会以 compress_tool_output(tool_name, content, user_goal=...) 调用，
+        # 若此处少收 user_goal，子 ReAct 的每次工具调用都会 TypeError，
+        # 输出被替换成「执行失败: ...unexpected keyword argument 'user_goal'」，
+        # 下游报告因此误报「数据缺失」（2026-09-21 实际踩过）。
+        # 子图自带 _user_goal_ref（由 step_purpose 更新）；显式传入时优先。
         return await _compress_tool_output(
             tool_name,
             content,
             self._logger,
-            user_goal=self._user_goal_ref.get("goal", ""),
+            user_goal=user_goal or self._user_goal_ref.get("goal", ""),
         )
 
 

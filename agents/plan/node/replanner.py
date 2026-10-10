@@ -16,6 +16,7 @@ from agents.agent_context import AgentContext
 from agents.prompts import REPLAN_OUTPUT_FORMAT
 from agents.plan.analyze import check_termination, detect_loop, dedup_new_steps
 from agents.shared.analysis_utils import limit_plan_steps
+from agents.shared.tool_utils import resolve_plan_step_skills, resolve_skill_name
 from agents.shared.exception_utils import handle_budget_exceeded
 from agents.analysis.template_store import load_template
 from tools.skills import SkillPromptBuilder
@@ -113,7 +114,7 @@ def _load_qa_rules(template_id):
 # Observer 决策处理
 # ══════════════════════════════════════════════════════════════
 
-def _handle_observer_adjust(step_results, plan, current_step, logger):
+def _handle_observer_adjust(step_results, plan, current_step, logger, registry=None):
     """处理 Observer 的 adjust 建议 — 直接应用，不调 LLM。
 
     返回 merged_plan 或 None（表示无需调整）。
@@ -136,7 +137,14 @@ def _handle_observer_adjust(step_results, plan, current_step, logger):
             if suggestion.get("new_instruction"):
                 merged_plan[target_idx]["instruction"] = suggestion["new_instruction"]
             if suggestion.get("new_skill"):
-                merged_plan[target_idx]["skill"] = suggestion["new_skill"]
+                resolved, status = resolve_skill_name(registry, suggestion["new_skill"])
+                if status == "unknown":
+                    logger.warn("R", f"  忽略未注册技能建议: {suggestion['new_skill']}")
+                elif resolved:
+                    if status == "remapped":
+                        logger.info("R", f"  技能名归一: {suggestion['new_skill']}→{resolved}")
+                    merged_plan[target_idx]["skill"] = resolved
+                    merged_plan[target_idx]["skills"] = [resolved]
             applied += 1
             logger.info("R", f"  调整 Step {target_idx+1}: {suggestion.get('reason', '')}")
     return merged_plan if applied > 0 else None
@@ -204,13 +212,15 @@ def _build_replan_prompt(state, plan, past_steps, step_results, current_step,
 # 计划合并
 # ══════════════════════════════════════════════════════════════
 
-def _apply_new_steps(new_steps, plan, past_steps, current_step, step_results, logger):
+def _apply_new_steps(new_steps, plan, past_steps, current_step, step_results, logger, registry=None):
     """将新步骤合并到现有计划。返回 (merged_plan, replan_history_entry) 或 None。"""
     unique_new_steps, skipped, replace_map = dedup_new_steps(new_steps, past_steps, plan, current_step)
     if skipped:
         logger.info("R", f"去重过滤：{skipped}")
     if not unique_new_steps:
         return None
+
+    resolve_plan_step_skills(registry, unique_new_steps, logger=logger, log_tag="R")
 
     merged_plan = list(plan)
     replaced_count = 0
@@ -219,20 +229,46 @@ def _apply_new_steps(new_steps, plan, past_steps, current_step, step_results, lo
     for i, step in enumerate(unique_new_steps):
         if i in replace_map:
             old_idx = replace_map[i]
+            old_step = merged_plan[old_idx]
             step["step"] = old_idx + 1
             merged_plan[old_idx] = step
             replaced_count += 1
+            # 替换必须留痕：跨 skill 已被 match_pending_steps 禁止，同 skill 替换也要可审计
+            logger.info(
+                "R",
+                f"替换 Step {old_idx + 1} "
+                f"[{old_step.get('skill', '')}]{(old_step.get('purpose') or '')[:24]} "
+                f"→ [{step.get('skill', '')}]{(step.get('purpose') or '')[:24]}",
+            )
         else:
             append_steps.append(step)
+
+    # 追加步插到「当前位置」（紧跟已执行段之后），而不是无条件排到尾部：
+    # 否则它们会被 limit_plan_steps 从尾部优先裁掉，等于 replanner 白规划
+    # （2026-09-26 实测：`替换 0 + 追加 3` → 8 步截断为 5 步，3 个补救步全部消失）。
+    insert_at = max(0, min(int(current_step or 0), len(merged_plan)))
+    if append_steps:
+        for offset, step in enumerate(append_steps):
+            merged_plan.insert(insert_at + offset, step)
 
     max_step = max((s.get("step", j+1) for j, s in enumerate(merged_plan)), default=0)
     for step in append_steps:
         max_step += 1
         step["step"] = max_step
-        merged_plan.append(step)
 
-    merged_plan = limit_plan_steps(merged_plan, logger=logger, tag="R")
-    logger.info("R", f"合并后的计划：{len(merged_plan)} 步（替换 {replaced_count} + 追加 {len(append_steps)}）")
+    # 截断保护两组：
+    # ① 已执行前缀：executor 以 current_step 作 plan 下标，前缀步被裁会导致后续步被跳过
+    # ② 本次追加的补救步：被裁等于 replanner 白规划
+    executed_prefix = merged_plan[:insert_at]
+    merged_plan = limit_plan_steps(
+        merged_plan, logger=logger, tag="R",
+        protect=[*executed_prefix, *append_steps],
+    )
+    logger.info(
+        "R",
+        f"合并后的计划：{len(merged_plan)} 步"
+        f"（替换 {replaced_count} + 追加 {len(append_steps)}，追加插入位置 {insert_at}）",
+    )
     return merged_plan
 
 
@@ -296,7 +332,7 @@ async def replan_step(state: PlanExecute, ctx: AgentContext, run_config=None):
         progress.milestone(f"已完成 {len(past_steps)} 步，当前步骤 {current_step}/{original_plan_len}")
 
     # 3. Observer adjust — 直接应用，不调 LLM
-    adjusted_plan = _handle_observer_adjust(step_results, plan, current_step, logger)
+    adjusted_plan = _handle_observer_adjust(step_results, plan, current_step, logger, registry)
     if adjusted_plan is not None:
         return {"plan": adjusted_plan, "_replan_history": state.get("_replan_history", []) + ["adjust"]}
 
@@ -346,7 +382,7 @@ async def replan_step(state: PlanExecute, ctx: AgentContext, run_config=None):
             return {"response": f"以下是根据已有信息生成的回答：\n\n{past_summary}"}
 
     if new_steps:
-        merged = _apply_new_steps(new_steps, plan, past_steps, current_step, step_results, logger)
+        merged = _apply_new_steps(new_steps, plan, past_steps, current_step, step_results, logger, registry)
         if merged is not None:
             if progress:
                 new_count = len(merged) - len(plan) + len(plan)  # approximate

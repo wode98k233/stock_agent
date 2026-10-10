@@ -705,3 +705,55 @@
   border-radius: 8px;
   line-height: 1.6;
 }
+
+/* ── 组合仪表盘：资产概况卡 + 分标的操作表 ── */
+.dash-portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 10px;
+}
+.dash-portfolio-stat {
+  background: #f8fafb;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.dash-portfolio-label {
+  font-size: 11.5px;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+.dash-portfolio-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1c2430;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+}
+.dash-position-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+.dash-position-table th {
+  text-align: left;
+  padding: 6px 8px;
+  color: #64748b;
+  font-weight: 600;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+.dash-position-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #1e293b;
+  vertical-align: top;
+}
+.dash-position-table tr:last-child td { border-bottom: none; }
+.dash-pos-stock b { font-weight: 700; }
+.dash-pos-code {
+  opacity: 0.55;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 11px;
+  margin-left: 4px;
+}

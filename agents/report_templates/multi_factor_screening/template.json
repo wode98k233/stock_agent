@@ -23,7 +23,6 @@
     "evidence_table",
     "candidate_ranking",
     "position_sizing",
-    "user_profile_fit",
     "action_plan_compact",
     "next_watch",
     "risk_warning",
@@ -134,7 +133,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "position_holding"
   ],
   "qa_rules": [
@@ -143,7 +141,7 @@
     "必须列出被排除的股票及排除理由。",
     "PEG>2的高估值标的必须单独标注风险。",
     "现金流/净利润<0.5的标的必须在盈利质量因子中扣分。",
-    "必须完整输出全部板块：核心结论/关键证据/候选排序/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+    "必须完整输出全部板块：核心结论/关键证据/候选排序/仓位与风险预算/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
   ],
   "skill_plan": [
     {

@@ -28,13 +28,13 @@ def registry():
     return SkillRegistry(logger, memory, sr)
 
 
-def test_stock_query_tools(registry):
-    """测试 stock_query 技能的工具"""
+def test_stock_analysis_tools(registry):
+    """测试 stock_analysis 技能的工具"""
     print("\n" + "=" * 60)
-    print("测试 stock_query 工具")
+    print("测试 stock_analysis 工具")
     print("=" * 60)
     
-    tools = registry.get_tools("stock_query")
+    tools = registry.get_tools("stock_analysis")
     print(f"\n加载工具: {[t.name for t in tools]}")
     
     # 测试 get_board_stocks
@@ -88,13 +88,13 @@ def test_stock_query_tools(registry):
         print(f"   ❌ 失败: {e}")
 
 
-def test_technical_analysis_tools(registry):
-    """测试 technical_analysis 技能的工具"""
+def test_stock_analysis_tech_tools(registry):
+    """测试 stock_analysis 的技术指标工具"""
     print("\n" + "=" * 60)
-    print("测试 technical_analysis 工具")
+    print("测试 stock_analysis 技术指标工具")
     print("=" * 60)
     
-    tools = registry.get_tools("technical_analysis")
+    tools = registry.get_tools("stock_analysis")
     print(f"\n加载工具: {[t.name for t in tools]}")
     
     # 测试 calc_technical_indicators
@@ -123,12 +123,12 @@ def test_technical_analysis_tools(registry):
 
 
 def test_sentiment_analysis_tools(registry):
-    """测试 sentiment_analysis 技能的工具"""
+    """测试 market_review 技能里的新闻情感工具（原 sentiment_analysis，已并入 market_review）"""
     print("\n" + "=" * 60)
-    print("测试 sentiment_analysis 工具")
+    print("测试 market_review 的新闻情感工具")
     print("=" * 60)
     
-    tools = registry.get_tools("sentiment_analysis")
+    tools = registry.get_tools("market_review")
     print(f"\n加载工具: {[t.name for t in tools]}")
     
     # 测试 search_news_by_keyword
@@ -169,7 +169,7 @@ def test_aggregation_tools(registry):
     indicators_list = []
     
     try:
-        tech_tools = registry.get_tools("technical_analysis")
+        tech_tools = registry.get_tools("stock_analysis")
         calc_tool = next(t for t in tech_tools if t.name == "calc_technical_indicators")
         
         for symbol in test_symbols:
@@ -221,10 +221,10 @@ def test_data_source_consistency(registry):
     print("=" * 60)
 
     test_cases = [
-        ("stock_query", "get_board_stocks", {"board_name": "电池"}),
-        ("stock_query", "get_stock_realtime", {"symbol": "600519"}),
-        ("stock_query", "get_stock_history", {"symbol": "600519", "days": 30}),
-        ("technical_analysis", "calc_technical_indicators", {"symbol": "600519"}),
+        ("stock_analysis", "get_board_stocks", {"board_name": "电池"}),
+        ("stock_analysis", "get_stock_realtime", {"symbol": "600519"}),
+        ("stock_analysis", "get_stock_history", {"symbol": "600519", "days": 30}),
+        ("stock_analysis", "calc_technical_indicators", {"symbol": "600519"}),
     ]
 
     for skill_name, tool_name, param in test_cases:
@@ -275,13 +275,13 @@ def main():
     # print("\n测试 mx_data 工具:")
     # print(registry.get_skill_tools("mx_data"))
     # print("\n测试 stock_query 技能的详细描述:")
-    # print(registry.get_skill_meta("stock_query"))
+    # print(registry.get_skill_meta("stock_analysis"))
     # print("\n测试 stock_query 工具:")
-    # print(registry.get_skill_tools("stock_query"))
+    # print(registry.get_skill_tools("stock_analysis"))
     
     # 测试各个技能
-    test_stock_query_tools(registry)
-    test_technical_analysis_tools(registry)
+    test_stock_analysis_tools(registry)
+    test_stock_analysis_tech_tools(registry)
     test_sentiment_analysis_tools(registry)
     test_aggregation_tools(registry)
     test_data_source_consistency(registry)

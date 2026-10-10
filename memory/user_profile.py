@@ -39,6 +39,53 @@ KNOWN_SUFFIXES = [
 ]
 
 
+# 免责声明 / 修饰 / 泛指词——它们可能恰好落在「2~6 汉字 + 通用后缀」模式里，
+# 但绝不是股票名（PRD §3.4：「不构成任何投资建议」被抽成「不构成任何」）。
+_STOCK_STOPWORDS = {
+    "不构成", "不构成任何", "任何", "投资建议", "仅供参考", "据此操作", "风险自担",
+    "风险", "本报告", "本文", "观点", "结论", "声明", "合规", "免责",
+    "关键", "专业", "资深", "相关", "上述", "以下", "主要", "重要", "一般",
+    "建议", "分析", "数据", "信息", "市场", "行业", "板块", "个股", "标的",
+    "仓位", "策略", "配置", "收益", "亏损", "机会", "趋势", "估值", "业绩",
+    "成长", "价值", "题材", "概念", "领域", "方向", "方面", "情况", "问题",
+    "稳健", "长期", "短期", "中线", "长线", "基金", "指数", "股票", "股票名",
+}
+
+# 动词 / 语气前缀：正则贪婪匹配会把「我看好腾讯控股」抽成「我看好腾讯」，需拦截。
+_STOCK_STOP_PREFIXES = (
+    "看好", "看多", "看空", "关注", "持有", "买入", "卖出", "建仓", "加仓", "减仓",
+    "考虑", "打算", "计划", "认为", "觉得", "应该", "可以", "已经", "正在", "最近",
+    "目前", "现在", "如果", "因为", "所以", "但是", "而且", "虽然", "由于", "为了",
+    "关于", "对于", "根据", "通过", "随着", "围绕", "针对", "我", "你", "他", "她",
+    "它", "我们", "你们",
+)
+
+# 常见功能字（股票名几乎不含）——命中即判为非名字段。
+_STOCK_FUNC_CHARS = set("的了和与或及等之其该此是在有着过就都也还把被让给对从向到于")
+
+
+def _looks_like_stock_name(name: str) -> bool:
+    """粗判「这串汉字像不像股票名」——拦截免责声明/修饰/动词前缀等污染。"""
+    if not name or not (2 <= len(name) <= 6):
+        return False
+    if name in _STOCK_STOPWORDS:
+        return False
+    if any(name.startswith(w) for w in _STOCK_STOP_PREFIXES):
+        return False
+    if any(ch in _STOCK_FUNC_CHARS for ch in name):
+        return False
+    return True
+
+
+# 资产配置自述关键词（命中即视为用户自述配置/占比）
+_ALLOCATION_VERBS = ("占", "配置", "仓位", "配比", "重仓", "分配", "打底", "底仓")
+_ALLOCATION_UNITS = ("成", "层", "%", "％", "分之")
+_ALLOCATION_STYLES = (
+    "红利", "银行", "高股息", "高分红", "现金", "灵活", "防守", "防御", "进攻",
+    "成长", "周期", "科技", "题材", "仓位", "机动", "底仓", "储蓄型", "品种",
+)
+
+
 # ── 数据模型 ────────────────────────────────────────────────
 @dataclass
 class Holding:
@@ -76,6 +123,9 @@ class UserProfile:
     preferred_indicators: List[str] = field(default_factory=list)  # ["MACD","PE","ROE"]
     output_detail: str = "standard"     # "brief" | "standard" | "detailed"
     analysis_style: str = ""            # "technical_heavy" | "fundamental_heavy" | "balanced"
+
+    # === 新增：资产配置框架自述（v2） ===
+    allocation_notes: List[dict] = field(default_factory=list)  # 用户自述的资产配置/风格分配 [{text, time}]，最多 5 条
 
     # === 新增：持仓 ===
     holdings: List[Holding] = field(default_factory=list)
@@ -129,7 +179,8 @@ class UserProfileManager:
             profile = UserProfile()
             # 简单字段
             for key in ("preferred_depth", "risk_tolerance", "investment_horizon",
-                        "output_detail", "analysis_style", "last_updated",
+                        "output_detail", "analysis_style",
+                        "last_updated",
                         "DECAY_FACTOR", "MAX_RECENT", "MAX_FEEDBACK"):
                 if key in data:
                     setattr(profile, key, data[key])
@@ -142,6 +193,15 @@ class UserProfileManager:
                 profile.recent_queries = data["recent_queries"]
             if "preferred_indicators" in data:
                 profile.preferred_indicators = data["preferred_indicators"]
+            # 兼容旧字段名 composition_notes（v2 改名 allocation_notes）
+            if "allocation_notes" in data and isinstance(data["allocation_notes"], list):
+                profile.allocation_notes = [
+                    n for n in data["allocation_notes"]
+                    if isinstance(n, dict) and n.get("text")][-5:]
+            elif "composition_notes" in data and isinstance(data["composition_notes"], list):
+                profile.allocation_notes = [
+                    n for n in data["composition_notes"]
+                    if isinstance(n, dict) and n.get("text")][-5:]
             # 嵌套对象字段
             if "holdings" in data:
                 profile.holdings = [Holding(**h) for h in data["holdings"]]
@@ -244,6 +304,8 @@ class UserProfileManager:
                 continue
             if name in exclude_sectors:
                 continue
+            if not _looks_like_stock_name(name):
+                continue
             if name not in filtered:
                 filtered.append(name)
         return filtered
@@ -303,6 +365,18 @@ class UserProfileManager:
         if p.analysis_style in style_map:
             hints.append(style_map[p.analysis_style])
 
+        # 资产配置框架自述（用户对话中的配置/占比表述，带时间戳，标注非实时）
+        if p.allocation_notes:
+            lines = [n["text"] for n in p.allocation_notes[-3:]]
+            when = ""
+            ts = p.allocation_notes[-1].get("time", 0)
+            if ts:
+                from datetime import datetime as dt
+                when = dt.fromtimestamp(ts).strftime("%m-%d") + " "
+            hints.append(
+                f"用户自述资产配置（{when}）：{'；'.join(lines)}"
+                "（用户口径，非实时统计）")
+
         # 上次查询（带日期，避免 LLM 误判为当天提问）
         if p.recent_queries:
             from datetime import datetime as dt
@@ -335,6 +409,23 @@ class UserProfileManager:
         if style in ("technical_heavy", "fundamental_heavy", "balanced"):
             self.profile.analysis_style = style
             self._save()
+
+    def note_allocation(self, text: str):
+        """记录用户自述的资产配置/风格分配（去重，最多保留 5 条）。"""
+        text = (text or "").strip().replace("\n", " ")
+        if not text:
+            return
+        if any(n.get("text") == text for n in self.profile.allocation_notes):
+            return
+        self.profile.allocation_notes.append(
+            {"text": text[:40], "time": time.time()})
+        self.profile.allocation_notes = self.profile.allocation_notes[-5:]
+        self._save()
+
+    def replace_holdings(self, holdings: List[Holding]):
+        """覆盖式同步持仓（与持仓账本打通：东财导入/记交易后调用）。"""
+        self.profile.holdings = holdings
+        self._save()
 
     def add_holding(self, stock_code: str, stock_name: str,
                     cost: float = 0.0, shares: int = 0):
@@ -380,15 +471,18 @@ class UserProfileManager:
           "我比较保守" → risk_tolerance = "conservative"
           "我是做短线的" → investment_horizon = "short"
           "我更喜欢看技术指标" → analysis_style = "technical_heavy"
+          "红利银行占3成，高增长周期3层，灵活配置4层" → allocation_notes 逐条记录
         """
         text = user_text.lower()
 
-        if any(w in text for w in ["保守", "稳健", "安全", "低风险", "回撤", "怕亏"]):
+        if any(w in text for w in ["保守", "稳健", "安全", "低风险", "回撤",
+                                   "怕亏", "亏不起了", "保本", "套牢才割"]):
             if self.profile.risk_tolerance != "conservative":
                 self.profile.risk_tolerance = "conservative"
                 self._save()
 
-        if any(w in text for w in ["激进", "高风险", "敢赌", "不怕波动", "弹性"]):
+        if any(w in text for w in ["激进", "高风险", "敢赌", "不怕波动", "弹性",
+                                   "梭哈", "满仓干"]):
             if self.profile.risk_tolerance != "aggressive":
                 self.profile.risk_tolerance = "aggressive"
                 self._save()
@@ -413,6 +507,20 @@ class UserProfileManager:
                 self.profile.analysis_style = "fundamental_heavy"
                 self._save()
 
+        # 资产配置自述：切句后命中「比例单位 + (配置动词|风格词)」或「半/满/空仓」的表态
+        for seg in re.split(r"[。！？!?；;，,]", text):
+            seg = seg.strip()
+            if not seg:
+                continue
+            # 盈亏/涨跌类表态（如"亏了12%"）不是配置自述，跳过
+            if any(w in seg for w in ("亏", "跌", "涨", "赚", "损")):
+                continue
+            if ("半仓" in seg or "满仓" in seg or "空仓" in seg) or (
+                any(u in seg for u in _ALLOCATION_UNITS) and (
+                    any(v in seg for v in _ALLOCATION_VERBS)
+                    or any(s in seg for s in _ALLOCATION_STYLES))):
+                self.note_allocation(seg)
+
         # 持仓提取
         if "持有" in text or "买了" in text or "持仓" in text:
             # 尝试提取 "持有贵州茅台" / "买了宁德时代"
@@ -421,3 +529,36 @@ class UserProfileManager:
                     if not any(h.stock_name == stock_name for h in self.profile.holdings):
                         # 无法获取代码，先用名称记录
                         pass  # 持仓添加需要代码，此处仅标记潜力
+
+        # P2：语义补充（关键词漏掉的同义/新词表述；仅补齐尚未确定的字段）
+        self._semantic_supplement(user_text)
+
+    def _semantic_supplement(self, user_text: str):
+        """用 prototype 向量相似度补齐偏好字段（关键词未覆盖时）。任一步失败静默返回。"""
+        try:
+            from config import Config
+            if not getattr(Config, "MEMORY_PROFILE_SEMANTIC", True):
+                return
+            from memory.profile_semantic import extract_preferences
+            # 复用记忆 SDK 已构建的 embedding（避免重复构造与额外连接）
+            from memory.sdk import get_sdk
+            sdk = get_sdk()
+            emb = getattr(getattr(sdk, "backend", None), "_embedding", None)
+            fn = getattr(emb, "_embedding_fn", None)
+            if not callable(fn):
+                return
+            prefs = extract_preferences(user_text, fn)
+            changed = False
+            if prefs.get("risk_tolerance") and not self.profile.risk_tolerance:
+                self.profile.risk_tolerance = prefs["risk_tolerance"]
+                changed = True
+            if prefs.get("investment_horizon") and not self.profile.investment_horizon:
+                self.profile.investment_horizon = prefs["investment_horizon"]
+                changed = True
+            if prefs.get("analysis_style") and not self.profile.analysis_style:
+                self.profile.analysis_style = prefs["analysis_style"]
+                changed = True
+            if changed:
+                self._save()
+        except Exception:
+            pass

@@ -198,6 +198,12 @@ window.StockRadar = window.StockRadar || {};
       this.render();
     }
 
+    /* 持仓成本线（openKlineChart(code, {costLine})），load 后消费一次 */
+    setCostLine(costLine) {
+      this.costLine = costLine != null ? Number(costLine) : null;
+      if (this.data) this.render();
+    }
+
     async showPlaceholder(text) {
       await this.ready;
       this.chart.setOption({
@@ -398,6 +404,9 @@ window.StockRadar = window.StockRadar || {};
           ...this._buildSignalSeries(signals, dates, kline),
           // 策略 overlay：scan 信号点 / 回测买卖点
           ...(overlay ? this._buildOverlaySeries(overlay, dates, kline) : []),
+          // 持仓成本线（紫色虚线，避开红涨绿跌语义；symbol:none 不画端点）
+          ...(this.costLine != null && isFinite(this.costLine)
+            ? [this._buildCostLineSeries(this.costLine)] : []),
           // 成交量 - 涨跌配色
           {
             name: "成交量",
@@ -1021,6 +1030,30 @@ window.StockRadar = window.StockRadar || {};
       }];
     }
 
+    // 持仓成本线：主图横向虚线（紫色 #8b5cf6，避开 A 股红涨绿跌语义），
+    // label "成本 xx.xx"，symbol:'none' 不画端点，不画买卖点（流水不全，标了误导）
+    _buildCostLineSeries(cost) {
+      return {
+        name: "成本线",
+        type: "line",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data: [],
+        markLine: {
+          silent: true,
+          symbol: "none",
+          data: [{ yAxis: cost }],
+          lineStyle: { color: "#8b5cf6", type: "dashed", width: 1.2 },
+          label: {
+            formatter: `成本 ${Number(cost).toFixed(2)}`,
+            color: "#8b5cf6",
+            fontSize: 10,
+            position: "insideEndTop",
+          },
+        },
+      };
+    }
+
     // 回测净值曲线（第 4 栏），含初始资金基准线
     _buildEquitySeries(equityCurve, dates, initialCash) {
       if (!equityCurve || equityCurve.length === 0) return [];
@@ -1058,6 +1091,10 @@ window.StockRadar = window.StockRadar || {};
       }];
     }
   }
+
+  // 暴露 KlineChart 绘图类：报告「技术面图板」(tech_panel) 复用同一套
+  // K线+成交量+副图指标渲染与信号标注能力（chat-core.js 中使用）
+  window.StockRadar.KlineChart = KlineChart;
 
   window.StockRadar.KlinePanel = class KlinePanel {
     constructor() {
@@ -1119,6 +1156,8 @@ window.StockRadar = window.StockRadar || {};
       this.chart.resize();
       // AI 信号评测跳转：markRange = {from: 'YYYY-MM-DD', to: '+5D'|null, buy: bool}
       this._pendingMarkRange = opts.markRange || null;
+      // 持仓成本线（持仓行「看K线」openKlineChart(code, {costLine: avg_cost})）
+      this._pendingCostLine = opts.costLine != null ? Number(opts.costLine) : null;
       if (code) {
         this.searchInput.value = code;
         this.load(code);
@@ -1305,6 +1344,11 @@ window.StockRadar = window.StockRadar || {};
       this._setStatus("loading", `正在读取 ${this.currentCode} 本地 K 线...`);
       this.syncBtn.disabled = true;
       this.chart.clearOverlay();
+      // 持仓成本线：open() 传入的 pending 值在此消费（换股/重查后失效）
+      if (this._pendingCostLine !== undefined) {
+        this.chart.setCostLine(this._pendingCostLine);
+        this._pendingCostLine = undefined;
+      }
       this._hideScanBadge();
       await this.chart.showLoading("读取本地 K 线数据...");
       try {

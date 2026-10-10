@@ -2,11 +2,14 @@
 import pytest
 
 from memory.backend.base import MemoryEntry
-from memory.backend.embedding import EmbeddingBackend, _filter_by_min_similarity
+from memory.backend.embedding import (
+    EmbeddingBackend, _filter_by_min_similarity, _filter_by_similarity,
+)
 from memory.sdk import (
     MemorySDK,
     MemoryConfig,
     MIN_SIMILARITY_DEFAULT,
+    SIMILARITY_MARGIN_DEFAULT,
     load_memory_config,
     save_memory_config,
 )
@@ -75,8 +78,10 @@ def test_embedding_backend_search_threshold_disabled_returns_all(tmp_path):
 # ── SDK 配置默认值与持久化 ──────────────────────────────
 
 def test_min_similarity_default():
-    assert MIN_SIMILARITY_DEFAULT == 0.72
-    assert MemoryConfig().min_similarity == 0.72
+    assert MIN_SIMILARITY_DEFAULT == 0.30
+    assert SIMILARITY_MARGIN_DEFAULT == 0.12
+    assert MemoryConfig().min_similarity == 0.30
+    assert MemoryConfig().similarity_margin == 0.12
 
 
 def test_memory_config_persist_roundtrip(tmp_path, monkeypatch):
@@ -84,11 +89,62 @@ def test_memory_config_persist_roundtrip(tmp_path, monkeypatch):
     path = tmp_path / "memory_config.json"
     monkeypatch.setattr(sdk_mod, "get_memory_config_path", lambda: str(path))
 
-    # 默认
-    assert load_memory_config()["min_similarity"] == 0.72
+    # 默认（自适应：低绝对下限 + 相对带宽）
+    assert load_memory_config()["min_similarity"] == 0.30
+    assert load_memory_config()["similarity_margin"] == 0.12
 
-    save_memory_config({"min_similarity": 0.8})
+    save_memory_config({"min_similarity": 0.8, "similarity_margin": 0.2})
     assert load_memory_config()["min_similarity"] == 0.8
+    assert load_memory_config()["similarity_margin"] == 0.2
+
+
+# ── 自适应过滤（floor + margin） ─────────────────────────
+
+def test_adaptive_filter_keeps_relative_band():
+    # top=0.603, margin=0.12, floor=0.30 → thr=0.483，保留 0.603/0.55/0.50
+    entries = [_mk(0.603, "a"), _mk(0.55, "b"), _mk(0.50, "c"), _mk(0.45, "d")]
+    out = _filter_by_similarity(entries, 0.30, 0.12)
+    assert [e.entry_id for e in out] == ["a", "b", "c"]
+
+
+def test_adaptive_filter_floor_wins_when_top_low():
+    # top=0.20 < floor 0.30 → 全部剔除（无关查询不放行）
+    entries = [_mk(0.20, "a"), _mk(0.18, "b")]
+    assert _filter_by_similarity(entries, 0.30, 0.12) == []
+
+
+def test_adaptive_filter_disabled_returns_all():
+    entries = [_mk(0.1), _mk(0.2)]
+    assert _filter_by_similarity(entries, 0.0, 0.0) == entries
+
+
+def test_sdk_set_similarity_margin_updates_and_persists(tmp_path, monkeypatch):
+    import memory.sdk as sdk_mod
+    path = tmp_path / "memory_config.json"
+    monkeypatch.setattr(sdk_mod, "get_memory_config_path", lambda: str(path))
+
+    class _FakeEmb:
+        def __init__(self):
+            self.v = None
+
+        def set_similarity_margin(self, x):
+            self.v = x
+
+    class _FakeBackend:
+        def __init__(self):
+            self._embedding = _FakeEmb()
+
+    sdk = MemorySDK(MemoryConfig())
+    sdk._backend = _FakeBackend()
+    sdk._initialized = True
+
+    assert sdk.set_similarity_margin(0.2) == 0.2
+    assert sdk._backend._embedding.v == 0.2
+    assert sdk.get_similarity_margin() == 0.2
+    import json
+    assert json.loads(path.read_text(encoding="utf-8"))["similarity_margin"] == 0.2
+    with pytest.raises(ValueError):
+        sdk.set_similarity_margin(-0.1)
 
 
 def test_sdk_set_min_similarity_updates_and_persists(tmp_path, monkeypatch):

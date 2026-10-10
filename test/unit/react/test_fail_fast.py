@@ -403,14 +403,19 @@ def test_datasource_manager_status():
     assert status["test_source"]["circuit_breaker"] == "closed"
 
 
-def test_retry_decorator_no_sources():
+def test_retry_decorator_no_sources(monkeypatch):
     """验证没有可用数据源时快速失败"""
     from tools.fetcher.base import retry, DataSourceManager
+    import tools.fetcher as fetcher_pkg
     from utils.circuit_breaker import CircuitBreaker
 
-    # 重置状态，无数据源
-    DataSourceManager._sources = []
-    DataSourceManager._circuit_breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=600)
+    # 隔离延迟注册：retry wrapper 会调用 _ensure_initialized()，
+    # 若此前无测试触发过初始化（_initialized=False），它会重新注册真实数据源，
+    # 覆盖本用例清空的 _sources —— 单独跑本文件必现失败、全量跑则看 worker 顺序。
+    monkeypatch.setattr(fetcher_pkg, "_initialized", True)
+    monkeypatch.setattr(DataSourceManager, "_sources", [])
+    monkeypatch.setattr(DataSourceManager, "_circuit_breaker",
+                        CircuitBreaker(failure_threshold=3, cooldown_seconds=600))
 
     @retry(max_retries=3, base_delay=0.01, max_delay=0.05, switch_on_fail=False)
     def test_func():
@@ -426,6 +431,7 @@ def test_retry_decorator_no_sources():
 def test_retry_request_failed_sources_reset_between_calls(monkeypatch):
     """普通连续调用之间不应共享 request 级失败数据源缓存。"""
     from tools.fetcher.base import DataSource, DataSourceManager, retry, _request_failed_sources
+    import tools.fetcher as fetcher_pkg
     from utils.circuit_breaker import CircuitBreaker
 
     calls = {"bad": 0, "good": 0}
@@ -440,6 +446,8 @@ def test_retry_request_failed_sources_reset_between_calls(monkeypatch):
         priority = 90
         enabled = True
 
+    # 同 test_retry_decorator_no_sources：阻止 wrapper 内延迟注册覆盖假数据源
+    monkeypatch.setattr(fetcher_pkg, "_initialized", True)
     monkeypatch.setattr(DataSourceManager, "_sources", [BadSource, GoodSource])
     monkeypatch.setattr(DataSourceManager, "_circuit_breaker", CircuitBreaker(failure_threshold=5, cooldown_seconds=600))
     monkeypatch.setattr(DataSourceManager, "_current_source_index", 0)

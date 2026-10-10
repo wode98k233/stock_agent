@@ -7,7 +7,7 @@
     },
     {
       "template_id": "macro_daily",
-      "dashboard_id": "market"
+      "dashboard_id": "macro"
     },
     {
       "template_id": "event_impact",
@@ -63,7 +63,15 @@
     },
     {
       "template_id": "portfolio_advice",
-      "dashboard_id": "stock"
+      "dashboard_id": "portfolio"
+    },
+    {
+      "template_id": "asset_allocation",
+      "dashboard_id": "portfolio"
+    },
+    {
+      "template_id": "cause_attribution",
+      "dashboard_id": "market"
     },
     {
       "template_id": "stock_comparison",
@@ -80,6 +88,10 @@
     {
       "template_id": "consensus_view",
       "dashboard_id": "screening"
+    },
+    {
+      "template_id": "quick_lookup",
+      "dashboard_id": "quick"
     }
   ],
   "standalone": [

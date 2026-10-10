@@ -22,6 +22,7 @@ class ReactAgentState(TypedDict):
     final_result: Optional[str]
     should_stop: bool
     user_input: str
+    raw_user_input: str  # 原始输入（未 enrich）；模板路由用它，避免画像/记忆关键词干扰
     is_stock_related: bool
     classify_response: Optional[str]
     selected_template_id: str
@@ -30,3 +31,8 @@ class ReactAgentState(TypedDict):
     all_tool_names: list[str]  # 可序列化：只存工具名，实际对象通过闭包传递
     limit_reason: Optional[str]
     cache_hit_tools: list[str]
+    active_skill: str
+    candidate_skills: list[str]
+    loaded_skills: list[str]  # 当前已装载工具的技能（批量子集；<= 候选池）
+    sub_goals: list[str]
+    skill_gap_count: int

@@ -29,17 +29,11 @@ def _get_db():
 
 
 def _init_db():
-    """初始化缓存表"""
+    """初始化缓存表（DDL 统一来源 utils/db_schema）"""
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.registry import ALL_DBS
     with _get_db() as conn:
-        c = conn.cursor()
-        # 行业数据缓存表 - 存储完整的 query_stock_industry() 结果
-        c.execute('''CREATE TABLE IF NOT EXISTS industry_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cache_key TEXT UNIQUE NOT NULL,
-            data_json TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            expire_hours INTEGER NOT NULL
-        )''')
+        ensure_schema(conn, ALL_DBS["baostock_cache"].tables)
 
 
 # 初始化数据库

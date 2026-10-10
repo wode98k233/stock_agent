@@ -1,27 +1,34 @@
-"""Trace 数据轮询器 — 从数据库轮询步骤变更并推送到事件流。"""
+"""Trace 数据轮询器 — 从月库轮询步骤变更并推送到事件流。"""
 import asyncio
 import json
 
 from server.constants import TRACE_ICONS
-from utils.agent_trace.db import get_trace_conn
+from server.runtime import transcript
 
 
 class TracePoller:
-    """异步轮询 trace 步骤变更，通过 put_event 回调推送到前端。"""
+    """异步轮询 trace 步骤变更，通过 put_event 回调推送到前端。
+
+    除 `trace_step`（右抽屉卡片）外，同时推 `transcript` 事件（对话过程流：
+    think/tool 条目，构造与快照接口共用 `server/runtime/transcript.py`）。
+    """
 
     def __init__(self, put_event):
         self._put_event = put_event
         self._poll_tasks: dict[str, asyncio.Task] = {}
+        self._transcript_seen: dict[str, dict] = {}
 
     async def start_polling(self, task_id: str, seen_versions: dict[int, str],
                             interval: float = 1.5) -> None:
         """启动 trace 轮询任务。"""
+        self._transcript_seen.setdefault(task_id, {})
         self._poll_tasks[task_id] = asyncio.create_task(
             self._poll_loop(task_id, seen_versions, interval)
         )
 
     async def stop_polling(self, task_id: str) -> None:
         """停止并清理轮询任务。"""
+        self._transcript_seen.pop(task_id, None)
         task = self._poll_tasks.pop(task_id, None)
         if task:
             task.cancel()
@@ -32,13 +39,14 @@ class TracePoller:
 
     async def flush_remaining(self, task_id: str, trace_run_id: str | None,
                               seen_versions: dict[int, str]) -> None:
-        """任务完成后刷新剩余 trace 步骤。"""
+        """任务完成后刷新剩余 trace 步骤与 transcript 条目。"""
         if not trace_run_id:
             return
         try:
             steps = self._read_changed_steps(trace_run_id, seen_versions)
             for step in steps:
                 self._put_event(task_id, {"event": "trace_step", "data": step})
+            self._push_transcript(task_id, trace_run_id)
         except Exception:
             pass
 
@@ -48,10 +56,6 @@ class TracePoller:
 
         while True:
             await asyncio.sleep(interval)
-
-            conn = get_trace_conn()
-            if conn is None:
-                continue
 
             if trace_run_id is None:
                 trace_run_id = self._find_running_run()
@@ -66,22 +70,29 @@ class TracePoller:
             for step in steps:
                 self._put_event(task_id, {"event": "trace_step", "data": step})
 
+            self._push_transcript(task_id, trace_run_id)
+
+    def _push_transcript(self, task_id: str, run_id: str) -> None:
+        """推 transcript 增量条目（think/tool，entry_id+版本幂等）。"""
+        from utils.agent_trace.store import store
+        try:
+            conn = store.conn_for_run(run_id)
+            seen = self._transcript_seen.setdefault(task_id, {})
+            for entry in transcript.changed_entries(conn, run_id, seen):
+                self._put_event(task_id, {"event": "transcript", "data": entry})
+        except Exception:
+            pass
+
     @staticmethod
     def _find_running_run() -> str | None:
-        conn = get_trace_conn()
-        if conn is None:
-            return None
-        try:
-            row = conn.execute(
-                "SELECT id FROM runs WHERE status='running' ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-            return row["id"] if row else None
-        except Exception:
-            return None
+        from utils.agent_trace.store import store
+        run = store.find_latest_run(status="running")
+        return run["id"] if run else None
 
     @staticmethod
     def _read_changed_steps(run_id: str, seen_versions: dict[int, str]) -> list[dict]:
-        conn = get_trace_conn()
+        from utils.agent_trace.store import store
+        conn = store.conn_for_run(run_id)
         if conn is None:
             return []
         steps = []

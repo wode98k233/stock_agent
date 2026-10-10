@@ -9,6 +9,7 @@ from agents.state import PlanExecute
 from agents.agent_context import AgentContext
 from agents.prompts import PLAN_OUTPUT_FORMAT
 from agents.shared.analysis_utils import limit_plan_steps
+from agents.shared.tool_utils import resolve_plan_step_skills
 from agents.analysis.template_store import load_template, build_guidance
 from tools.skills import SkillPromptBuilder
 from utils.llm_factory import get_llm, llm_json_with_retry
@@ -69,6 +70,7 @@ async def plan_step(state: PlanExecute, ctx: AgentContext, run_config=None):
 
     if result and "steps" in result:
         steps = limit_plan_steps(result["steps"], logger=logger, tag="P")
+        resolve_plan_step_skills(registry, steps, logger=logger, log_tag="P")
         constraints = result.get("constraints", [])
 
         logger.plan(steps, constraints)

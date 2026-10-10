@@ -1,17 +1,26 @@
 """Web 调用 Agent 的公共执行封装。"""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from config import Config
-from agents.factory import AgentFactory
+# 注意：`agents.factory` 会在模块级导入 `agents.base` → `utils.memory` → torch 全家桶（~20s）。
+# 为让 web 秒级起服（lifespan 不阻塞），此处的 AgentFactory 改为函数内懒导入，
+# 真正的 torch 加载由后台预热线程完成；首请求经 require_agent_ready await 兜底。
 from agents.shared.budget_ctx import budget_decision_ctx
 from memory.context import current_dialog_uuid, current_session_id
 from tools.skills import SkillRegistry
-from utils.agent_trace.db import find_latest_trace_run_id
 from utils.app_paths import get_logs_dir
 from memory.metadata import reset as _reset_mem_meta
 from utils.logger import close_logger, get_logger
-from utils.progress import ProgressEvent
+from utils.progress import ProgressEvent  # noqa: F401（类型注解用，from __future__ import annotations 后仅在 IDE/类型检查生效）
+
+
+def _get_agent_factory():
+    """懒获取 AgentFactory：首次调用才触发 torch 依赖链导入（避免阻塞 web 启动）。"""
+    from agents.factory import AgentFactory
+    return AgentFactory
 
 
 @dataclass
@@ -119,6 +128,9 @@ async def run_web_agent_query(
     storage=None,
     progress_callback: Optional[Callable[[ProgressEvent], None]] = None,
     budget_decision_callback: Optional[Callable[[dict], str]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    title_callback: Optional[Callable[[str], None]] = None,
+    title_source: str = "",
 ) -> AgentRunResult:
     logger, log_uuid, budget_ctx, log_file = get_logger(user_input)
     _captured_trace_run_id: str | None = None
@@ -140,8 +152,14 @@ async def run_web_agent_query(
 
     # 设置 web 端预算决策回调，agent 内部通过 ContextVar 检测
     _token = budget_decision_ctx.set(budget_decision_callback)
+    # 协作式取消：agent 在检查点（LLM 调用前/ReAct 循环/工具批次）读取
+    from utils.cancellation import reset_cancel_check, set_cancel_check
+    _cancel_tok = set_cancel_check(cancel_check)
+    # 原始提问（enrich 前）：澄清「重新描述」回填输入框用
+    from agents.shared.raw_input_ctx import reset_raw_input, set_raw_input
+    _raw_tok = set_raw_input(user_input)
     # 关联检索 Tier 2：dialog_uuid 注入日志上下文的 token（在 try 内设置、finally 内重置）
-    _dlg_tok = _sid_tok = None
+    _dlg_tok = _sid_tok = _title_tok = None
     try:
         # 关联检索 Tier 2：将本次 Web 请求的 dialog_uuid 注入日志上下文，
         # 使 agent 运行期产生的系统级日志（logs/radar-system.log）携带 req_id，
@@ -149,6 +167,13 @@ async def run_web_agent_query(
         # 函数退出（finally reset）后不泄漏到线程池复用。
         _dlg_tok = current_dialog_uuid.set(str(dialog_uuid))
         _sid_tok = current_session_id.set(str(dialog_uuid))
+
+        # 会话标题：向 agent 层注入 TitleRequest（classify 生成标题后回调落库/推送）
+        if title_callback is not None and str(title_source or "").strip():
+            from agents.shared.title_ctx import TitleRequest, set_title_request
+            _title_tok = set_title_request(
+                TitleRequest(first_question=str(title_source).strip(), callback=title_callback)
+            )
 
         # 开发模式：每次请求前热重载 Agent 模块 + Config
         if Config.WEB_DEV_RELOAD:
@@ -162,7 +187,7 @@ async def run_web_agent_query(
         except Exception:
             pass
 
-        agent = AgentFactory.get(mode)
+        agent = _get_agent_factory().get(mode)
         agent.on_startup()
         registry = SkillRegistry(logger, memory, context.skill_register)
         response = await agent.run(
@@ -181,6 +206,7 @@ async def run_web_agent_query(
         if session_stats and budget_ctx:
             session_stats.accumulate(budget_ctx)
 
+        from utils.agent_trace.db import find_latest_trace_run_id  # 函数内懒导入（避免拖慢启动）
         trace_run_id = _captured_trace_run_id or find_latest_trace_run_id()
 
         # 转换为相对路径（相对于 logs 目录）
@@ -201,8 +227,13 @@ async def run_web_agent_query(
         )
     finally:
         budget_decision_ctx.reset(_token)
+        reset_cancel_check(_cancel_tok)
+        reset_raw_input(_raw_tok)
         if _dlg_tok is not None:
             current_dialog_uuid.reset(_dlg_tok)
         if _sid_tok is not None:
             current_session_id.reset(_sid_tok)
+        if _title_tok is not None:
+            from agents.shared.title_ctx import reset_title_request
+            reset_title_request(_title_tok)
         close_logger(logger)

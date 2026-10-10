@@ -151,6 +151,76 @@ def test_intent_preferred_depth():
         shutil.rmtree(temp, ignore_errors=True)
 
 
+# ── v2 新增：资产配置自述提取 ──────────────────────────────
+
+def test_alloc_extract_from_conversation():
+    """「红利银行占3成，高增长周期3层，灵活4层」逐条进 allocation_notes。"""
+    from memory.user_profile import UserProfileManager
+
+    temp = tempfile.mkdtemp()
+    try:
+        with patch("memory.user_profile.get_user_profile_dir", return_value=temp):
+            mgr = UserProfileManager(user_id="alloc_test")
+            mgr.extract_from_conversation(
+                "我的配置是红利银行占3成，高增长周期股3层，灵活配置4层")
+            notes = [n["text"] for n in mgr.profile.allocation_notes]
+            assert len(notes) >= 2, f"期望≥2条配置自述, got {notes}"
+            assert any("红利" in n and "3成" in n for n in notes), notes
+            print(f"  allocation_notes: {notes}")
+            print("[OK]")
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def test_alloc_ignores_unrelated_ratio():
+    """「亏损12%」这种非配置比例不该进 allocation_notes。"""
+    from memory.user_profile import UserProfileManager
+
+    temp = tempfile.mkdtemp()
+    try:
+        with patch("memory.user_profile.get_user_profile_dir", return_value=temp):
+            mgr = UserProfileManager(user_id="alloc_neg")
+            mgr.extract_from_conversation("我买的中欧红利亏了12%，有点慌")
+            assert mgr.profile.allocation_notes == [], \
+                mgr.profile.allocation_notes
+            print("[OK]")
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def test_alloc_get_context_hint():
+    """配置自述进入 hint，且标注用户口径。"""
+    from memory.user_profile import UserProfileManager
+
+    temp = tempfile.mkdtemp()
+    try:
+        with patch("memory.user_profile.get_user_profile_dir", return_value=temp):
+            mgr = UserProfileManager(user_id="alloc_hint")
+            mgr.extract_from_conversation("我大概半仓，现金留一半防守")
+            hint = mgr.get_context_hint()
+            assert "资产配置" in hint
+            assert "用户口径" in hint
+            print(f"  hint: {hint}")
+            print("[OK]")
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def test_alloc_risk_keywords_extended():
+    """新增风险关键词（亏不起了/保本）→ conservative。"""
+    from memory.user_profile import UserProfileManager
+
+    temp = tempfile.mkdtemp()
+    try:
+        with patch("memory.user_profile.get_user_profile_dir", return_value=temp):
+            mgr = UserProfileManager(user_id="risk_test")
+            mgr.extract_from_conversation("我亏不起了，只想保本")
+            assert mgr.profile.risk_tolerance == "conservative"
+            print("[OK]")
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
         test_intent_entity_extraction()

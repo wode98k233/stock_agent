@@ -1,10 +1,12 @@
 import gzip
 import json
+import logging
 import socket
-import sqlite3
+import threading
 import webbrowser
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from utils.agent_trace.cli import _db_path
 
@@ -12,7 +14,7 @@ _RUNS_LIST_COLS = "id,agent_name,status,created_at,finished_at,duration_ms"
 _STATIC_HTML_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
 _STATIC_ASSET_CACHE_CONTROL = "private, max-age=600"
 
-_db_conn: sqlite3.Connection | None = None
+logger = logging.getLogger(__name__)
 
 
 def _static_cache_control_for_path(path: str) -> str:
@@ -21,27 +23,6 @@ def _static_cache_control_for_path(path: str) -> str:
     if clean_path in ("", "/") or filename.endswith(".html"):
         return _STATIC_HTML_CACHE_CONTROL
     return _STATIC_ASSET_CACHE_CONTROL
-
-
-def _get_conn(db: str) -> sqlite3.Connection:
-    global _db_conn
-    if _db_conn is None:
-        from utils.agent_trace.models import _ensure_db
-        _ensure_db(Path(db))
-        _db_conn = sqlite3.connect(db, check_same_thread=False)
-        _db_conn.row_factory = sqlite3.Row
-        _db_conn.execute("PRAGMA journal_mode=WAL")
-        _db_conn.execute("PRAGMA cache_size=-65536")
-        _ensure_indexes(_db_conn)
-    return _db_conn
-
-
-def _ensure_indexes(c: sqlite3.Connection):
-    c.execute("CREATE INDEX IF NOT EXISTS idx_steps_run_id ON steps(run_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_steps_run_type ON steps(run_id, step_type)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_messages_step_id ON messages(step_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)")
-    c.commit()
 
 
 class TraceHandler(SimpleHTTPRequestHandler):
@@ -53,70 +34,72 @@ class TraceHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         db = _resolved_db
         if self.path == "/api/runs":
-            self._json_response(self._get_runs(db))
+            self._json_response(self._get_runs())
         elif self.path.startswith("/api/runs/"):
             rid = self.path.split("/api/runs/")[1].split("/")[0]
             sub = self.path.split("/api/runs/")[1].split("/")
             if len(sub) > 1 and sub[1] == "steps":
-                self._json_response(self._get_steps(db, rid))
+                self._json_response(self._get_steps(rid))
             else:
-                self._json_response(self._get_run(db, rid))
+                self._json_response(self._get_run(rid))
+        elif self.path == "/api/reviews" or self.path.startswith("/api/reviews?"):
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            run_id = (qs.get("run_id") or [""])[0]
+            self._json_response(_reviews_payload(run_id))
         elif self.path.startswith("/api/calendar"):
-            from urllib.parse import urlparse, parse_qs
             parsed = urlparse(self.path)
             qs = parse_qs(parsed.query)
             year = int(qs.get("year", [0])[0]) or None
             month = int(qs.get("month", [0])[0]) or None
-            self._json_response(self._get_calendar(db, year, month))
+            self._json_response(self._get_calendar(year, month))
         elif self.path == "/api/db-path":
             self._json_response({"db_path": db})
         else:
             super().do_GET()
 
-    @staticmethod
-    def _get_runs(db: str):
-        c = _get_conn(db)
-        rows = c.execute(
-            f"SELECT {_RUNS_LIST_COLS} FROM runs ORDER BY created_at DESC LIMIT 100"
-        ).fetchall()
-        return [dict(r) for r in rows]
+    def do_POST(self):
+        if self.path != "/api/reviews":
+            self.send_error(404)
+            return
+        # 跨域防护最薄一层：本服务无 do_OPTIONS，浏览器对带 JSON 的跨域请求会先发
+        # OPTIONS 预检而失败，因此仅接受 application/json 即可阻断外部网页触发付费
+        # LLM 调用；监听地址维持既有绑定行为，不在本次变更范围内。
+        ctype = self.headers.get("Content-Type", "") or ""
+        if ctype.split(";")[0].strip().lower() != "application/json":
+            self._json_response({"error": "unsupported media type"})
+            return
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            self._json_response({"error": "invalid json"})
+            return
+        self._json_response(_create_review_payload(payload))
 
     @staticmethod
-    def _get_run(db: str, run_id: str):
-        c = _get_conn(db)
-        run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        return dict(run) if run else {}
+    def _get_runs():
+        from utils.agent_trace.store import store
+        runs = store.list_runs(limit=100)
+        cols = _RUNS_LIST_COLS.split(",")
+        return [{c: r.get(c) for c in cols} for r in runs]
 
     @staticmethod
-    def _get_steps(db: str, run_id: str):
-        c = _get_conn(db)
-        steps = c.execute(
-            "SELECT * FROM steps WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
-        if not steps:
-            return []
-        step_ids = [s["id"] for s in steps]
-        placeholders = ",".join("?" * len(step_ids))
-        msg_rows = c.execute(
-            f"SELECT * FROM messages WHERE step_id IN ({placeholders}) ORDER BY step_id, seq",
-            step_ids,
-        ).fetchall()
-        msg_by_step: dict = {}
-        for m in msg_rows:
-            msg_by_step.setdefault(m["step_id"], []).append(dict(m))
-        result = []
-        for s in steps:
-            d = dict(s)
-            d["messages"] = msg_by_step.get(s["id"], [])
-            result.append(d)
-        return result
+    def _get_run(run_id: str):
+        from utils.agent_trace.store import store
+        return store.get_run(run_id) or {}
 
     @staticmethod
-    def _get_calendar(db: str, year: int | None, month: int | None):
-        """按日期分组返回 run 统计和 token 消耗。"""
+    def _get_steps(run_id: str):
+        from utils.agent_trace.store import store
+        return store.get_steps_with_messages(run_id)
+
+    @staticmethod
+    def _get_calendar(year: int | None, month: int | None):
+        """按日期分组返回 run 统计和 token 消耗（分库：经 store 逐月合并）。"""
         from utils.agent_trace.calendar_query import query_trace_calendar
-        c = _get_conn(db)
-        return query_trace_calendar(c, year, month)
+        from utils.agent_trace.store import store
+        return query_trace_calendar(store, year, month)
 
     def _json_response(self, data):
         body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
@@ -141,6 +124,67 @@ class TraceHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def _reviews_payload(run_id: str) -> dict:
+    if not run_id:
+        return {"items": []}
+    from utils.agent_trace.store import store
+    from eval.review import store as review_store
+    return {"items": review_store.list_reviews(store.reviews_conn(), "run", run_id)}
+
+
+def _create_review_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {"error": "invalid payload"}
+    run_id = str((payload or {}).get("run_id") or "").strip()
+    if not run_id:
+        return {"error": "run_id 必填"}
+    from utils.agent_trace.store import store
+    from eval.review import engine
+    conn = store.reviews_conn()
+    active = engine.find_active_running(conn, "run", run_id)
+    if active:
+        return {
+            "error": "该 run 已有评审进行中",
+            "review_uuid": active["review_uuid"],
+        }
+    review_uuid = engine.create_pending(conn, run_id)
+    _start_review_thread(review_uuid, run_id)
+    return {"review_uuid": review_uuid, "status": "running"}
+
+
+def _prewarm_review_engine():
+    """后台预加载评审引擎（含 langchain），避免首次 POST 冷加载阻塞。"""
+    try:
+        from eval.review import engine, store  # noqa: F401
+    except Exception:
+        pass
+
+
+def _start_review_thread(review_uuid: str, run_id: str) -> None:
+    threading.Thread(
+        target=_review_worker, args=(review_uuid, run_id),
+        name="trace-review", daemon=True,
+    ).start()
+
+
+def _review_worker(review_uuid: str, run_id: str) -> None:
+    try:
+        from utils.agent_trace.store import store
+        from eval.review import engine
+        # reviews 写主库；trace 读取由 engine._trace_conn 按月路由
+        engine.execute(store.reviews_conn(), review_uuid, run_id)
+    except Exception:
+        logger.warning("[review] worker 异常 uuid=%s", review_uuid, exc_info=True)
+        try:
+            from utils.agent_trace.store import store
+            from eval.review import store as review_store
+            review_store.fail_review(store.reviews_conn(), review_uuid, "worker 异常")
+        except Exception:
+            logger.warning(
+                "[review] 标记失败记录也失败 uuid=%s", review_uuid, exc_info=True
+            )
+
+
 def _has_ipv6():
     try:
         socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
@@ -161,7 +205,11 @@ def cmd_serve(args):
     _resolved_db = _db_path(args)
     port = args.port or 8765
 
-    _get_conn(_resolved_db)
+    # 后台预热评审引擎：避免首次 POST 在单线程 HTTPServer 内同步冷加载
+    # langchain（秒级~十秒级）造成全局阻塞
+    threading.Thread(
+        target=_prewarm_review_engine, daemon=True, name="review-prewarm",
+    ).start()
 
     server = DualStackHTTPServer(("::", port), TraceHandler)
     url = f"http://localhost:{port}/viewer.html"
@@ -174,8 +222,4 @@ def cmd_serve(args):
     except KeyboardInterrupt:
         print("\n已停止")
     finally:
-        global _db_conn
-        if _db_conn:
-            _db_conn.close()
-            _db_conn = None
         server.server_close()

@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "dashboards": ["stock", "market", "sector", "screening", "hot_events"],
+  "dashboards": ["stock", "market", "sector", "screening", "hot_events", "macro", "portfolio", "quick"],
   "default": "stock"
 }

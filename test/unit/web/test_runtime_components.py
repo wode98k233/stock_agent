@@ -5,6 +5,7 @@ import threading
 from server.runtime.task_manager import TaskManager, TaskRecord
 from server.runtime.event_stream import EventStreamManager
 from server.runtime.budget_coordinator import BudgetDecisionCoordinator
+from server.runtime.cancel_coordinator import CancelCoordinator
 
 
 # ── TaskManager ──
@@ -115,3 +116,83 @@ async def _budget_coordinator_request_and_resolve():
     coord.cleanup("t1")
     assert "t1" not in coord._events
     assert "t1" not in coord._decisions
+
+
+def test_budget_coordinator_timeout_returns_timeout_value():
+    """澄清超时必须回传 timeout_value（推荐选项继续），预算超时仍回传 "cancel"。"""
+    asyncio.run(_budget_coordinator_timeout_returns_timeout_value())
+
+
+async def _budget_coordinator_timeout_returns_timeout_value():
+    esm = EventStreamManager()
+    esm.create_queue("t1")
+    esm.create_queue("t2")
+    esm.set_event_loop()
+    coord = BudgetDecisionCoordinator(esm)
+
+    clarify_result, budget_result = [], []
+    t1 = threading.Thread(target=lambda: clarify_result.append(
+        coord.request_decision("t1", {"reason": "clarify"}, timeout=0.05,
+                               timeout_value="__clarify_timeout__")))
+    t2 = threading.Thread(target=lambda: budget_result.append(
+        coord.request_decision("t2", {"reason": "budget"}, timeout=0.05)))
+    t1.start()
+    t2.start()
+    await asyncio.sleep(0.3)
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert clarify_result == ["__clarify_timeout__"]
+    assert budget_result == ["cancel"]          # 预算路径默认语义不变
+    assert "t1" not in coord._events            # 超时也要清理等待事件
+    coord.cleanup("t1")
+    coord.cleanup("t2")
+
+
+# ── CancelCoordinator ──
+
+def test_cancel_coordinator_lifecycle():
+    coord = CancelCoordinator()
+    assert coord.request_cancel("t1") is False  # 未注册（任务不在运行中）
+    coord.register("t1")
+    assert coord.is_cancelled("t1") is False
+    assert coord.request_cancel("t1") is True
+    assert coord.is_cancelled("t1") is True
+    coord.cleanup("t1")
+    assert coord.is_cancelled("t1") is False
+
+
+def test_event_stream_task_cancelled_stops():
+    asyncio.run(_event_stream_task_cancelled_stops())
+
+
+async def _event_stream_task_cancelled_stops():
+    esm = EventStreamManager()
+    esm.create_queue("t1")
+    esm.put_event("t1", {"event": "task_cancelled", "data": {"task_id": "t1"}})
+    events = []
+    async for payload in esm.iter_events("t1", heartbeat_interval=0.01):
+        events.append(payload)
+    assert [e["event"] for e in events] == ["task_cancelled"]
+    assert "t1" not in esm._queues
+
+
+def test_runtime_cancel_task():
+    from server.runtime.coordinator import TaskRuntime
+
+    async def _runner(**_kw):  # pragma: no cover - 测试只走控制面
+        return None
+
+    rt = TaskRuntime(runner=_runner)
+    task = _make_task(status="running")
+    rt.task_manager.create_task(task)
+    rt.cancel_coordinator.register("t1")
+
+    assert rt.cancel_task("t1") is True
+    assert rt.cancel_coordinator.is_cancelled("t1") is True
+
+    # 终态任务不可取消
+    rt.task_manager.update_task(task, status="completed")
+    assert rt.cancel_task("t1") is False
+
+    rt.cancel_coordinator.cleanup("t1")

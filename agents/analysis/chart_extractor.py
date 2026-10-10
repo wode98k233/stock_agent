@@ -1,7 +1,9 @@
 """图表片段萃取器（Track 1 规则萃取）— 对应 docs/superpowers/specs/2026-07-06-chart-fragments-design.md
 
 从 mx_data 工具返回的结构化 tables（fieldnames + rows）自动生成 ECharts-ready 图表数据。
-与 agent 流程解耦：chart_debug CLI 与未来 agent 集成共用本模块，验证通过后集成零重写。
+已接入 agent 主流程：agents/react/tool_node_base.py 在 mx_data_query 执行后拦截调用
+extract_from_tool_output，生成 @@CHART:uuid@@ 标记由前端渲染；chart_debug CLI 用于
+独立调试与历史 fragment 核对。
 
 真实列名校准（2026-08 实测）：
   - 均线: MA5 / MA10 / MA20 / MA60
@@ -59,7 +61,11 @@ _MAX_SERIES = 4
 
 
 def _to_float(value: Any) -> Optional[float]:
-    """宽松转数值：兼容 %、亿/万等单位后缀和千分位。"""
+    """宽松转数值：兼容 %、亿/万等单位后缀和千分位，单位统一换算到基准值。
+
+    mx_data 同一列的数值按量级自动格式化（'2.308亿' vs '8336万'），若只取数字
+    丢单位，混量级会让小值在柱状图上变成亚像素柱（有值但看不见）。
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -68,7 +74,21 @@ def _to_float(value: Any) -> Optional[float]:
     m = re.search(r"[-+]?\d+(?:\.\d+)?", text)
     if not m:
         return None
-    return float(m.group(0))
+    num = float(m.group(0))
+    if "%" in text:
+        return num
+    suffix = text[m.end():]
+    if "万亿" in suffix:
+        return num * 1e12
+    if "亿" in suffix:
+        return num * 1e8
+    if "千万" in suffix:
+        return num * 1e7
+    if "百万" in suffix:
+        return num * 1e6
+    if "万" in suffix:
+        return num * 1e4
+    return num
 
 
 def _short_col_name(col: str) -> str:
@@ -214,23 +234,7 @@ def extract_from_tables(tables: list, stock_code: str = "", stock_name: str = ""
     return fragments
 
 
-# ── SQLite 持久化（stock_radar.db 的 chart_fragments 表，设计文档定义） ──
-
-_DDL = """
-CREATE TABLE IF NOT EXISTS chart_fragments (
-    id            TEXT PRIMARY KEY,
-    dialog_uuid   TEXT NOT NULL,
-    chart_type    TEXT NOT NULL,
-    stock_code    TEXT DEFAULT '',
-    stock_name    TEXT DEFAULT '',
-    title         TEXT DEFAULT '',
-    data_json     TEXT NOT NULL,
-    annotations   TEXT DEFAULT '[]',
-    source        TEXT DEFAULT 'rule',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
-CREATE INDEX IF NOT EXISTS idx_chart_fragments_dialog ON chart_fragments(dialog_uuid);
-"""
+# ── chart_fragments 持久化（stock_radar.db，DDL 单一事实源 utils/db_schema） ──
 
 
 def get_chart_db_path() -> str:
@@ -248,7 +252,9 @@ def _chart_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
     try:
-        conn.executescript(_DDL)  # 多语句 DDL 需 executescript
+        from utils.db_schema.migrator import ensure_schema
+        from utils.db_schema.tables.stock_radar import TABLES
+        ensure_schema(conn, [t for t in TABLES if t.name == "chart_fragments"])
         yield conn
         conn.commit()
     finally:
@@ -278,6 +284,116 @@ def insert_fragments(fragments: list[dict]) -> int:
 
 
 _STOCK_CODE_RE = re.compile(r"\d{6}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 技术面图板（tech_panel）：基于本地 K 线库的报告增强图卡
+#
+# 报告归集 @@CHART@@ 标记时，对涉及的主股票尝试生成一张交互式
+# 技术面图板（前端 Tab 切换 MACD/RSI/KDJ/BOLL/DPO + 金叉死叉/
+# 突破信号标注）。数据来自本地 market_data.db（近 250 个交易日），
+# 指标与信号由 /api/chart/kline 与 /api/chart/signals 在前端渲染时
+# 拉取，本函数只负责"探测 + 生成轻量 fragment 入库"。
+# 标的类型（个股 / 指数）由 data_json.market 显式携带，绝不由裸码猜表名。
+# 有枣打两棍子：本地无 K 线数据或任何异常 → 返回 None，不影响报告。
+# ═══════════════════════════════════════════════════════════════
+
+_TECH_PANEL_MIN_BARS = 60   # 本地少于 60 根日 K 不生成（画出来没意义）
+
+# 指数代码形态：纯数字（000001/399001/930914）或「字母+数字」（H11001/H30269）
+# 或纯字母（HSI/HSTECH）。个股仍沿用严格 6 位数字校验。
+_INDEX_CODE_RE = re.compile(r"[A-Za-z0-9]{2,10}")
+
+
+def has_local_kline(code: str, min_bars: int = _TECH_PANEL_MIN_BARS,
+                    market: str = None) -> bool:
+    """探测本地日线是否够画图板。
+
+    market='INDEX' 时查 index_daily（指数），否则查 stock_daily（个股/ETF/板块）。
+    必须显式区分：`000001` 在两张表里是两个不同标的（上证指数 / 平安银行）。
+    """
+    code = str(code or "").strip()
+    if not code:
+        return False
+    if market == "INDEX":
+        if not _INDEX_CODE_RE.fullmatch(code):
+            return False
+        try:
+            from utils.cache.market_data_db import get_index_daily_count
+            return get_index_daily_count(code) >= min_bars
+        except Exception:
+            return False
+    if not re.fullmatch(r"\d{5,6}", code):
+        return False
+    try:
+        from utils.cache.market_data_db import get_stock_daily_count
+        return get_stock_daily_count(code) >= min_bars
+    except Exception:
+        return False
+
+
+def ensure_tech_panel(code: str, name: str = "", dialog_uuid: str = "",
+                      market: str = None) -> Optional[str]:
+    """为股票/指数生成（或复用已有的）技术面图板 fragment，返回 fragment id。
+
+    - market: 'INDEX' 走 index_daily、名称取 index_info；'STOCK' 走 stock_daily、
+      名称取 stock_info；None 时按 `resolve_symbol_market(code, name)` 自动判定
+      （name_hint 命中指数名即可识别指数，如 fragment 的 stock_name='上证指数'）。
+    - data_json 会带上 market，前端据此把 `market=INDEX` 传给 /api/chart/kline
+      与 /api/chart/signals —— 否则同码会被解析成个股。
+    - 幂等：insert_fragments 按 (stock_code, title, data_json) 去重，同参数
+      重复调用返回既有记录。本地 K 线数据不足或异常时返回 None。
+    """
+    code = str(code or "").strip()
+    market = str(market or "").strip().upper()
+    if market not in ("INDEX", "STOCK"):
+        try:
+            from utils.cache.market_data_db import resolve_symbol_market
+            market = resolve_symbol_market(code, name)
+        except Exception:
+            market = "STOCK"
+    if not has_local_kline(code, market=market):
+        return None
+    try:
+        if not name:
+            try:
+                if market == "INDEX":
+                    from utils.cache.market_data_db import get_index_name
+                    name = str(get_index_name(code) or "")
+                else:
+                    from utils.cache.market_data_db import get_stock_info
+                    info = get_stock_info(code)
+                    if info and info.get("name"):
+                        name = str(info["name"])
+            except Exception:
+                name = ""
+        fragment = {
+            "id": str(uuid.uuid4()),
+            "dialog_uuid": dialog_uuid,
+            "chart_type": "tech_panel",
+            "stock_code": code,
+            "stock_name": name,
+            "title": f"{name or code} 技术面图板",
+            # 前端按 data_json.market 决定拉取通道：
+            # /api/chart/kline/{code}?days=250&market=INDEX，指数走 index_daily
+            "data_json": json.dumps({"code": code, "name": name, "days": 250,
+                                     "market": market},
+                                    ensure_ascii=False),
+            "annotations": "[]",
+            "source": "enhanced",
+        }
+        inserted = insert_fragments([fragment])
+        if inserted:
+            return fragment["id"]
+        # 已存在（幂等命中）→ 查回既有 id
+        with _chart_db() as conn:
+            row = conn.execute(
+                "SELECT id FROM chart_fragments WHERE stock_code=? AND title=? AND data_json=?",
+                (fragment["stock_code"], fragment["title"], fragment["data_json"]),
+            ).fetchone()
+            return row["id"] if row else None
+    except Exception:
+        return None
 
 
 def extract_from_tool_output(tool_name: str, content: str, dialog_uuid: str = "") -> list[str]:

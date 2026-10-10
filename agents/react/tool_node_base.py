@@ -13,9 +13,17 @@ from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from agents.react.tool_reuse import find_reusable_tool_call, tool_signature
-from agents.react.utils import PerToolRateLimiter, _compress_tool_output, _trim_tool_output
+from agents.react.utils import (
+    PerToolRateLimiter,
+    _compress_tool_output,
+    _hard_truncate_keep_both_ends,
+    _trim_tool_output,
+)
+from agents.react import tool_compressor
 from config import Config
 from memory.metadata import extract_tool_metadata, push_tool_extract
+from utils.cancellation import raise_if_cancelled
+from utils.llm_factory import _set_recorder_label
 from utils.logger import ensure_radar
 
 
@@ -35,8 +43,30 @@ class BaseToolNode:
     def trim_tool_output(self, tool_name: str, content: str) -> str:
         return _trim_tool_output(tool_name, content)
 
-    async def compress_tool_output(self, tool_name: str, content: str) -> str:
-        return await _compress_tool_output(tool_name, content, self._logger)
+    async def compress_tool_output(self, tool_name: str, content: str, user_goal: str = "") -> str:
+        """压缩前加一道「首批预热」门闩：同一次 run 内只让第一条压缩调用先单独跑。
+
+        背景（2026-09-28 实测）：一轮内多条超长输出的压缩调用并发发出时全部冷启动
+        （provider prompt cache 全 miss）；让第一条先完成（写入缓存）再放行其余，
+        可回收首批的冷启动损失。门闩挂在 exec_state 上（每次 run 全新实例），
+        run 内只生效一次；event 置位后走快路径，零额外开销。
+        """
+        event = getattr(self.exec_state, "_compress_warm_event", None)
+        if event is None:
+            event = asyncio.Event()
+            self.exec_state._compress_warm_event = event
+        if event.is_set():
+            # 已暖：直接并行
+            return await _compress_tool_output(tool_name, content, self._logger, user_goal=user_goal)
+        if not getattr(self.exec_state, "_compress_warm_claimed", False):
+            # 同 tick 内「检查 + 置位」无竞态（asyncio 单线程）；首条独占执行
+            self.exec_state._compress_warm_claimed = True
+            try:
+                return await _compress_tool_output(tool_name, content, self._logger, user_goal=user_goal)
+            finally:
+                event.set()
+        await event.wait()
+        return await _compress_tool_output(tool_name, content, self._logger, user_goal=user_goal)
 
     async def _call_tool(self, tool, args: dict, config: RunnableConfig | None):
         if hasattr(tool, "ainvoke"):
@@ -83,6 +113,8 @@ class BaseToolNode:
                 return ToolMessage(content=content, name=tool_name, tool_call_id=call_id), True
 
         raw_output = None
+        compress_stages = []
+        compress_metrics = None
         tool = tools_by_name.get(tool_name)
         if tool is None:
             content = f"执行失败: 未找到工具 {tool_name}"
@@ -116,28 +148,111 @@ class BaseToolNode:
                 except Exception:
                     pass
 
+                # ── 规则压缩（Step 2）：off/shadow/on 三态，先于 trim。
+                #    shadow=只计算不采用（对比落盘），on=采用规则输出；异常静默回退原文。
+                rule_raw_len = len(content)
+                rule_raw_content = content
+                rule_output = None
+                rule_mode = tool_compressor.get_mode(tool_name)
+                rule_len = None
+                rule_lossy = False
+                if rule_mode != tool_compressor.MODE_OFF:
+                    rule_candidate = tool_compressor.compress(tool_name, tool_args, content)
+                    if (
+                        isinstance(rule_candidate, str)
+                        and rule_candidate != content
+                        and len(rule_candidate) < len(content)
+                    ):
+                        rule_len = len(rule_candidate)
+                        rule_output = rule_candidate
+                        rule_lossy = tool_compressor.is_lossy_output(tool_name, rule_candidate)
+                        if rule_mode == tool_compressor.MODE_ON and not rule_lossy:
+                            raw_output = content
+                            content = rule_candidate
+                            compress_stages.append("rule")
+                            self._logger.debug(
+                                "R", f"规则压缩: {tool_name} {rule_raw_len}→{rule_len}字符"
+                            )
+                        elif rule_mode == tool_compressor.MODE_ON:
+                            self._logger.info(
+                                "R", f"规则压缩有损，回落 LLM 流程: {tool_name} {rule_raw_len}→{rule_len}字符"
+                            )
+
                 original_len = len(content)
                 content = self.trim_tool_output(tool_name, content)
                 if len(content) < original_len:
                     raw_output = content
+                    compress_stages.append("trim")
                     self._logger.debug("R", f"工具输出精简: {tool_name} {original_len}→{len(content)}字符")
 
                 hard_limit = runtime_config.TOOL_HARD_TRUNCATE_CHARS
                 if hard_limit > 0 and len(content) > hard_limit:
                     raw_output = raw_output or content
-                    content = content[:hard_limit] + "\n...[过长的数据没意义,已截断]"
+                    # 保留两头（头部字段名 + 尾部最近数据）并标注省略量。
+                    # 原为 content[:hard_limit] 纯头截断，会把按时间升序的序列
+                    # （如 get_etf_history 的 K 线）最近一段砍掉 → 报告误报「未覆盖当日」。
+                    content = _hard_truncate_keep_both_ends(content, hard_limit)
+                    compress_stages.append("hard")
 
                 threshold = runtime_config.get_tool_compress_threshold(tool_name)
                 self._logger.debug("R", f"工具输出阈值检查: {tool_name} len={len(content)} threshold={threshold}")
+                llm_used = False
                 if threshold > 0 and len(content) > threshold:
+                    llm_used = True
                     raw_output = raw_output or content
-                    content = await self.compress_tool_output(tool_name, content)
+                    compress_stages.append("llm")
+                    # 传入用户目标：压缩 prompt 据此优先保留与目标相关的数据
+                    # （原实现从未传该参数，goal_hint 一直是空的）
+                    try:
+                        user_goal = str(state.get("input") or "")
+                    except Exception:
+                        user_goal = ""
+                    # 压缩是一次独立的 LLM 调用；它不经过 agent 节点的调用包装，
+                    # 若不刷新 label，会沿用 agent 的标签（日志里被算进 agent 成本）。
+                    # 重试由 _compress_tool_output 内部的 ainvoke_with_retry 负责。
+                    _set_recorder_label(config, "react-tool-compress")
+                    content = await self.compress_tool_output(tool_name, content, user_goal=user_goal)
 
                 # 压缩/截断后统一追加图表提示，确保标记始终在最终工具输出中
                 if chart_hint:
                     content = content + chart_hint
+
+                # ── 压缩埋点：记录压缩前/后长度与方式，供事后按工具分析。
+                #    raw_len 也可从 steps.output（原文）反推，此处一并落库便于单条 SQL 定位。
+                compress_metrics = {
+                    "raw_len": rule_raw_len,
+                    "final_len": len(content),
+                    "compress_method": "+".join(compress_stages) or "none",
+                }
+
+                if rule_mode != tool_compressor.MODE_OFF and rule_len is not None:
+                    tool_compressor.log_shadow_event(
+                        tool_name, tool_args, rule_mode, rule_raw_len, rule_len,
+                        len(content), llm_used, threshold,
+                        raw_content=rule_raw_content,
+                        rule_content=rule_output or "",
+                        final_content=content,
+                        rule_lossy=rule_lossy,
+                    )
             except Exception as e:
                 content = f"执行失败: {e}"
+
+        # ── 压缩埋点回填：tool step 的 event_run_id == exec_state 该 ToolCall 的 tool_call_id ──
+        if compress_metrics is not None:
+            try:
+                from utils.agent_trace.core import get_active_recorder
+                rec = get_active_recorder()
+                if rec is not None:
+                    tool_input_str = str(tool_args)
+                    run_id = None
+                    for call in reversed(exec_state.tool_calls):
+                        if call.tool_name == tool_name and call.tool_input == tool_input_str:
+                            run_id = call.tool_call_id
+                            break
+                    if run_id:
+                        rec.update_tool_step_metrics(run_id, compress_metrics)
+            except Exception:
+                pass
 
         if raw_output is not None:
             if not exec_state.update_tool_call_by_id(call_id, content, raw_output=raw_output):
@@ -151,6 +266,7 @@ class BaseToolNode:
 
     async def __call__(self, state: dict, config: RunnableConfig | None = None) -> dict:
         """执行最后一条 AIMessage 中的 tool_calls。"""
+        raise_if_cancelled()
         messages = state["messages"]
         last_msg = messages[-1]
         tools_by_name = {tool.name: tool for tool in self.tools}

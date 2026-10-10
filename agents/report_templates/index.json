@@ -126,17 +126,32 @@
       "description": "梳理当前市场热点事件，分析对A股的潜在影响，识别受益/受损板块和标的",
       "path": "hot_news/template.json",
       "enabled": true
+    },
+    "quick_lookup": {
+      "name": "速览",
+      "description": "极简取数：只回答用户明确要的字段（如最新股价 / 股价+一条新闻），不展开分析",
+      "path": "quick_lookup/template.json",
+      "enabled": true
+    },
+    "asset_allocation": {
+      "name": "多标的取舍与配置",
+      "description": "面向多个候选方向（个股/ETF/板块/商品可跨资产）之间的取舍排序和资金分配，输出排序、仓位比例和分批节奏",
+      "path": "asset_allocation/template.json",
+      "enabled": true
+    },
+    "cause_attribution": {
+      "name": "归因解释",
+      "description": "面向『为什么涨/跌/异动/怎么计算』的归因问题，输出主因排序、传导机制、持续性判断和对持仓的影响",
+      "path": "cause_attribution/template.json",
+      "enabled": true
     }
   },
   "skills": {
-    "stock_query": {
-      "enabled": false
+    "stock_analysis": {
+      "enabled": true
     },
-    "technical_analysis": {
-      "enabled": false
-    },
-    "sentiment_analysis": {
-      "enabled": false
+    "web_search": {
+      "enabled": true
     },
     "aggregation": {
       "enabled": false
@@ -145,15 +160,15 @@
       "enabled": false
     },
     "money_flow": {
-      "enabled": false
+      "enabled": true
     },
     "margin_trading": {
       "enabled": false
     },
-    "sector_rotation": {
-      "enabled": false
+    "macro_data": {
+      "enabled": true
     },
-    "risk_metrics": {
+    "sector_rotation": {
       "enabled": false
     },
     "block_trades": {
@@ -169,58 +184,88 @@
       "enabled": true
     },
     "mx_moni": {
-      "enabled": true
+      "enabled": false
     },
     "mx_zixuan": {
+      "enabled": false
+    },
+    "announcement_search": {
       "enabled": true
-    }
-  },
-  "capability_mapping": {
-    "market_data": {
-      "skills": [
-        "mx_data",
-        "stock_query"
-      ],
-      "description": "行情数据：价格、涨跌幅、成交额、换手率等基础字段"
+    },
+    "bond_env": {
+      "enabled": true
+    },
+    "dividend_env": {
+      "enabled": true
+    },
+    "fund_query": {
+      "enabled": true
+    },
+    "gold_env": {
+      "enabled": true
+    },
+    "cu_env": {
+      "enabled": true
+    },
+    "hog_env": {
+      "enabled": true
+    },
+    "hang_seng_env": {
+      "enabled": true
+    },
+    "hithink_market_query": {
+      "enabled": true
+    },
+    "hithink_sector_selector": {
+      "enabled": true
     },
     "news_search": {
-      "skills": [
-        "mx_search",
-        "stock_query",
-        "sentiment_analysis"
-      ],
-      "description": "新闻/公告搜索：最新新闻、研报、公告和情感分析（stock_query 的 search_stock_news 支持多搜索引擎聚合）"
+      "enabled": true
     },
-    "stock_screening": {
-      "skills": [
-        "mx_xuangu"
-      ],
-      "description": "选股筛选：多条件筛选、行业筛选、概念股筛选"
+    "portfolio_query": {
+      "enabled": true
     },
-    "fund_flow": {
-      "skills": [
-        "mx_data",
-        "money_flow"
-      ],
-      "description": "资金流向：主力资金、北向资金、融资融券、龙虎榜"
+    "strategy_research": {
+      "enabled": true
     },
-    "technical_indicator": {
-      "skills": [
-        "mx_data",
-        "technical_analysis"
-      ],
-      "description": "技术指标：MACD、RSI、KDJ、均线系统、布林带等"
+    "market_review": {
+      "enabled": true
     },
-    "valuation": {
-      "skills": [
-        "mx_data",
-        "valuation"
-      ],
-      "description": "估值分析：PE/PB历史分位、估值对比、PEG计算"
+    "hithink_astock_selector": {
+      "enabled": true
     },
-    "user_input": {
-      "skills": [],
-      "description": "用户提供的信息：成本价、仓位、风险偏好等，无需工具调用"
+    "hithink_basicinfo_query": {
+      "enabled": false
+    },
+    "hithink_business_query": {
+      "enabled": true
+    },
+    "hithink_etf_selector": {
+      "enabled": true
+    },
+    "hithink_event_query": {
+      "enabled": true
+    },
+    "hithink_finance_query": {
+      "enabled": true
+    },
+    "hithink_industry_query": {
+      "enabled": true
+    },
+    "hithink_insresearch_query": {
+      "enabled": true
+    },
+    "hithink_macro_query": {
+      "enabled": true
+    },
+    "hithink_management_query": {
+      "enabled": true
+    },
+    "hithink_zhishu_query": {
+      "enabled": true
+    },
+    "report_search": {
+      "enabled": true
     }
   }
 }

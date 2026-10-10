@@ -1,0 +1,22 @@
+{
+  "id": "macro",
+  "display_name": "宏观仪表盘",
+  "description": "宏观指标卡、流动性判断、政策取向与风险",
+  "scenario_tag": "宏观仪表盘",
+  "checklist_dimensions": ["流动性", "物价与景气", "增长动能", "政策取向"],
+  "sections": [
+    {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "liquidity", "renderer": "text_block", "fields": ["liquidity_status", "policy_stance"]},
+    {"id": "macro_snapshot", "renderer": "index_cards", "fields": ["macro_snapshot"]},
+    {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "checklist", "renderer": "checklist", "fields": ["checklist"]},
+    {"id": "risk_priority", "renderer": "risk_list", "fields": ["risk_priority"]},
+    {"id": "next_watch", "renderer": "watch_chips", "fields": ["next_watch"]}
+  ],
+  "llm_fields": [
+    {"name": "macro_snapshot", "type": "list", "description": "宏观核心指标卡数据，从报告/工具输出提取最新值与前值（禁止编造数字，金十系指标须带数据截止期）", "example": "[{\"name\":\"M2 同比\",\"value\":6.1,\"prev\":7.7,\"change\":-1.6,\"date\":\"2026-08-31\"},{\"name\":\"LPR 1年期\",\"value\":3.0,\"prev\":3.0,\"change\":0,\"date\":\"2026-08-20\"}]"},
+    {"name": "liquidity_status", "type": "str", "description": "流动性判断：宽松 / 中性 / 收紧（基于 M2/LPR 等指标方向）", "example": "宽松"},
+    {"name": "policy_stance", "type": "str", "description": "货币政策取向一句话解读（≤40字）", "example": "货币适度宽松，M2 增速回落但 LPR 维持低位"}
+  ]
+}

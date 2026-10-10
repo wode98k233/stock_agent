@@ -34,6 +34,8 @@ _ENV_MAP = {
     # 搜索引擎
     "SERPAPI_API_KEYS":                 ("SERPAPI_API_KEYS", "", str),
     "TAVILY_API_KEYS":                  ("TAVILY_API_KEYS", "", str),
+    # 免 Key 境外托管搜索源（Parallel / Exa）总开关；关闭后查询不发往境外服务
+    "SEARCH_FREE_MCP_ENABLED":          ("SEARCH_FREE_MCP_ENABLED", "true", lambda v: v.lower() == "true"),
     # Longbridge
     "LONGBRIDGE_APP_KEY":               ("LONGBRIDGE_APP_KEY", "", str),
     "LONGBRIDGE_APP_SECRET":            ("LONGBRIDGE_APP_SECRET", "", str),
@@ -52,8 +54,14 @@ _ENV_MAP = {
     "BATCH_SIZE":                       ("BATCH_SIZE", "5", int),
     "MEMORY_ENABLED":                   ("MEMORY_ENABLED", "true", lambda v: v.lower() == "true"),
     "MEMORY_MAX_TOKENS":                ("MEMORY_MAX_TOKENS", "8000", int),
+    # 澄清反问（Web 优先）：classify 后、正式执行前，信息不足时先问最多 5 个问题
+    "CLARIFY_ENABLED":                  ("CLARIFY_ENABLED", "true", lambda v: v.lower() == "true"),
+    "CLARIFY_MAX_QUESTIONS":            ("CLARIFY_MAX_QUESTIONS", "5", int),
+    "CLARIFY_TIMEOUT_SECONDS":          ("CLARIFY_TIMEOUT_SECONDS", "300", int),
     # ReAct
     "REACT_TOOL_CALLS":                 ("REACT_TOOL_CALLS", "25", int),
+    "REACT_SKILL_BATCH_SIZE":           ("REACT_SKILL_BATCH_SIZE", "5", int),
+    "REACT_SKILL_RESELECT_EVERY":       ("REACT_SKILL_RESELECT_EVERY", "1", int),
     "REACT_ENABLE_CONTEXT_COMPACTION":  ("REACT_ENABLE_CONTEXT_COMPACTION", "true", lambda v: v.lower() == "true"),
     "REACT_CONTEXT_RECENT_ROUNDS":      ("REACT_CONTEXT_RECENT_ROUNDS", "0", int),
     "REACT_SUMMARY_TRIGGER_ROUNDS":     ("REACT_SUMMARY_TRIGGER_ROUNDS", "3", int),
@@ -93,6 +101,7 @@ _ENV_MAP = {
     # Web
     "WEB_DEV_RELOAD":                   ("WEB_DEV_RELOAD", "false", lambda v: v.lower() == "true"),
     "WEB_SHOW_TRACE_TOOLS":             ("WEB_SHOW_TRACE_TOOLS", "false", lambda v: v.lower() == "true"),
+    "WEB_DIALOG_AUTO_TITLE":            ("WEB_DIALOG_AUTO_TITLE", "true", lambda v: v.lower() == "true"),
     # 报告
     "REPORT_ENABLE_ANALYSIS_ENGINE":    ("REPORT_ENABLE_ANALYSIS_ENGINE", "true", lambda v: v.lower() == "true"),
     "REPORT_TEMPLATE":                  ("REPORT_TEMPLATE", "standard", str),
@@ -100,11 +109,16 @@ _ENV_MAP = {
     "REPORT_TIME_HORIZON":              ("REPORT_TIME_HORIZON", "short", str),
     "REPORT_MODE":                      ("REPORT_MODE", "fast", str),
     "REPORT_MIN_TOKENS":                ("REPORT_MIN_TOKENS", "3500", int),
+    "REPORT_TECH_PANEL_MAX":            ("REPORT_TECH_PANEL_MAX", "3", int),
     "REPORT_MAX_TOOL_OUTPUT_CHARS":     ("REPORT_MAX_TOOL_OUTPUT_CHARS", "5000", int),
     "REPORT_MAX_NEWS_CHARS":            ("REPORT_MAX_NEWS_CHARS", "1500", int),
     "REPORT_LLM_MODEL":                 ("REPORT_LLM_MODEL", "", str),
     "REPORT_LLM_API_KEY":              ("REPORT_LLM_API_KEY", "", str),
     "REPORT_LLM_API_BASE":             ("REPORT_LLM_API_BASE", "", str),
+    # 报告证据下钻（索引→按序号选择→只载入选中工具全文；默认开启，聚焦注意力）
+    "REPORT_DRILLDOWN_ENABLED":         ("REPORT_DRILLDOWN_ENABLED", "true", lambda v: v.lower() == "true"),
+    "REPORT_DRILLDOWN_MIN_TOOLS":       ("REPORT_DRILLDOWN_MIN_TOOLS", "8", int),
+    "REPORT_DRILLDOWN_MIN_CHARS":       ("REPORT_DRILLDOWN_MIN_CHARS", "12000", int),
     # 仪表盘
     "DASHBOARD_ENABLED":                ("DASHBOARD_ENABLED", "true", lambda v: v.lower() == "true"),
     "DASHBOARD_LLM_ENABLED":            ("DASHBOARD_LLM_ENABLED", "true", lambda v: v.lower() == "true"),
@@ -120,12 +134,17 @@ _ENV_MAP = {
     "TOOL_OUTPUT_COMPRESS_THRESHOLD":   ("TOOL_OUTPUT_COMPRESS_THRESHOLD", "3000", int),
     "TOOL_HARD_TRUNCATE_CHARS":         ("TOOL_HARD_TRUNCATE_CHARS", "8000", int),
     "TOOL_COMPRESS_THRESHOLDS":         ("TOOL_COMPRESS_THRESHOLDS", "", str),
+    "TOOL_RULE_COMPRESS_ENABLED":       ("TOOL_RULE_COMPRESS_ENABLED", "false", lambda v: v.lower() == "true"),
+    "TOOL_RULE_COMPRESS_POLICY":        ("TOOL_RULE_COMPRESS_POLICY", "", str),
     "INFO_ACCUMULATOR_COMPRESS_THRESHOLD": ("INFO_ACCUMULATOR_COMPRESS_THRESHOLD", "6000", int),
     # Checkpoint
     "CHECKPOINT_BACKEND":               ("CHECKPOINT_BACKEND", "memory", str),
     "CHECKPOINT_PG_URI":                ("CHECKPOINT_PG_URI", "", str),
     # 数据源
     "DATASOURCE_MAX_FAILS":             ("DATASOURCE_MAX_FAILS", "5", int),
+    # 数据源优先级自定义顺序（逗号分隔的源名，如 "hithink,akshare,mx_data"）；
+    # 留空=用各源内置 priority。可在「系统配置 → 数据源优先级」里拖拽调整。
+    "DATASOURCE_PRIORITY_ORDER":        ("DATASOURCE_PRIORITY_ORDER", "", str),
     "AKSHARE_ENABLE_EASTMONEY_PATCH":   ("AKSHARE_ENABLE_EASTMONEY_PATCH", "true", lambda v: v.lower() == "true"),
     # Web 服务
     "WEB_HOST":                         ("WEB_HOST", "127.0.0.1", str),
@@ -133,6 +152,52 @@ _ENV_MAP = {
     "WEB_MAX_WORKERS":                  ("WEB_MAX_WORKERS", "8", int),
     # 系统监控
     "MONITOR_INTERVAL":                 ("MONITOR_INTERVAL", "2", int),
+    # 盯盘告警
+    "MARKET_MONITOR_ENABLED":           ("MARKET_MONITOR_ENABLED", "false", lambda v: v.lower() == "true"),
+    "MARKET_MONITOR_INTERVAL_S":        ("MARKET_MONITOR_INTERVAL_S", "60", int),
+    "MARKET_DASHBOARD_ENABLED":         ("MARKET_DASHBOARD_ENABLED", "true", lambda v: v.lower() == "true"),
+    "MARKET_DASHBOARD_REFRESH_S":       ("MARKET_DASHBOARD_REFRESH_S", "10", int),
+    "MARKET_DASHBOARD_ALERT_LIMIT":     ("MARKET_DASHBOARD_ALERT_LIMIT", "30", int),
+    "MARKET_DASHBOARD_NEWS_LIMIT":      ("MARKET_DASHBOARD_NEWS_LIMIT", "20", int),
+    # 全局总览大屏（研究分析 → 全局总览）
+    "OVERVIEW_ENABLED":                 ("OVERVIEW_ENABLED", "true", lambda v: v.lower() == "true"),
+    "OVERVIEW_BLOCK_CACHE_TTL_S":       ("OVERVIEW_BLOCK_CACHE_TTL_S", "60", int),
+    "OVERVIEW_MARKET_REFRESH_S":        ("OVERVIEW_MARKET_REFRESH_S", "60", int),
+    "OVERVIEW_RUNTIME_REFRESH_S":       ("OVERVIEW_RUNTIME_REFRESH_S", "10", int),
+    "OVERVIEW_SCAN_TTL_S":              ("OVERVIEW_SCAN_TTL_S", "600", int),
+    "OVERVIEW_SCAN_DAYS":               ("OVERVIEW_SCAN_DAYS", "120", int),
+    "OVERVIEW_SCAN_STRATEGIES":         ("OVERVIEW_SCAN_STRATEGIES", "", str),
+    "OVERVIEW_SCAN_REFRESH_BUDGET_S":   ("OVERVIEW_SCAN_REFRESH_BUDGET_S", "20", float),
+    "OVERVIEW_SCAN_REFRESH_MAX":        ("OVERVIEW_SCAN_REFRESH_MAX", "6", int),
+    "OVERVIEW_MACRO_INDICATORS":        ("OVERVIEW_MACRO_INDICATORS", "", str),
+    "OVERVIEW_WATCHLIST_BUDGET_S":      ("OVERVIEW_WATCHLIST_BUDGET_S", "8", float),
+    "OVERVIEW_TOKEN_DAYS":              ("OVERVIEW_TOKEN_DAYS", "14", int),
+    "OVERVIEW_TOKEN_MODEL":             ("OVERVIEW_TOKEN_MODEL", "DeepSeek v4.1 Flash", str),
+    "OVERVIEW_TOKEN_PRICE_IN":          ("OVERVIEW_TOKEN_PRICE_IN", "2.0", float),
+    "OVERVIEW_TOKEN_PRICE_OUT":         ("OVERVIEW_TOKEN_PRICE_OUT", "8.0", float),
+    "OVERVIEW_TOKEN_PRICE_CACHED":      ("OVERVIEW_TOKEN_PRICE_CACHED", "0.2", float),
+    # 后台巡检（启动后异步跑，不阻塞启动；first_delay 用于错开路由导入/warmup）
+    "BACKGROUND_SCANS_ENABLED":         ("BACKGROUND_SCANS_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_STORAGE_ENABLED":             ("SCAN_STORAGE_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_STORAGE_FIRST_DELAY_S":       ("SCAN_STORAGE_FIRST_DELAY_S", "45", int),
+    "SCAN_STORAGE_INTERVAL_MINUTES":    ("SCAN_STORAGE_INTERVAL_MINUTES", "720", int),
+    "SCAN_THESIS_ENABLED":              ("SCAN_THESIS_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_THESIS_FIRST_DELAY_S":        ("SCAN_THESIS_FIRST_DELAY_S", "90", int),
+    "SCAN_THESIS_INTERVAL_MINUTES":     ("SCAN_THESIS_INTERVAL_MINUTES", "240", int),
+    "SCAN_CROWDING_ENABLED":            ("SCAN_CROWDING_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_CROWDING_FIRST_DELAY_S":      ("SCAN_CROWDING_FIRST_DELAY_S", "150", int),
+    "SCAN_CROWDING_INTERVAL_MINUTES":   ("SCAN_CROWDING_INTERVAL_MINUTES", "1440", int),
+    "SCAN_SHORTLINE_ENABLED":           ("SCAN_SHORTLINE_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_SHORTLINE_FIRST_DELAY_S":     ("SCAN_SHORTLINE_FIRST_DELAY_S", "180", int),
+    "SCAN_SHORTLINE_INTERVAL_MINUTES":  ("SCAN_SHORTLINE_INTERVAL_MINUTES", "60", int),
+    # K 线保活：把「持仓 ∪ 自选」的日线补到最近已完成交易日。
+    # 没有它时 K 线覆盖会静默腐烂（2026-09-30 实测掉到个位数），大屏策略信号
+    # 大面积「数据截止 N 天前」。首次延迟放在最后，避免启动期与其它作业抢网络。
+    "SCAN_KLINE_ENABLED":               ("SCAN_KLINE_ENABLED", "true", lambda v: v.lower() == "true"),
+    "SCAN_KLINE_FIRST_DELAY_S":         ("SCAN_KLINE_FIRST_DELAY_S", "240", int),
+    "SCAN_KLINE_INTERVAL_MINUTES":      ("SCAN_KLINE_INTERVAL_MINUTES", "60", int),
+    "SCAN_KLINE_BUDGET_S":              ("SCAN_KLINE_BUDGET_S", "120", int),
+    "SCAN_KLINE_MAX_CODES":             ("SCAN_KLINE_MAX_CODES", "200", int),
     # 记忆系统
     "JIEBA_ENABLED":                    ("JIEBA_ENABLED", "true", lambda v: v.lower() == "true"),
     "STOCK_MEMORY_BACKEND":             ("STOCK_MEMORY_BACKEND", "auto", str),
@@ -142,7 +207,13 @@ _ENV_MAP = {
     "STOCK_MEMORY_API_KEY":             ("STOCK_MEMORY_API_KEY", "", str),
     "STOCK_MEMORY_API_BASE":            ("STOCK_MEMORY_API_BASE", "", str),
     "MEMORY_RETRIEVAL_TOP_K":           ("MEMORY_RETRIEVAL_TOP_K", "8", int),
-    "MEMORY_MAX_PROMPT_TOKENS":         ("MEMORY_MAX_PROMPT_TOKENS", "3000", int),
+    "MEMORY_MAX_PROMPT_TOKENS":         ("MEMORY_MAX_PROMPT_TOKENS", "1500", int),
+    "MEMORY_MAX_PROMPT_CHARS":          ("MEMORY_MAX_PROMPT_CHARS", "6000", int),
+    "MEMORY_MAX_CHUNKS_PER_GROUP":      ("MEMORY_MAX_CHUNKS_PER_GROUP", "6", int),
+    "MEMORY_CHUNK_MAX_CHARS":           ("MEMORY_CHUNK_MAX_CHARS", "1000", int),
+    "MEMORY_MIN_SIMILARITY":            ("MEMORY_MIN_SIMILARITY", "0.30", float),
+    "MEMORY_SIMILARITY_MARGIN":         ("MEMORY_SIMILARITY_MARGIN", "0.12", float),
+    "MEMORY_PROFILE_SEMANTIC":          ("MEMORY_PROFILE_SEMANTIC", "true", lambda v: v.lower() == "true"),
     "MEMORY_EPISODIC_RETENTION_DAYS":   ("MEMORY_EPISODIC_RETENTION_DAYS", "90", int),
     "MEMORY_CONFIDENCE_THRESHOLD":      ("MEMORY_CONFIDENCE_THRESHOLD", "0.4", float),
     "MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES": ("MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES", "60", int),
@@ -175,6 +246,7 @@ class Config:
     # 搜索引擎配置（逗号分隔多个 Key）
     SERPAPI_API_KEYS = os.getenv("SERPAPI_API_KEYS", "")
     TAVILY_API_KEYS = os.getenv("TAVILY_API_KEYS", "")
+    SEARCH_FREE_MCP_ENABLED = os.getenv("SEARCH_FREE_MCP_ENABLED", "true").lower() == "true"
 
     # Longbridge 配置
     LONGBRIDGE_APP_KEY = os.getenv("LONGBRIDGE_APP_KEY", "")
@@ -193,13 +265,31 @@ class Config:
     CACHE_PREFIX_ENABLED = os.getenv("CACHE_PREFIX_ENABLED", "false").lower() == "true"
     CACHE_PREFIX_CONTENT = os.getenv("CACHE_PREFIX_CONTENT", "")
 
+    # A8 语义缓存 + 模型路由（默认关闭灰度，配置面板可开）
+    LLM_CACHE_ENABLED = os.getenv("LLM_CACHE_ENABLED", "false").lower() == "true"
+    LLM_CACHE_TTL_MAP = os.getenv("LLM_CACHE_TTL_MAP", '{"market":1800,"sector_intraday":0,"sector_offhours":14400,"methodology":604800,"data_query":0}')
+    LLM_CACHE_CATEGORY_MAP = os.getenv("LLM_CACHE_CATEGORY_MAP", '{"market_quick":"market","market_overview":"market","sector_analysis":"sector","stock_analysis":"sector","methodology":"methodology","data_query":"data_query","default":"sector"}')
+    LLM_ROUTING_ENABLED = os.getenv("LLM_ROUTING_ENABLED", "false").lower() == "true"
+    LLM_ROUTING_MAP = os.getenv("LLM_ROUTING_MAP", '{"rules":[{"match":{"scenario":["market_quick","data_query"]},"tier":"fast"},{"match":{"label":["report_enhance","deep_research","debate"]},"tier":"strong"},{"match":{"purpose":["compress","judge"]},"tier":"fast"}],"default":"standard"}')
+    LLM_TIER_FAST_MODEL = os.getenv("LLM_TIER_FAST_MODEL", "")
+    LLM_TIER_STANDARD_MODEL = os.getenv("LLM_TIER_STANDARD_MODEL", "")
+    LLM_TIER_STRONG_MODEL = os.getenv("LLM_TIER_STRONG_MODEL", "")
+
     # Agent 通用配置
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
     MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
     MEMORY_MAX_TOKENS = int(os.getenv("MEMORY_MAX_TOKENS", "8000"))
+    # 澄清反问（Web）：classify 后信息不足时先问最多 5 个问题；超时按推荐选项继续
+    CLARIFY_ENABLED = os.getenv("CLARIFY_ENABLED", "true").lower() == "true"
+    CLARIFY_MAX_QUESTIONS = int(os.getenv("CLARIFY_MAX_QUESTIONS", "5"))
+    CLARIFY_TIMEOUT_SECONDS = int(os.getenv("CLARIFY_TIMEOUT_SECONDS", "300"))
 
     # ReAct 模式配置（LangGraph recursion_limit：每个 LLM 调用 + 每个工具调用各算 1 步）
     REACT_TOOL_CALLS = int(os.getenv("REACT_TOOL_CALLS", "25"))
+    # 一次装载候选池前 N 个技能的工具+L1（<=0 表示全量；=1 即旧的单 active 行为）
+    REACT_SKILL_BATCH_SIZE = int(os.getenv("REACT_SKILL_BATCH_SIZE", "5"))
+    # 每 N 轮工具后回 router 重新组批（中途换批；<=0 关闭）
+    REACT_SKILL_RESELECT_EVERY = int(os.getenv("REACT_SKILL_RESELECT_EVERY", "1"))
     REACT_ENABLE_CONTEXT_COMPACTION = os.getenv("REACT_ENABLE_CONTEXT_COMPACTION", "true").lower() == "true"
     REACT_CONTEXT_RECENT_ROUNDS = int(os.getenv("REACT_CONTEXT_RECENT_ROUNDS", "0"))
     REACT_SUMMARY_TRIGGER_ROUNDS = int(os.getenv("REACT_SUMMARY_TRIGGER_ROUNDS", "3"))
@@ -252,6 +342,9 @@ class Config:
     # 界面：侧边栏显示溯源工具（回答溯源/日志关联面板），默认隐藏（面向开发者的调试功能）
     WEB_SHOW_TRACE_TOOLS = os.getenv("WEB_SHOW_TRACE_TOOLS", "false").lower() == "true"
 
+    # 界面：首轮对话由 classify 用 LLM 生成会话标题并回填（仅生成一次，成功后不再覆盖）
+    WEB_DIALOG_AUTO_TITLE = os.getenv("WEB_DIALOG_AUTO_TITLE", "true").lower() == "true"
+
     # 分析框架引擎
     REPORT_ENABLE_ANALYSIS_ENGINE = os.getenv("REPORT_ENABLE_ANALYSIS_ENGINE", "true").lower() == "true"
     REPORT_TEMPLATE = os.getenv("REPORT_TEMPLATE", "standard")
@@ -260,11 +353,16 @@ class Config:
     REPORT_TIME_HORIZON = os.getenv("REPORT_TIME_HORIZON", "short")
     REPORT_MODE = os.getenv("REPORT_MODE", "fast")
     REPORT_MIN_TOKENS = int(os.getenv("REPORT_MIN_TOKENS", "3500"))
+    REPORT_TECH_PANEL_MAX = int(os.getenv("REPORT_TECH_PANEL_MAX", "3"))
     REPORT_MAX_TOOL_OUTPUT_CHARS = int(os.getenv("REPORT_MAX_TOOL_OUTPUT_CHARS", "5000"))
     REPORT_MAX_NEWS_CHARS = int(os.getenv("REPORT_MAX_NEWS_CHARS", "1500"))
     REPORT_LLM_MODEL = os.getenv("REPORT_LLM_MODEL", "")
     REPORT_LLM_API_KEY = os.getenv("REPORT_LLM_API_KEY", "")
     REPORT_LLM_API_BASE = os.getenv("REPORT_LLM_API_BASE", "")
+    # 报告证据下钻：索引→按序号选择→只载入选中工具全文（默认 true，聚焦注意力）
+    REPORT_DRILLDOWN_ENABLED = os.getenv("REPORT_DRILLDOWN_ENABLED", "true").lower() == "true"
+    REPORT_DRILLDOWN_MIN_TOOLS = int(os.getenv("REPORT_DRILLDOWN_MIN_TOOLS", "8"))
+    REPORT_DRILLDOWN_MIN_CHARS = int(os.getenv("REPORT_DRILLDOWN_MIN_CHARS", "12000"))
     DASHBOARD_ENABLED = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"
     DASHBOARD_LLM_ENABLED = os.getenv("DASHBOARD_LLM_ENABLED", "true").lower() == "true"
     DASHBOARD_MAX_LLM_TOKENS = int(os.getenv("DASHBOARD_MAX_LLM_TOKENS", "2000"))
@@ -278,6 +376,9 @@ class Config:
     TOOL_OUTPUT_COMPRESS_THRESHOLD = int(os.getenv("TOOL_OUTPUT_COMPRESS_THRESHOLD", "3000"))
     TOOL_HARD_TRUNCATE_CHARS = int(os.getenv("TOOL_HARD_TRUNCATE_CHARS", "8000"))
     TOOL_COMPRESS_THRESHOLDS = os.getenv("TOOL_COMPRESS_THRESHOLDS", "")
+    # 工具输出规则压缩（默认关闭；policy 按工具配置 off/shadow/on，例如 {"mx_xuangu_filter":"shadow"}）
+    TOOL_RULE_COMPRESS_ENABLED = os.getenv("TOOL_RULE_COMPRESS_ENABLED", "false").lower() == "true"
+    TOOL_RULE_COMPRESS_POLICY = os.getenv("TOOL_RULE_COMPRESS_POLICY", "")
     INFO_ACCUMULATOR_COMPRESS_THRESHOLD = int(os.getenv("INFO_ACCUMULATOR_COMPRESS_THRESHOLD", "6000"))
 
     # Checkpoint 后端
@@ -328,6 +429,8 @@ class Config:
 
     # 数据源
     DATASOURCE_MAX_FAILS = int(os.getenv("DATASOURCE_MAX_FAILS", "5"))
+    # 逗号分隔的数据源名顺序；留空表示用各源内置 priority
+    DATASOURCE_PRIORITY_ORDER = os.getenv("DATASOURCE_PRIORITY_ORDER", "")
 
     # Web 服务
     WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
@@ -336,6 +439,58 @@ class Config:
 
     # 系统监控
     MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "2"))
+
+    # 盯盘告警（默认关闭：升级后行为与现状完全一致）
+    MARKET_MONITOR_ENABLED = os.getenv("MARKET_MONITOR_ENABLED", "false").lower() == "true"
+    MARKET_MONITOR_INTERVAL_S = int(os.getenv("MARKET_MONITOR_INTERVAL_S", "60"))
+
+    # 市场情绪面板（方案 C：右栏温度计 + 异动快报）
+    MARKET_DASHBOARD_ENABLED = os.getenv("MARKET_DASHBOARD_ENABLED", "true").lower() == "true"
+    MARKET_DASHBOARD_REFRESH_S = int(os.getenv("MARKET_DASHBOARD_REFRESH_S", "10"))
+    MARKET_DASHBOARD_ALERT_LIMIT = int(os.getenv("MARKET_DASHBOARD_ALERT_LIMIT", "30"))
+    MARKET_DASHBOARD_NEWS_LIMIT = int(os.getenv("MARKET_DASHBOARD_NEWS_LIMIT", "20"))
+
+    # 全局总览大屏（研究分析 → 全局总览；默认值即行为）
+    OVERVIEW_ENABLED = os.getenv("OVERVIEW_ENABLED", "true").lower() == "true"
+    OVERVIEW_BLOCK_CACHE_TTL_S = int(os.getenv("OVERVIEW_BLOCK_CACHE_TTL_S", "60"))
+    OVERVIEW_MARKET_REFRESH_S = int(os.getenv("OVERVIEW_MARKET_REFRESH_S", "60"))
+    OVERVIEW_RUNTIME_REFRESH_S = int(os.getenv("OVERVIEW_RUNTIME_REFRESH_S", "10"))
+    OVERVIEW_SCAN_TTL_S = int(os.getenv("OVERVIEW_SCAN_TTL_S", "600"))
+    OVERVIEW_SCAN_DAYS = int(os.getenv("OVERVIEW_SCAN_DAYS", "120"))
+    OVERVIEW_SCAN_STRATEGIES = os.getenv("OVERVIEW_SCAN_STRATEGIES", "")
+    OVERVIEW_SCAN_REFRESH_BUDGET_S = float(os.getenv("OVERVIEW_SCAN_REFRESH_BUDGET_S", "20"))
+    OVERVIEW_SCAN_REFRESH_MAX = int(os.getenv("OVERVIEW_SCAN_REFRESH_MAX", "6"))
+    OVERVIEW_MACRO_INDICATORS = os.getenv("OVERVIEW_MACRO_INDICATORS", "")
+    OVERVIEW_WATCHLIST_BUDGET_S = float(os.getenv("OVERVIEW_WATCHLIST_BUDGET_S", "8"))
+    OVERVIEW_TOKEN_DAYS = int(os.getenv("OVERVIEW_TOKEN_DAYS", "14"))
+    OVERVIEW_TOKEN_MODEL = os.getenv("OVERVIEW_TOKEN_MODEL", "DeepSeek v4.1 Flash")
+    OVERVIEW_TOKEN_PRICE_IN = float(os.getenv("OVERVIEW_TOKEN_PRICE_IN", "2.0"))
+    OVERVIEW_TOKEN_PRICE_OUT = float(os.getenv("OVERVIEW_TOKEN_PRICE_OUT", "8.0"))
+    OVERVIEW_TOKEN_PRICE_CACHED = float(os.getenv("OVERVIEW_TOKEN_PRICE_CACHED", "0.2"))
+
+    # 后台巡检：启动后异步跑（首次延迟错开路由导入与各 warmup，避免 GIL 争抢）
+    BACKGROUND_SCANS_ENABLED = os.getenv("BACKGROUND_SCANS_ENABLED", "true").lower() == "true"
+    SCAN_STORAGE_ENABLED = os.getenv("SCAN_STORAGE_ENABLED", "true").lower() == "true"
+    SCAN_STORAGE_FIRST_DELAY_S = int(os.getenv("SCAN_STORAGE_FIRST_DELAY_S", "45"))
+    SCAN_STORAGE_INTERVAL_MINUTES = int(os.getenv("SCAN_STORAGE_INTERVAL_MINUTES", "720"))
+    SCAN_THESIS_ENABLED = os.getenv("SCAN_THESIS_ENABLED", "true").lower() == "true"
+    SCAN_THESIS_FIRST_DELAY_S = int(os.getenv("SCAN_THESIS_FIRST_DELAY_S", "90"))
+    SCAN_THESIS_INTERVAL_MINUTES = int(os.getenv("SCAN_THESIS_INTERVAL_MINUTES", "240"))
+    SCAN_CROWDING_ENABLED = os.getenv("SCAN_CROWDING_ENABLED", "true").lower() == "true"
+    SCAN_CROWDING_FIRST_DELAY_S = int(os.getenv("SCAN_CROWDING_FIRST_DELAY_S", "150"))
+    SCAN_CROWDING_INTERVAL_MINUTES = int(os.getenv("SCAN_CROWDING_INTERVAL_MINUTES", "1440"))
+    # 短线情绪预热：启动后自动拉一次当日四池/天梯并固化快照（hithink 限频敏感，放最后错峰）
+    SCAN_SHORTLINE_ENABLED = os.getenv("SCAN_SHORTLINE_ENABLED", "true").lower() == "true"
+    SCAN_SHORTLINE_FIRST_DELAY_S = int(os.getenv("SCAN_SHORTLINE_FIRST_DELAY_S", "180"))
+    SCAN_SHORTLINE_INTERVAL_MINUTES = int(os.getenv("SCAN_SHORTLINE_INTERVAL_MINUTES", "60"))
+    SCAN_KLINE_ENABLED = os.getenv("SCAN_KLINE_ENABLED", "true").lower() == "true"
+    SCAN_KLINE_FIRST_DELAY_S = int(os.getenv("SCAN_KLINE_FIRST_DELAY_S", "240"))
+    SCAN_KLINE_INTERVAL_MINUTES = int(os.getenv("SCAN_KLINE_INTERVAL_MINUTES", "60"))
+    SCAN_KLINE_BUDGET_S = int(os.getenv("SCAN_KLINE_BUDGET_S", "120"))
+    SCAN_KLINE_MAX_CODES = int(os.getenv("SCAN_KLINE_MAX_CODES", "200"))
+
+    # 持仓账本 agent 注入（关键词门控 + 无持仓静默跳过；关闭即回到现状）
+    PORTFOLIO_ENRICH_ENABLED = os.getenv("PORTFOLIO_ENRICH_ENABLED", "true").lower() == "true"
 
     # 记忆系统
     JIEBA_ENABLED = os.getenv("JIEBA_ENABLED", "true").lower() == "true"
@@ -347,6 +502,12 @@ class Config:
     STOCK_MEMORY_API_BASE = os.getenv("STOCK_MEMORY_API_BASE", "")
     MEMORY_RETRIEVAL_TOP_K = int(os.getenv("MEMORY_RETRIEVAL_TOP_K", "5"))
     MEMORY_MAX_PROMPT_TOKENS = int(os.getenv("MEMORY_MAX_PROMPT_TOKENS", "1500"))
+    MEMORY_MAX_PROMPT_CHARS = int(os.getenv("MEMORY_MAX_PROMPT_CHARS", "6000"))
+    MEMORY_MAX_CHUNKS_PER_GROUP = int(os.getenv("MEMORY_MAX_CHUNKS_PER_GROUP", "6"))
+    MEMORY_CHUNK_MAX_CHARS = int(os.getenv("MEMORY_CHUNK_MAX_CHARS", "1000"))
+    MEMORY_MIN_SIMILARITY = float(os.getenv("MEMORY_MIN_SIMILARITY", "0.30"))
+    MEMORY_SIMILARITY_MARGIN = float(os.getenv("MEMORY_SIMILARITY_MARGIN", "0.12"))
+    MEMORY_PROFILE_SEMANTIC = os.getenv("MEMORY_PROFILE_SEMANTIC", "true").lower() == "true"
     MEMORY_EPISODIC_RETENTION_DAYS = int(os.getenv("MEMORY_EPISODIC_RETENTION_DAYS", "90"))
     MEMORY_CONFIDENCE_THRESHOLD = float(os.getenv("MEMORY_CONFIDENCE_THRESHOLD", "0.4"))
     MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES = int(os.getenv("MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES", "60"))
@@ -391,8 +552,8 @@ class Config:
         from dotenv import load_dotenv
         from utils.app_paths import get_app_dir
 
-        # 快照旧值
-        old = {k: getattr(cls, k) for k in _ENV_MAP}
+        # 快照旧值（getattr 带默认值：_ENV_MAP 新增但漏加类属性时不再整段崩溃）
+        old = {k: getattr(cls, k, None) for k in _ENV_MAP}
 
         # 重载 .env 文件
         env_path = os.path.join(get_app_dir(), ".env")
@@ -422,6 +583,15 @@ class Config:
                 except json.JSONDecodeError as e:
                     raise ValueError(f"{field_name} JSON 格式错误: {e}")
 
+        # A8 语义缓存 / 路由映射表必须是合法 JSON
+        for field_name in ('LLM_CACHE_TTL_MAP', 'LLM_CACHE_CATEGORY_MAP', 'LLM_ROUTING_MAP'):
+            raw = getattr(cls, field_name, '')
+            if raw:
+                try:
+                    json.loads(raw)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"{field_name} JSON 格式错误: {e}")
+
         if cls.OPENAI_REASONING_CONTENT_POLICY not in ("auto", "always", "never"):
             raise ValueError(
                 "OPENAI_REASONING_CONTENT_POLICY 必须是 auto / always / never"
@@ -434,15 +604,18 @@ class Config:
 
         _INT_FIELDS = (
             'BATCH_SIZE', 'PLAN_MAX_STEPS', 'PLAN_EXECUTOR_MAX_RETRIES',
-            'PLAN_EXECUTOR_TOOL_CALLS', 'REACT_TOOL_CALLS',
+            'PLAN_EXECUTOR_TOOL_CALLS', 'REACT_TOOL_CALLS', 'REACT_SKILL_BATCH_SIZE', 'REACT_SKILL_RESELECT_EVERY',
             'GROUP_MAX_CONCURRENT_AGENTS', 'GROUP_AGENT_MAX_RETRIES',
             'GROUP_MAX_REPLAN_COUNT', 'GROUP_MAX_STEPS', 'GROUP_MAX_LLM_CALLS',
             'REACT_CONTEXT_RECENT_ROUNDS', 'REACT_SUMMARY_TRIGGER_ROUNDS',
             'REACT_SUMMARY_PENDING_CHARS', 'REACT_SUMMARY_MAX_CHARS',
             'MAX_TOKENS_PER_QUERY', 'MAX_LLM_CALLS_PER_QUERY',
             'MAX_TIME_SECONDS', 'MEMORY_MAX_TOKENS', 'DATASOURCE_MAX_FAILS',
+            'CLARIFY_MAX_QUESTIONS', 'CLARIFY_TIMEOUT_SECONDS',
             'CACHE_EXPIRE_HOURS',
             'REPORT_MIN_TOKENS', 'REPORT_MAX_TOOL_OUTPUT_CHARS', 'REPORT_MAX_NEWS_CHARS',
+            'REPORT_TECH_PANEL_MAX',
+            'REPORT_DRILLDOWN_MIN_TOOLS', 'REPORT_DRILLDOWN_MIN_CHARS',
             'TOOL_OUTPUT_COMPRESS_THRESHOLD', 'TOOL_HARD_TRUNCATE_CHARS', 'INFO_ACCUMULATOR_COMPRESS_THRESHOLD',
             'DASHBOARD_MAX_LLM_TOKENS',
             'MEMORY_RETRIEVAL_TOP_K', 'MEMORY_MAX_PROMPT_TOKENS',

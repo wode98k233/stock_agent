@@ -7,6 +7,9 @@ import os
 import pytest
 from dotenv import load_dotenv
 
+# chromadb 冷 import 实测 116s（含遥测/网络探测），测试环境一律关闭
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:

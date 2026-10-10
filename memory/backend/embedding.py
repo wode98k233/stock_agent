@@ -100,6 +100,24 @@ def _filter_by_min_similarity(entries: List[MemoryEntry],
     return [e for e in entries if (e.score or 0.0) >= min_similarity]
 
 
+def _filter_by_similarity(entries: List[MemoryEntry],
+                          floor: float, margin: float) -> List[MemoryEntry]:
+    """自适应相似度过滤：绝对下限 + 相对带宽。
+
+    保留 ``score >= max(floor, top_score - margin)`` 的条目：
+    - 相对带宽（margin）保证「无论 query 与库的绝对相似度整体偏低，最相关的仍能召回」；
+    - 绝对下限（floor）在 top 极低时兜底，避免把长尾噪声全放进来。
+
+    背景（2026-09-23 实测）：固定门槛 0.72 会把 bge-m3 上口语 query 的全部向量命中
+    （最高余弦仅 ~0.60）滤空 → 语义召回为 0。`floor=0, margin=0` 时不过滤。
+    """
+    if not entries or (floor <= 0 and margin <= 0):
+        return entries
+    top = max((e.score or 0.0) for e in entries)
+    thr = max(floor, top - margin) if margin > 0 else floor
+    return [e for e in entries if (e.score or 0.0) >= thr]
+
+
 class EmbeddingBackend(MemoryBackend):
     """基于 ChromaDB 的语义检索后端。
 
@@ -112,14 +130,16 @@ class EmbeddingBackend(MemoryBackend):
 
     def __init__(self, embedding_fn: Optional[Callable] = None,
                  chroma_path: Optional[str] = None,
-                 min_similarity: float = 0.0):
+                 min_similarity: float = 0.0,
+                 similarity_margin: float = 0.0):
         self._embedding_fn = embedding_fn
         self._available = False
         self._client = None
         self._collection = None
-        # 语义相似度门槛：score(余弦相似度) < 该值的向量结果会被过滤掉，
-        # 避免无关记忆污染检索/注入上下文。0 表示不启用门槛。
+        # 语义相似度门槛（自适应）：保留 score >= max(floor, top_score - margin)。
+        # floor=绝对下限（0 关闭）；margin=相对带宽（0 表示纯绝对门槛）。
         self._min_similarity = float(min_similarity or 0.0)
+        self._similarity_margin = float(similarity_margin or 0.0)
 
         if embedding_fn is None:
             return
@@ -148,11 +168,18 @@ class EmbeddingBackend(MemoryBackend):
         return self._available
 
     def set_min_similarity(self, value: float) -> None:
-        """运行时调整语义相似度门槛（0 表示关闭）。"""
+        """运行时调整语义相似度下限（0 表示关闭）。"""
         self._min_similarity = float(value or 0.0)
 
     def get_min_similarity(self) -> float:
         return self._min_similarity
+
+    def set_similarity_margin(self, value: float) -> None:
+        """运行时调整相对带宽（0 表示纯绝对门槛）。"""
+        self._similarity_margin = float(value or 0.0)
+
+    def get_similarity_margin(self) -> float:
+        return self._similarity_margin
 
     # ── 元数据序列化 ──────────────────────────────────────
 
@@ -173,6 +200,9 @@ class EmbeddingBackend(MemoryBackend):
             "sentiment": meta.get("sentiment") or "",
             "source_query": meta.get("source_query") or "",
             "subject_kind": meta.get("subject_kind") or "",
+            "chunk_index": int(meta.get("chunk_index", 0) or 0),
+            "chunk_count": int(meta.get("chunk_count", 1) or 1),
+            "chunk_group_id": meta.get("chunk_group_id") or "",
             # v2 M1
             "confidence": float(entry.confidence),
             "trace_run_id": entry.provenance.get("trace_run_id", "") if entry.provenance else "",
@@ -218,6 +248,9 @@ class EmbeddingBackend(MemoryBackend):
             "sentiment": chroma_meta.get("sentiment", ""),
             "source_query": chroma_meta.get("source_query", ""),
             "subject_kind": chroma_meta.get("subject_kind", ""),
+            "chunk_index": int(chroma_meta.get("chunk_index", 0) or 0),
+            "chunk_count": int(chroma_meta.get("chunk_count", 1) or 1),
+            "chunk_group_id": chroma_meta.get("chunk_group_id", "") or "",
         }
         for key in ("confidence_factors", "provenance"):
             try:
@@ -332,9 +365,8 @@ class EmbeddingBackend(MemoryBackend):
                 **lifecycle,
             ))
         _log.debug("[emb] search hits=%d query=%r elapsed=%dms", len(entries), query[:60], emb_ms)
-        # 语义相似度门槛：过滤掉余弦相似度低于阈值的向量结果，
-        # 避免无关记忆污染 RRF 融合与注入上下文。
-        entries = _filter_by_min_similarity(entries, self._min_similarity)
+        # 自适应相似度门槛：绝对下限 + 相对带宽（floor=0 且 margin=0 时不过滤）
+        entries = _filter_by_similarity(entries, self._min_similarity, self._similarity_margin)
         if not include_inactive:
             now = datetime.now().isoformat()
             entries = [
@@ -378,6 +410,73 @@ class EmbeddingBackend(MemoryBackend):
         if found_ids:
             self._collection.update(ids=found_ids, metadatas=updated)
         return len(found_ids)
+
+    def update_confidence(self, conf_by_id: dict) -> int:
+        """批量更新指定 entry 的 confidence（Chroma metadata 与 SQLite 同步）。
+
+        用于存量数据修复：confidence 是归档时算好并随 metadata 写进 Chroma 的
+        （``_build_chroma_metadata``），**只改 SQLite 会让向量库与权威源
+        （``semantic_memory_meta``）不一致** —— 混合检索时 embedding 路径返回的
+        仍是旧值，confidence 门槛照旧把新记忆筛掉。
+
+        Returns: 实际更新的条数。
+        """
+        if not conf_by_id or not self._available or self._collection is None:
+            return 0
+        ids = list(conf_by_id)
+        data = self._collection.get(ids=ids, include=["metadatas"])
+        found_ids = data.get("ids", []) or []
+        metadatas = data.get("metadatas", []) or []
+        updated_ids, updated_meta = [], []
+        for index, entry_id in enumerate(found_ids):
+            meta = metadatas[index] if index < len(metadatas) else None
+            if not isinstance(meta, dict):
+                continue
+            new_conf = conf_by_id.get(entry_id)
+            if new_conf is None:
+                continue
+            metadata = dict(meta)
+            metadata["confidence"] = float(new_conf)
+            updated_ids.append(entry_id)
+            updated_meta.append(metadata)
+        if updated_ids:
+            self._collection.update(ids=updated_ids, metadatas=updated_meta)
+        return len(updated_ids)
+
+    def update_chunk_metadata(self, records) -> int:
+        """批量回填 Chroma 侧 chunk 元数据（chunk_index/chunk_count/chunk_group_id）。
+
+        records: 可迭代 ``(chunk_index, chunk_count, chunk_group_id, entry_id)``。
+        Returns: 实际更新的条数。
+        """
+        if not self._available or self._collection is None:
+            return 0
+        by_id = {}
+        for chunk_index, chunk_count, chunk_group_id, entry_id in records:
+            by_id[entry_id] = (int(chunk_index), int(chunk_count), chunk_group_id or "")
+        if not by_id:
+            return 0
+        ids = list(by_id)
+        updated_ids, updated_meta = [], []
+        for i in range(0, len(ids), 1000):
+            batch = ids[i:i + 1000]
+            data = self._collection.get(ids=batch, include=["metadatas"])
+            found = data.get("ids", []) or []
+            metas = data.get("metadatas", []) or []
+            for idx, entry_id in enumerate(found):
+                meta = metas[idx] if idx < len(metas) else None
+                if not isinstance(meta, dict):
+                    continue
+                ci, cc, gid = by_id.get(entry_id, (0, 1, ""))
+                m = dict(meta)
+                m["chunk_index"] = ci
+                m["chunk_count"] = cc
+                m["chunk_group_id"] = gid
+                updated_ids.append(entry_id)
+                updated_meta.append(m)
+        if updated_ids:
+            self._collection.update(ids=updated_ids, metadatas=updated_meta)
+        return len(updated_ids)
 
     def clean_expired(self, as_of: str | None = None) -> int:
         if not self._available:

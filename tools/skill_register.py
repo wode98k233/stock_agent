@@ -30,6 +30,29 @@ EXTERNAL_SKILLS_ROOT = get_external_skills_dir()
 USER_SKILLS_ROOT = get_user_skills_dir()
 
 
+def _push_active_skill(skill_name: str):
+    """临时把「当前激活技能」压入运行级上下文，返回恢复用 token（失败返回 None）。
+
+    消费方：`tools/other_skills/10jqka/skills.py` —— 问财工具已收敛为 2 个统一入口，
+    工具名不再等于技能名，底层请求层靠本通道拿到域信息，以正确上报
+    `X-Claw-Skill-Id`（问财配额按 skill 分桶）。
+    """
+    try:
+        from utils.skill_ctx import note_active_skill
+        return note_active_skill(skill_name)
+    except Exception:
+        return None
+
+
+def _pop_active_skill(token) -> None:
+    """按 token 恢复「当前激活技能」（失败静默）。"""
+    try:
+        from utils.skill_ctx import restore_active_skill
+        restore_active_skill(token)
+    except Exception:
+        pass
+
+
 @dataclass
 class ToolParamMeta:
     """工具参数元数据"""
@@ -84,6 +107,21 @@ class SkillMeta:
     usage_guide: str = ""
     enabled: bool = True
     source: str = "internal"  # internal / external / user
+
+    @property
+    def platform(self) -> str:
+        """平台分组（目录层分层渲染用）：eastmoney / 10jqka / external / internal。
+
+        由 skill_dir 推导，避免在多个注册点各自维护。
+        """
+        d = (self.skill_dir or "").replace("\\", "/")
+        if "other_skills/eastmoney" in d:
+            return "eastmoney"
+        if "other_skills/10jqka" in d:
+            return "10jqka"
+        if "other_skills" in d:
+            return "external"
+        return "internal" if self.source == "internal" else "external"
 
 
 def _parse_skill_md(md_path: str) -> Tuple[Dict[str, Any], str]:
@@ -815,15 +853,20 @@ class SkillRegister:
             validated = tool_meta.param_model(**params)
             params = validated.model_dump()
 
-        if tool_meta.tool_func: 
-            return tool_meta.tool_func(**params)
+        # 记录本次调用归属的技能（工具层据此上报域信息，见 _push_active_skill）
+        token = _push_active_skill(skill_name)
+        try:
+            if tool_meta.tool_func:
+                return tool_meta.tool_func(**params)
 
-        if skill_meta.tool_registry and tool_name in skill_meta.tool_registry:
-            tool_func, param_model = skill_meta.tool_registry[tool_name]
-            if param_model:
-                validated = param_model(**params)
-                params = validated.model_dump()
-            return tool_func(**params)
+            if skill_meta.tool_registry and tool_name in skill_meta.tool_registry:
+                tool_func, param_model = skill_meta.tool_registry[tool_name]
+                if param_model:
+                    validated = param_model(**params)
+                    params = validated.model_dump()
+                return tool_func(**params)
+        finally:
+            _pop_active_skill(token)
 
         raise ValueError(f"工具 {tool_name} 无可执行函数")
 

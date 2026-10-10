@@ -62,7 +62,7 @@ class EventStreamManager:
                 continue
 
             yield payload
-            if payload["event"] in ("final", "task_error"):
+            if payload["event"] in ("final", "task_error", "task_cancelled"):
                 self._queues.pop(task_id, None)
                 break
 

@@ -122,6 +122,8 @@ def test_react_graph_runs_with_mocked_llm_and_tool_result(mock_logger):
              patch("agents.analysis.template_store.load_template", return_value=template), \
              patch("agents.analysis.template_store.get_required_skills", return_value=["mx_data", "mx_search"]), \
              patch("agents.react.nodes.llm_json_with_retry", side_effect=fake_skill_selector), \
+             patch("agents.react.skill_nodes.llm_json_with_retry",
+                   return_value={"active_skill": "mx_data", "sub_goals": []}), \
              patch("tools.skills.SkillPromptBuilder.build_catalog_prompt", return_value="技能目录：mx_data"), \
              patch("agents.common.run_report_post_processing", side_effect=fake_run_report_post_processing), \
              patch("agents.react.nodes.Config.REPORT_ENABLE_ANALYSIS_ENGINE", True), \

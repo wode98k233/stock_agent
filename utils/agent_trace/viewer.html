@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="css/analysis.css">
 <link rel="stylesheet" href="css/chart.css">
 <link rel="stylesheet" href="css/calendar.css">
+<link rel="stylesheet" href="css/reviews.css">
 </head>
 <body>
 
@@ -54,6 +55,14 @@
     </div>
     <div class="drawer-body" id="drawerBody"></div>
   </div>
+
+  <div class="review-drawer" id="reviewDrawer">
+    <div class="drawer-header">
+      <h3>AI 评审</h3>
+      <button class="drawer-close" onclick="closeReview()">&times;</button>
+    </div>
+    <div class="review-body" id="reviewBody"></div>
+  </div>
 </section>
 
 <div class="drop-overlay" id="dropOverlay">释放文件以加载</div>
@@ -83,5 +92,6 @@
 <script src="js/analysis.js"></script>
 <script src="js/render.js"></script>
 <script src="js/calendar.js"></script>
+<script src="js/reviews.js"></script>
 </body>
 </html>

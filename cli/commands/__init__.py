@@ -39,6 +39,7 @@ def _ensure_registered():
     from cli.commands.notify import NotifyCommand
     from cli.commands.watchlist import WatchlistCommand
     from cli.commands.calendar_cmd import CalendarCommand
+    from cli.commands.data_cmd import DataCommand
 
     register_command("help", HelpCommand)
     register_command("status", StatusCommand)
@@ -52,6 +53,7 @@ def _ensure_registered():
     register_command("notify", NotifyCommand)
     register_command("watchlist", WatchlistCommand)
     register_command("calendar", CalendarCommand)
+    register_command("data", DataCommand)
 
 
 async def dispatch(namespace: str, action: str, args: list[str], flags: dict, ctx):

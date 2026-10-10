@@ -1,0 +1,12 @@
+{
+  "id": "quick",
+  "display_name": "速览仪表盘",
+  "description": "只展示用户要的字段，不做决策判断",
+  "scenario_tag": "速览仪表盘",
+  "checklist_dimensions": [],
+  "sections": [
+    {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
+    {"id": "key_points", "renderer": "key_points", "required": true, "fields": ["key_points"]}
+  ],
+  "llm_fields": []
+}

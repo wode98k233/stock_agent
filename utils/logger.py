@@ -122,6 +122,8 @@ class RequestContext:
             "llm_tokens_out": 0,
             "llm_tokens_reasoning": 0,
             "llm_cached_tokens": 0,
+            "llm_cache_by_label": {},
+            "llm_by_model": {},
             "tool_calls": 0,
             "steps_total": 0,
             "steps_success": 0,
@@ -141,12 +143,25 @@ class RequestContext:
         return time.time() - self.start_time
 
     def record_llm(self, tokens_in: int, tokens_out: int, cached_tokens: int = 0,
-                   reasoning_tokens: int = 0):
+                   reasoning_tokens: int = 0, label: str = "", model: str = ""):
         self.metrics["llm_calls"] += 1
         self.metrics["llm_tokens_in"] += tokens_in
         self.metrics["llm_tokens_out"] += tokens_out
         self.metrics["llm_tokens_reasoning"] += reasoning_tokens
         self.metrics["llm_cached_tokens"] += cached_tokens
+        bucket = self.metrics["llm_cache_by_label"].setdefault(
+            label or "unknown", {"in": 0, "cached": 0})
+        bucket["in"] += tokens_in
+        bucket["cached"] += cached_tokens
+        # 按上游模型聚合（基础 LLM vs 压缩/报告等命名模型），供最终汇总区分展示
+        if model:
+            mbucket = self.metrics["llm_by_model"].setdefault(
+                model, {"calls": 0, "in": 0, "out": 0, "cached": 0, "reasoning": 0})
+            mbucket["calls"] += 1
+            mbucket["in"] += tokens_in
+            mbucket["out"] += tokens_out
+            mbucket["cached"] += cached_tokens
+            mbucket["reasoning"] += reasoning_tokens
 
     def record_tool(self):
         self.metrics["tool_calls"] += 1
@@ -160,6 +175,50 @@ class RequestContext:
 
     def record_retry(self):
         self.metrics["retries"] += 1
+
+
+def _fmt_token_count(n: int) -> str:
+    if n >= 1000:
+        return f"{n / 1000:.1f}k".replace(".0k", "k")
+    return str(n)
+
+
+def _format_cache_by_label(by_label: dict, top_n: int = 6) -> str:
+    """把 {label: {in, cached}} 压成一行缓存明细（按输入量降序，最多 top_n 项）。"""
+    items = [(k, v) for k, v in (by_label or {}).items()
+             if isinstance(v, dict) and v.get("in")]
+    if not items:
+        return ""
+    items.sort(key=lambda kv: kv[1].get("in", 0), reverse=True)
+    parts = []
+    for name, v in items[:top_n]:
+        tin = v.get("in", 0)
+        hit_pct = v.get("cached", 0) / tin * 100 if tin else 0
+        parts.append(
+            f"{name} {hit_pct:.0f}% "
+            f"({_fmt_token_count(v.get('cached', 0))}/{_fmt_token_count(tin)})"
+        )
+    if len(items) > top_n:
+        parts.append(f"…另{len(items) - top_n}项")
+    return " · ".join(parts)
+
+
+def _format_by_model(by_model: dict, top_n: int = 5) -> str:
+    """把 {model: {calls, in, out, cached, reasoning}} 压成一行模型明细（按输入量降序）。"""
+    items = [(k, v) for k, v in (by_model or {}).items()
+             if isinstance(v, dict) and (v.get("in") or v.get("out"))]
+    if not items:
+        return ""
+    items.sort(key=lambda kv: kv[1].get("in", 0), reverse=True)
+    parts = []
+    for name, v in items[:top_n]:
+        parts.append(
+            f"{name} {v.get('calls', 0)}次 "
+            f"{_fmt_token_count(v.get('in', 0))}+{_fmt_token_count(v.get('out', 0))}"
+        )
+    if len(items) > top_n:
+        parts.append(f"…另{len(items) - top_n}个模型")
+    return " · ".join(parts)
 
 
 class RadarLogger:
@@ -320,6 +379,12 @@ class RadarLogger:
                       缓存Token=f"{trace_cached}",
                       命中率=f"{trace_hit:.1%}",
                       输入Token=f"{trace_totals.get('input_tokens', 0)}")
+        cache_by_label = _format_cache_by_label(m.get("llm_cache_by_label") or {})
+        if cache_by_label:
+            self._log("info", "R", "缓存明细", 按调用=cache_by_label)
+        by_model = _format_by_model(m.get("llm_by_model") or {})
+        if by_model:
+            self._log("info", "R", "模型明细", 按模型=by_model)
         budget_snap = snap.get("budget")
         if budget_snap:
             self._log("info", "R", "预算使用",
@@ -359,6 +424,12 @@ class RadarLogger:
                   工具调用=f"{m['tool_calls']}次",
                   步骤=f"{m['steps_success']}/{m['steps_total']}成功",
                   重试=f"{m['retries']}次")
+        cache_by_label = _format_cache_by_label(m.get("llm_cache_by_label") or {})
+        if cache_by_label:
+            self._log("info", "R", "缓存明细", 按调用=cache_by_label)
+        by_model = _format_by_model(m.get("llm_by_model") or {})
+        if by_model:
+            self._log("info", "R", "模型明细", 按模型=by_model)
         self._log("info", "R", "═" * 50)
 
 

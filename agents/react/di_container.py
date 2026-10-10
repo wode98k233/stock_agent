@@ -38,8 +38,8 @@ class ReactDIContainer:
         self._exec_state = exec_state
         self._logger = ensure_radar(logger)
 
-        # 共享工具引用：SelectSkillsNode 写入，后续节点通过闭包读取
-        # 不可序列化对象不存入 state，避免 checkpoint msgpack 失败
+        # 共享工具引用：SelectSkillsNode / SubGoalRouterNode / SkillGapNode 写入，
+        # 后续节点通过闭包读取；不可序列化对象不存入 state，避免 checkpoint msgpack 失败
         self._tools_ref: list = []
 
     # ──── 共享状态访问 ────
@@ -79,6 +79,25 @@ class ReactDIContainer:
             logger=self._logger,
         )
 
+    def create_sub_goal_router_node(self):
+        from agents.react.skill_nodes import SubGoalRouterNode
+        return SubGoalRouterNode(llm=self._llm, skill_registry=self._skill_registry,
+                                 tools_ref=self._tools_ref, budget=self._budget, logger=self._logger,
+                                 allow_catalog_fallback=True)
+
+    def create_skill_gap_node(self):
+        from agents.react.skill_nodes import SkillGapNode
+        return SkillGapNode(llm=self._llm, skill_registry=self._skill_registry,
+                            tools_ref=self._tools_ref, budget=self._budget, logger=self._logger)
+
+    def create_reselect_node(self):
+        """中途换批：复用 router 逻辑，但 append_usage=True（补新增技能的 L1 用法）。"""
+        from agents.react.skill_nodes import SubGoalRouterNode
+        return SubGoalRouterNode(llm=self._llm, skill_registry=self._skill_registry,
+                                 tools_ref=self._tools_ref, budget=self._budget,
+                                 logger=self._logger, append_usage=True,
+                                 allow_catalog_fallback=True)
+
     def create_prepare_node(self):
         from agents.react.nodes import PrepareNode
         return PrepareNode(
@@ -95,6 +114,7 @@ class ReactDIContainer:
             budget=self._budget,
             exec_state=self._exec_state,
             tools=self._tools_ref,
+            skill_registry=self._skill_registry,
             logger=self._logger,
         )
 
@@ -136,6 +156,9 @@ class ReactDIContainer:
             "classify": self.create_classify_node(),
             "select_template": self.create_select_template_node(),
             "select_skills": self.create_select_skills_node(),
+            "sub_goal_router": self.create_sub_goal_router_node(),
+            "skill_gap": self.create_skill_gap_node(),
+            "reselect": self.create_reselect_node(),
             "prepare": self.create_prepare_node(),
             "agent": self.create_agent_node(),
             "tools": self.create_tool_node(),

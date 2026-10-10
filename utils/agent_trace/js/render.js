@@ -22,6 +22,7 @@ function renderRunList() {
       <div class="run-meta">
         <span>${fmtDur(r.duration_ms)}</span>
         <span>${fmtTime(r.created_at)}</span>
+        <button class="run-review-btn" title="AI 评审" onclick="event.stopPropagation(); openReview('${r.id}')">AI 评审</button>
       </div>
     </div>
   `).join('');

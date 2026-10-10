@@ -59,6 +59,26 @@ SUMMARY_SYSTEM_PROMPT = """你是一个 ReAct 上下文压缩助手。
 """
 
 
+def _summary_llm(fallback=None):
+    """上下文压缩专用 LLM：统一走 COMPRESS_LLM_*（与工具输出压缩同一个出口）。
+
+    为什么要独立于 agent 主模型：压缩是「低智力密度、高 token 密度」的活
+    （10 次调用吃掉 163k input），而主模型按推理定价。配了 COMPRESS_LLM_*
+    就走便宜的压缩模型，没配时 get_compress_llm 内部回落到 agent 主模型——
+    **行为与改动前完全一致**，清空 COMPRESS_LLM_MODEL 即可回滚，无需额外开关。
+
+    与工具压缩（agents/react/tool_node_base.py::_compress_tool_output）同源，
+    两处压缩从此可用同一份 COMPRESS_LLM_* 配置切模型。
+
+    取不到时静默回落调用方传入的 llm，绝不让压缩链路因拿模型而崩。
+    """
+    try:
+        from utils.llm_factory import get_compress_llm
+        return get_compress_llm() or fallback
+    except Exception:
+        return fallback
+
+
 def default_summarizer(previous_summary, new_rounds_text: str, *, llm, logger, budget=None,
                        max_chars: int = 2500, parent_run_id=None, run_config=None, user_input: str = "",
                        prior_count: int = 0, current_count: int = 0, **kwargs):
@@ -68,7 +88,11 @@ def default_summarizer(previous_summary, new_rounds_text: str, *, llm, logger, b
     current_count: 已有消息触发的总轮次（用于提示 LLM 当前是第几轮）
 
     Cache-friendly: system prompt 完全静态，所有动态内容放在 user message。
+
+    LLM 选择：忽略调用方传入的 llm，改走 COMPRESS_LLM_*（见 _summary_llm）。
+    传进来的 llm 仅作为取不到压缩模型时的兜底。
     """
+    llm = _summary_llm(llm)
     new_count = max(current_count - prior_count, 1)
 
     # 动态内容全部拼到 user message，system prompt 保持不变以命中缓存
@@ -110,7 +134,18 @@ class ReactRound:
 
 def split_react_rounds(messages: list) -> list[ReactRound]:
     """从消息历史中切出 AI tool_calls + 后续 ToolMessage 轮次。"""
+    rounds, _ = split_react_rounds_with_spans(messages)
+    return rounds
+
+
+def split_react_rounds_with_spans(messages: list) -> tuple[list[ReactRound], list[tuple[int, int, int]]]:
+    """同 split_react_rounds，额外返回每个轮次在 messages 中的下标区间。
+
+    spans: [(start, end, round_index)]，end 为开区间。供 _compose 做「原位替换」——
+    必须按下标遍历：BaseMessage 未冻结、不可 hash，不能拿消息对象当字典键。
+    """
     rounds: list[ReactRound] = []
+    spans: list[tuple[int, int, int]] = []
     i = 0
     while i < len(messages):
         msg = messages[i]
@@ -134,8 +169,9 @@ def split_react_rounds(messages: list) -> list[ReactRound]:
             break
 
         rounds.append(ReactRound(index=len(rounds) + 1, ai_message=msg, tool_messages=tool_messages))
+        spans.append((i, j, len(rounds)))
         i = j
-    return rounds
+    return rounds, spans
 
 
 def format_rounds_for_summary(rounds: Iterable[ReactRound]) -> str:
@@ -234,16 +270,18 @@ class ReactContextBuilder(BaseMemory):
         parent_run_id=None,
         run_config=None,
     ) -> list:
-        """构造 compact 视图：system + user + (summary) + recent_rounds。
+        """构造 compact 视图：原位替换轮次，其余消息按原序透传。
 
         流程：
-        1. 拆出 AI+Tool 轮次
+        1. 拆出 AI+Tool 轮次（含下标区间）
         2. 区分 pending（待压缩）和 recent（保留原样）
         3. 满足触发条件 → 调 LLM summarizer → 写回 exec_state
-        4. 拼装 compact（summary 放原位置）
+        4. 原位替换：只删除「确有摘要覆盖」的轮次，摘要插在它首条消息的位置
+
+        不变量：任何非轮次消息（instruction / 历史 / guidance / 约束）都不允许被丢弃。
         """
         logger = ensure_radar(logger)
-        rounds = split_react_rounds(messages)
+        rounds, spans = split_react_rounds_with_spans(messages)
         recent = rounds[-self.recent_rounds:] if self.recent_rounds else []
         recent_start = recent[0].index if recent else len(rounds) + 1
         summarized_until = int(getattr(exec_state, "react_context_summarized_until", 0) or 0)
@@ -253,11 +291,10 @@ class ReactContextBuilder(BaseMemory):
             pending, exec_state, llm, logger, budget,
             parent_run_id=parent_run_id, run_config=run_config, user_input=user_input,
         )
-        # 如果 summary 失败，pending 轮次需要原样保留
-        # 检查 summarized_until 是否推进了
-        new_summarized_until = int(getattr(exec_state, "react_context_summarized_until", 0) or 0)
-        unsent_pending = [r for r in pending if r.index > new_summarized_until]
-        compact = self._compose(messages, rounds, recent, user_input, exec_state, pending=unsent_pending)
+        # 摘要失败时 _maybe_summarize 不会推进游标；未被摘要覆盖的轮次在 _compose 中自动原样保留
+        compact, dropped_non_round = self._compose(
+            messages, rounds, spans, exec_state, logger=logger,
+        )
 
         if self.enable_debug_log:
             try:
@@ -266,11 +303,15 @@ class ReactContextBuilder(BaseMemory):
                     len(json.dumps(s, ensure_ascii=False, sort_keys=True))
                     for s in summaries
                 )
+                compressed_rounds = sum(
+                    1 for r in rounds if _summary_covering(r.index, summaries) is not None
+                )
                 logger.info(
                     "R",
                     "react.context.compact "
                     f"before_messages={len(messages)} after_messages={len(compact)} "
                     f"rounds={len(rounds)} recent_rounds={len(recent)} "
+                    f"compressed_rounds={compressed_rounds} dropped_non_round={dropped_non_round} "
                     f"summaries={len(summaries)} summary_chars={summary_chars}",
                 )
             except Exception:
@@ -325,6 +366,11 @@ class ReactContextBuilder(BaseMemory):
         # 统一提取为整数列表，避免 _summary_to_message 再加 R 前缀时变成 RR
         result["summarized_rounds"] = _normalize_rounds(result["summarized_rounds"])
 
+        # 记录本次摘要的「覆盖窗口」= 实际送进 summarizer 的 pending 区间。
+        # _compose 用它判定轮次能否被替换（比 LLM 自述的 summarized_rounds 可靠）
+        result["covered_from"] = pending[0].index
+        result["covered_until"] = pending[-1].index
+
         existing_summaries.append(result)
         exec_state.react_context_summaries = existing_summaries
         exec_state.react_context_summarized_until = pending[-1].index
@@ -333,36 +379,71 @@ class ReactContextBuilder(BaseMemory):
         ) + 1
 
     # ──── 视图拼装 ────
-    def _compose(self, messages, rounds, recent, user_input, exec_state, pending=None) -> list:
-        """摘要放原位置：system + user + (所有历史 summaries) + pending_rounds + recent_rounds。
+    def _compose(self, messages, rounds, spans, exec_state, logger=None) -> tuple[list, int]:
+        """原位替换：只删除「落在某次成功摘要覆盖窗口内」的轮次，其余消息按原序透传。
 
-        关键：每个压缩窗口的 summary 单独保留为 1 个 AIMessage，按时间顺序追加。
-        如果 summary 失败，pending 轮次原样保留，避免丢失数据。
+        不变量：压缩器只能压自己产生的 tool 轮次（AI tool_calls + 其 ToolMessage）。
+        非轮次消息（planner 的 instruction、对话历史、模板 guidance、[用户约束]）
+        一律按原序保留——结构上不存在「丢失」的路径。
+
+        返回 (compact, dropped_non_round)；dropped_non_round 正常恒为 0，
+        非 0 说明出现回归，立即打 WARNING 暴露。
+
+        注：历史签名的 recent / user_input / pending 已不再参与拼装
+        （压缩与否只看摘要窗口，见 _summary_covering），仅保留以兼容调用方。
         """
-        # 收集头部连续 system 消息（SubAgent 场景有多条，主 ReAct 只有一条）
-        system_parts = []
-        for m in messages:
-            if _role(m) == "system":
-                system_parts.append(m[1] if isinstance(m, tuple) else str(getattr(m, "content", "")))
-            else:
-                break
-        system_msg = ("system", "\n\n".join(system_parts)) if system_parts else ("system", "")
-        compact: list = [system_msg, ("user", user_input)]
-
         summaries = list(getattr(exec_state, "react_context_summaries", None) or [])
-        for summary in summaries:
-            compact.append(self._summary_to_message(summary))
+        compact: list = []
+        emitted_summary_ids: set[int] = set()
 
-        # 如果有未压缩的 pending 轮次（summary 失败），原样保留
-        if pending:
-            for round_item in pending:
-                compact.append(round_item.ai_message)
-                compact.extend(round_item.tool_messages)
+        # 已被摘要覆盖的轮次里的 tool_call_id：用于跳过「游离的 ToolMessage」
+        # （协议异常时 ToolMessage 可能不在其 AI 消息之后，留下会变成无主 tool_call_id）
+        compressed_call_ids: set[str] = set()
+        for start, end, round_index in spans:
+            if _summary_covering(round_index, summaries) is None:
+                continue
+            for msg in messages[start:end]:
+                if isinstance(msg, ToolMessage) and msg.tool_call_id:
+                    compressed_call_ids.add(msg.tool_call_id)
 
-        for round_item in recent:
-            compact.append(round_item.ai_message)
-            compact.extend(round_item.tool_messages)
-        return compact
+        def _extend_passthrough(chunk):
+            for msg in chunk:
+                if isinstance(msg, ToolMessage) and msg.tool_call_id in compressed_call_ids:
+                    continue
+                compact.append(msg)
+
+        pos = 0
+        for start, end, round_index in spans:
+            # ① 轮次之前的非轮次消息：原序透传
+            _extend_passthrough(messages[pos:start])
+
+            summary = _summary_covering(round_index, summaries)
+            if summary is None:
+                # ② 未被摘要覆盖（含摘要失败回退）→ 整轮原样保留，tool 协议完整
+                compact.extend(messages[start:end])
+            else:
+                # ③ 已被摘要覆盖 → 摘要插在「该轮次首条位置」，轮次整体删除
+                key = id(summary)
+                if key not in emitted_summary_ids:
+                    compact.append(self._summary_to_message(summary))
+                    emitted_summary_ids.add(key)
+            pos = end
+
+        # ④ 末尾的非轮次消息：原序透传
+        _extend_passthrough(messages[pos:])
+
+        # 守卫必须在合并头部 system 之前（合并会新建对象，破坏身份比对）
+        dropped_non_round = _count_dropped_non_round(messages, spans, compact)
+        if dropped_non_round:
+            ensure_radar(logger).warning(
+                "R",
+                f"react.context.drop_non_round n={dropped_non_round} "
+                f"before={len(messages)} after={len(compact)} "
+                "—— 非轮次消息被丢弃，违反 step 信息不变量，请排查 _compose",
+            )
+
+        # D1-B：保留头部连续 system 合并（维持与旧实现一致的 prompt 缓存前缀形态）
+        return _merge_leading_system(compact), dropped_non_round
 
     @staticmethod
     def _summary_to_message(summary: dict) -> AIMessage:
@@ -455,3 +536,69 @@ def _role(msg) -> str:
     if isinstance(msg, tuple) and len(msg) == 2:
         return str(msg[0])
     return str(getattr(msg, "type", msg.__class__.__name__))
+
+
+def _content(msg) -> str:
+    if isinstance(msg, tuple) and len(msg) == 2:
+        return str(msg[1])
+    return str(getattr(msg, "content", ""))
+
+
+def _summary_covering(round_index: int, summaries: list) -> Optional[dict]:
+    """返回覆盖该轮次的摘要。
+
+    覆盖判定以「摘要窗口」为准：窗口 = 该次送进 summarizer 的 pending 区间
+    （由 _maybe_summarize 记录为 covered_from/covered_until）。
+    理由：
+    - LLM 可能少报/空报 summarized_rounds（实测有返回 [] 的情况），若只信它的自述，
+      压缩会永久失效（原文一直堆在上下文里）；若只信游标，又可能出现「游标推进了
+      但该轮次从未进过 summarizer」的无凭据删除。窗口恰好两者兼顾。
+    - 兼容旧 checkpoint：无窗口字段时退回用 summarized_rounds 的 min/max。
+    """
+    for summary in summaries:
+        start = summary.get("covered_from")
+        end = summary.get("covered_until")
+        if start is not None and end is not None:
+            if int(start) <= round_index <= int(end):
+                return summary
+            continue
+        rounds = summary.get("summarized_rounds") or []
+        if rounds and min(rounds) <= round_index <= max(rounds):
+            return summary
+    return None
+
+
+def _merge_leading_system(messages: list) -> list:
+    """把头部连续 system 消息合并为一条（保持与旧实现一致的缓存前缀形态）。
+
+    只合并、不丢弃：无头部 system 时原样返回。
+    """
+    parts = []
+    idx = 0
+    while idx < len(messages) and _role(messages[idx]) == "system":
+        parts.append(_content(messages[idx]))
+        idx += 1
+    if not parts:
+        return list(messages)
+    return [("system", "\n\n".join(parts)), *messages[idx:]]
+
+
+def _count_dropped_non_round(messages: list, spans: list[tuple[int, int, int]], compact: list) -> int:
+    """统计「非轮次消息」中有多少条没有进入 compact（正常应恒为 0）。
+
+    只统计真正的上下文消息（system / human / 文本 AI）——ToolMessage 属于 tool 协议
+    产物，不作为 step 信息统计，避免协议边界情况造成误报。
+
+    按对象身份比对：compact 中的消息都是原对象引用，仅头部 system 合并会新建对象，
+    因此本函数必须在合并之前调用。
+    """
+    in_round = set()
+    for start, end, _ in spans:
+        in_round.update(range(start, end))
+    kept_ids = {id(m) for m in compact}
+    return sum(
+        1 for i, m in enumerate(messages)
+        if i not in in_round
+        and not isinstance(m, ToolMessage)
+        and id(m) not in kept_ids
+    )

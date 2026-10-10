@@ -1,0 +1,66 @@
+/* ── 执行详情抽屉 + 顶栏扫描条（方案 C 一期）── */
+.exec-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 400px;
+  max-width: 94vw;
+  z-index: 850;
+  transform: translateX(102%);
+  transition: transform var(--transition-normal);
+  box-shadow: var(--shadow-lg);
+  border-left: 1px solid var(--border-main);
+}
+
+.exec-drawer.open { transform: translateX(0); }
+
+.exec-drawer-actions { display: flex; align-items: center; gap: 4px; }
+
+.exec-drawer-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast);
+  z-index: 840;
+}
+
+.exec-drawer-mask.visible { opacity: 1; pointer-events: auto; }
+
+/* 顶栏「执行详情」运行态
+   2026-09-18：该按钮从顶栏图标挪进「运维」分组菜单，不再挂 .tool-sys-btn，
+   改用独立钩子类 .tool-run-dot（app.js 只 toggle 'running'，故此处改名即可）。 */
+.tool-run-dot { position: relative; }
+
+.tool-run-dot.running { color: var(--danger); }
+
+.tool-run-dot.running::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: execPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes execPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 顶栏下方扫描进度条 */
+.exec-scan-bar { flex: 0 0 auto; height: 3px; background: transparent; overflow: hidden; }
+
+.exec-scan-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--brand), #38bdf8);
+  transition: width 0.4s ease;
+}

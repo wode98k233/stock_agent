@@ -7,18 +7,46 @@ window.StockRadar = window.StockRadar || {};
 window.StockRadar.api = (() => {
   const API = "";
 
+  // ── 启动预热期的 503 退避重试 ──
+  // 后端 WarmupGateMiddleware 在预热期对「会撞 import 锁的接口」（chart/eval/memory/
+  // market-dashboard/traces/reviews）最多只挂起 MAX_GATED_INFLIGHT 个，超出立即返回
+  // 503 + Retry-After —— 目的是**不占满浏览器同域 6 个连接**，否则 /api/dialogs 这类
+  // 导航接口会被浏览器排队、请求根本到不了服务端（表现为「新建对话一直转圈」）。
+  // 这里按 Retry-After 退避重试，把这些面板的 503 透明化。
+  // 只在 503 重试是安全的：无论门闸还是 require_agent_ready/require_memory_ready，
+  // 503 都发生在进入业务处理之前（无副作用），重试不会造成重复写入。
+  const WARMUP_RETRY_MAX = 8;
+  const WARMUP_RETRY_FALLBACK_MS = 2000;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function _retryDelayMs(res) {
+    const ra = parseInt(res.headers.get("Retry-After") || "", 10);
+    return Number.isFinite(ra) && ra > 0
+      ? Math.max(300, ra * 1000)
+      : WARMUP_RETRY_FALLBACK_MS;
+  }
+
   async function fetchJSON(url, options) {
-    const res = await fetch(`${API}${url}`, options);
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const detail = body.detail;
-      const err = new Error(
-        detail && typeof detail === "object" ? (detail.message || `HTTP ${res.status}`) : (detail || `HTTP ${res.status}`)
-      );
-      err.detail = detail;
-      throw err;
+    let attempt = 0;
+    for (;;) {
+      const res = await fetch(`${API}${url}`, options);
+      if (res.status === 503 && attempt < WARMUP_RETRY_MAX) {
+        attempt += 1;
+        await sleep(_retryDelayMs(res));
+        continue;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const detail = body.detail;
+        const err = new Error(
+          detail && typeof detail === "object" ? (detail.message || `HTTP ${res.status}`) : (detail || `HTTP ${res.status}`)
+        );
+        err.detail = detail;
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
     }
-    return res.json();
   }
 
   function getDialogs() {
@@ -61,6 +89,11 @@ window.StockRadar.api = (() => {
     return fetchJSON(`/api/tasks/${taskId}`);
   }
 
+  function getTaskTranscript(taskId) {
+    // 过程流快照：运行中刷新/切回对话时恢复 think/工具节点（SSE 不回放）
+    return fetchJSON(`/api/tasks/${taskId}/transcript`);
+  }
+
   function getTraceSteps(runId) {
     return fetchJSON(`/api/traces/runs/${runId}/steps`).then((d) => d.items || d || []);
   }
@@ -77,8 +110,9 @@ window.StockRadar.api = (() => {
     return fetchJSON(`/api/logs/correlate?q=${encodeURIComponent(q || "")}`);
   }
 
-  function getStepDetail(stepId) {
-    return fetchJSON(`/api/traces/steps/${stepId}/detail`);
+  function getStepDetail(runId, stepId) {
+    // 分库后 step_id 仅在 run 所在月库内唯一，路由必须带 run_id
+    return fetchJSON(`/api/traces/runs/${runId}/steps/${stepId}/detail`);
   }
 
   function getConfig() {
@@ -258,6 +292,18 @@ window.StockRadar.api = (() => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision }),
+    });
+  }
+
+  function cancelTask(taskId) {
+    return fetchJSON(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+  }
+
+  function clarifyDecision(taskId, payload) {
+    return fetchJSON(`/api/tasks/${taskId}/clarify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
     });
   }
 
@@ -563,5 +609,118 @@ window.StockRadar.api = (() => {
     return fetchJSON(`/api/dialogs/${encodeURIComponent(dialogUuid)}/attribution?${params}`);
   }
 
-  return { fetchJSON, getDialogs, createDialog, getMessages, sendMessage, getHealth, getModes, getDataSources, getTask, getTraceSteps, getTraceChain, getDialogTrace, getCorrelation, getStepDetail, getConfig, saveConfig, applyConfig, getNotificationStatus, testNotification, sendNotification, getReportTemplates, getReportTemplate, saveReportTemplate, getDashboards, getDashboard, saveDashboard, getDashboardAssociations, saveDashboardAssociations, importDashboard, deleteDialog, sendBudgetDecision, getCalendar, getWatchlist, addWatchlist, deleteWatchlist, syncWatchlist, getWatchlistQuotes, getWatchlistQuote, getKline, syncKline, getSignals, searchChartStock, scanStrategySignals, getRouteRules, saveRouteRules, routeTest, getBacktestStrategies, saveBacktestStrategy, deleteBacktestStrategy, runBacktest, getBacktestRuns, getBacktestRunDetail, getBacktestKline, deleteBacktestRun, streamCleanFailed, runBatchBacktest, listBatches, getBatch, deleteBatch, rerunBatchItem, rerunBatchFailed, streamBatchProgress, runMultiBacktest, getMulti, listMulti, deleteMulti, streamMultiProgress, listTestSets, createTestSet, getTestSet, updateTestSet, deleteTestSet, createDataTask, getDataTasks, getDataTask, pauseDataTask, resumeDataTask, cancelDataTask, getDataStats, getDataIndices, getHotNews, getStockNews, getSectorFlow, getStockFlow, getNorthFlow, getRuns, getAttribution };
+  // ============================================================
+  // 盯盘告警 API
+  // ============================================================
+  function getMonitorRules() {
+    return fetchJSON("/api/monitor/rules");
+  }
+
+  function addMonitorRule(data) {
+    return fetchJSON("/api/monitor/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  }
+
+  function patchMonitorRule(id, data) {
+    return fetchJSON(`/api/monitor/rules/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  }
+
+  function deleteMonitorRule(id) {
+    return fetchJSON(`/api/monitor/rules/${id}`, { method: "DELETE" });
+  }
+
+  function getMonitorAlerts(page = 1, size = 20, unread = false) {
+    const params = new URLSearchParams({ page, size });
+    if (unread) params.set("unread", "true");
+    return fetchJSON(`/api/monitor/alerts?${params}`);
+  }
+
+  function markMonitorAlertsRead(payload) {
+    return fetchJSON("/api/monitor/alerts/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  function clearMonitorAlerts() {
+    return fetchJSON("/api/monitor/alerts", { method: "DELETE" });
+  }
+
+  function getMonitorStatus() {
+    return fetchJSON("/api/monitor/status");
+  }
+
+  function sendMonitorTest() {
+    return fetchJSON("/api/monitor/test", { method: "POST" });
+  }
+
+  // ============================================================
+  // 持仓账本 API
+  // ============================================================
+  function getPortfolioPositions(source) {
+    const qs = (source && source !== "auto") ? `?source=${encodeURIComponent(source)}` : "";
+    // cache: no-store 防止浏览器对 GET 的启发式缓存 → 行情"没更新"的假象
+    return fetchJSON(`/api/portfolio/positions${qs}`, { cache: "no-store" });
+  }
+
+  function getPortfolioSummary() {
+    return fetchJSON("/api/portfolio/summary");
+  }
+
+  function getPortfolioTrades(stockCode, page = 1, size = 50) {
+    const params = new URLSearchParams({ page, size });
+    if (stockCode) params.set("stock_code", stockCode);
+    return fetchJSON(`/api/portfolio/trades?${params}`);
+  }
+
+  function addPortfolioTrade(data) {
+    return fetchJSON("/api/portfolio/trade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  }
+
+  function deletePortfolioTrade(tradeUuid) {
+    return fetchJSON(`/api/portfolio/trade/${encodeURIComponent(tradeUuid)}`, { method: "DELETE" });
+  }
+
+  function portfolioFromSignal(data) {
+    return fetchJSON("/api/portfolio/from-signal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ── 东财持仓同步 ──
+  function eastmoneyPreview(pasteText) {
+    return fetchJSON("/api/portfolio/eastmoney/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paste_text: pasteText }),
+    });
+  }
+
+  function eastmoneyImport(snapshot, diff) {
+    return fetchJSON("/api/portfolio/eastmoney/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshot, diff }),
+    });
+  }
+
+  function getEastmoneySession() {
+    return fetchJSON("/api/portfolio/eastmoney/session");
+  }
+
+  return { fetchJSON, getDialogs, createDialog, getMessages, sendMessage, getHealth, getModes, getDataSources, getTask, getTaskTranscript, getTraceSteps, getTraceChain, getDialogTrace, getCorrelation, getStepDetail, getConfig, saveConfig, applyConfig, getNotificationStatus, testNotification, sendNotification, getReportTemplates, getReportTemplate, saveReportTemplate, getDashboards, getDashboard, saveDashboard, getDashboardAssociations, saveDashboardAssociations, importDashboard, deleteDialog, sendBudgetDecision, cancelTask, clarifyDecision, getCalendar, getWatchlist, addWatchlist, deleteWatchlist, syncWatchlist, getWatchlistQuotes, getWatchlistQuote, getKline, syncKline, getSignals, searchChartStock, scanStrategySignals, getRouteRules, saveRouteRules, routeTest, getBacktestStrategies, saveBacktestStrategy, deleteBacktestStrategy, runBacktest, getBacktestRuns, getBacktestRunDetail, getBacktestKline, deleteBacktestRun, streamCleanFailed, runBatchBacktest, listBatches, getBatch, deleteBatch, rerunBatchItem, rerunBatchFailed, streamBatchProgress, runMultiBacktest, getMulti, listMulti, deleteMulti, streamMultiProgress, listTestSets, createTestSet, getTestSet, updateTestSet, deleteTestSet, createDataTask, getDataTasks, getDataTask, pauseDataTask, resumeDataTask, cancelDataTask, getDataStats, getDataIndices, getHotNews, getStockNews, getSectorFlow, getStockFlow, getNorthFlow, getRuns, getAttribution, getMonitorRules, addMonitorRule, patchMonitorRule, deleteMonitorRule, getMonitorAlerts, markMonitorAlertsRead, clearMonitorAlerts, getMonitorStatus, sendMonitorTest, getPortfolioPositions, getPortfolioSummary, getPortfolioTrades, addPortfolioTrade, deletePortfolioTrade, portfolioFromSignal, eastmoneyPreview, eastmoneyImport, getEastmoneySession };
 })();

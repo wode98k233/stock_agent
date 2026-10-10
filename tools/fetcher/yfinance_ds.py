@@ -4,7 +4,7 @@ priority=45（低于腾讯的 50，作为港美股兜底源）
 """
 import os
 import pandas as pd
-from .base import DataSource, DataSourceManager
+from .base import DataSource, DataSourceManager, run_with_timeout
 
 
 def _is_etf_code(symbol: str) -> bool:
@@ -58,7 +58,6 @@ class YFinanceDataSource(DataSource):
     @classmethod
     def get_stock_hist(cls, symbol: str, period: str = "daily", start: str = "", end: str = "") -> pd.DataFrame:
         import yfinance as yf
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         ticker = _convert_stock_code(symbol)
 
@@ -76,10 +75,8 @@ class YFinanceDataSource(DataSource):
             return df
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_fetch)
-                df = future.result(timeout=30)
-        except (FuturesTimeout, Exception) as e:
+            df = run_with_timeout(_fetch, 30)
+        except Exception as e:
             raise RuntimeError(f"YFinance 获取 {ticker} 失败: {e}")
 
         if df is None or df.empty:
@@ -100,7 +97,6 @@ class YFinanceDataSource(DataSource):
     @classmethod
     def get_stock_realtime(cls, symbol: str) -> pd.DataFrame:
         import yfinance as yf
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         ticker = _convert_stock_code(symbol)
 
@@ -110,10 +106,8 @@ class YFinanceDataSource(DataSource):
             return info
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_fetch)
-                info = future.result(timeout=30)
-        except (FuturesTimeout, Exception):
+            info = run_with_timeout(_fetch, 30)
+        except Exception:
             return pd.DataFrame()
 
         if not info:
@@ -139,12 +133,10 @@ class YFinanceDataSource(DataSource):
     def _get_info(cls, symbol: str) -> dict:
         """获取 Ticker.info（带超时），失败返回空 dict。"""
         import yfinance as yf
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
         ticker = _convert_stock_code(symbol)
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(lambda: yf.Ticker(ticker).info).result(timeout=30) or {}
-        except (FuturesTimeout, Exception):
+            return run_with_timeout(lambda: yf.Ticker(ticker).info, 30) or {}
+        except Exception:
             return {}
 
     @classmethod
@@ -187,12 +179,10 @@ class YFinanceDataSource(DataSource):
     def get_stock_news(cls, symbol: str) -> pd.DataFrame:
         """个股新闻（Ticker.news），兼容新旧两种返回结构。"""
         import yfinance as yf
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
         ticker = _convert_stock_code(symbol)
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                items = pool.submit(lambda: yf.Ticker(ticker).news).result(timeout=30)
-        except (FuturesTimeout, Exception) as e:
+            items = run_with_timeout(lambda: yf.Ticker(ticker).news, 30)
+        except Exception as e:
             raise RuntimeError(f"YFinance 获取 {symbol} 新闻失败: {e}")
         if not items:
             raise RuntimeError(f"YFinance 未获取到 {symbol} 的新闻")

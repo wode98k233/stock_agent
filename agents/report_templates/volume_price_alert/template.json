@@ -17,14 +17,13 @@
   ],
   "fallback_skills": [
     "money_flow",
-    "technical_analysis"
+    "stock_analysis"
   ],
   "output_blocks": [
     "core_summary",
     "evidence_table",
     "position_sizing",
     "trade_discipline",
-    "user_profile_fit",
     "action_plan_compact",
     "next_watch",
     "risk_warning",
@@ -118,7 +117,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "position_holding"
   ],
   "qa_rules": [
@@ -127,7 +125,7 @@
     "操作建议必须包含：确认条件、止损条件、目标位。",
     "天量信号（量比>5或换手率>20%）必须作为高风险提示。",
     "短线交易建议必须包含竞价、放量、封板、炸板、止损纪律；新手不适合的高风险动作必须明确禁止。",
-    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给核心结论与行动方案。"
   ],
   "skill_plan": [
     {

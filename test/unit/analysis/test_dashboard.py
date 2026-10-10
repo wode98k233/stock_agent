@@ -429,10 +429,17 @@ def test_sector_scenes_have_correct_category():
 
 def test_market_scenes_have_correct_category():
     """大盘类模板应映射到 market 类别"""
-    for template_id in ("market_daily", "macro_daily"):
-        category = get_dashboard_category(template_id)
-        assert category is not None
-        assert category.scenario_tag == "市场决策仪表盘"
+    category = get_dashboard_category("market_daily")
+    assert category is not None
+    assert category.scenario_tag == "市场决策仪表盘"
+
+
+def test_macro_scene_has_correct_category():
+    """宏观日报应映射到 macro 类别（2026-09-06 从 market 拆分独立宏观仪表盘）"""
+    category = get_dashboard_category("macro_daily")
+    assert category is not None
+    assert category.scenario_tag == "宏观仪表盘"
+    assert "macro_snapshot" in category.extended_fields
 
 
 def test_hot_events_scenes_have_correct_category():
@@ -552,6 +559,20 @@ def test_generator_coerces_string_extended_fields():
     assert result.position_guidance == {"summary": "权益总仓位建议：半仓"}
 
 
+def test_normalize_nulls_all_zero_breadth():
+    """advance/decline 同为 0（占位符）应置 null，避免前端把缺失当真实数据。"""
+    from agents.analysis.dashboard_generator import _normalize_llm_payload
+
+    out = _normalize_llm_payload(
+        {"market_breadth": {"advance": 0, "decline": 0, "limit_up": 30}})
+    assert out["market_breadth"]["advance"] is None
+    assert out["market_breadth"]["decline"] is None
+    assert out["market_breadth"]["limit_up"] == 30
+
+    keep = _normalize_llm_payload({"market_breadth": {"advance": 1200, "decline": 3000}})
+    assert keep["market_breadth"] == {"advance": 1200, "decline": 3000}
+
+
 # ============================================================
 # 4. CLI 格式化测试 (T37-T40)
 # ============================================================
@@ -595,9 +616,254 @@ def test_cli_at_end():
     assert combined.index("决策仪表盘") > len(report) - 1
 
 
+def test_tool_items_keeps_duplicates_in_order():
+    """有序调用列表：重复调用（如 get_position_detail×2）必须都保留。"""
+    from agents.analysis.dashboard_generator import _tool_items
+
+    calls = [
+        {"name": "get_position_detail", "tool_input": "a", "tool_output": "A" * 30},
+        {"name": "get_positions", "tool_output": "B" * 50},
+        {"name": "get_position_detail", "tool_input": "c", "tool_output": "C" * 40},
+    ]
+    items = _tool_items(calls, {})
+    assert [i["name"] for i in items] == ["get_position_detail", "get_positions", "get_position_detail"]
+    assert items[0]["args"] == "a" and items[2]["args"] == "c"
+
+
+def test_tool_items_falls_back_to_slot_results():
+    from agents.analysis.dashboard_generator import _tool_items
+
+    items = _tool_items(None, {"get_positions": "x" * 10})
+    assert items == [{"name": "get_positions", "args": "", "output": "x" * 10}]
+
+
+def test_build_tool_index_shape():
+    """索引含 名称/参数/长度/预览；长度按压缩后（值本身）计算。"""
+    from agents.analysis.dashboard_generator import _tool_items, _build_tool_index
+
+    items = _tool_items([
+        {"name": "get_positions", "tool_input": "{}", "tool_output": "A" * 50},
+        {"name": "get_pnl_summary", "tool_output": "B" * 30},
+    ], {})
+    idx = _build_tool_index(items)
+    assert "get_positions" in idx and "长度:50" in idx and "参数:{}" in idx
+    assert "get_pnl_summary" in idx and "长度:30" in idx
+
+
+def test_build_tool_evidence_only_selected():
+    """下钻只带被点名的工具；未选中的不进 prompt。"""
+    from agents.analysis.dashboard_generator import _tool_items, _build_tool_evidence
+
+    items = _tool_items([{"name": "get_positions", "tool_output": "P" * 4000},
+                         {"name": "get_pnl_summary", "tool_output": "Q" * 50}], {})
+    ev = _build_tool_evidence(items, selected_names=["get_pnl_summary"])
+    assert "get_pnl_summary" in ev and "get_positions" not in ev
+
+    # 点名后单工具不被截（per_tool_chars 足够大）
+    ev2 = _build_tool_evidence(items, selected_names=["get_positions"], per_tool_chars=5000)
+    assert "P" * 4000 in ev2
+
+    # 空结果跳过
+    ev3 = _build_tool_evidence(_tool_items(None, {"empty": ""}), per_tool_chars=100)
+    assert "empty" not in ev3
+
+
+def test_parse_need_tools():
+    from agents.analysis.dashboard_generator import _parse_need_tools
+
+    assert _parse_need_tools({"need_tools": ["a", "a", " b ", ""]}) == ["a", "b"]
+    assert _parse_need_tools({"need_tools": "a"}) == ["a"]
+    assert _parse_need_tools({"core_verdict": "x"}) == []
+    assert _parse_need_tools(None) == []
+
+
+def test_build_prompt_phase1_index_and_detail_request():
+    from agents.analysis.dashboard_generator import _build_prompt
+
+    msgs = _build_prompt("报告正文", {}, "问题",
+                         tool_index="- get_positions | 长度:10", allow_detail_request=True)
+    assert "可下钻" in msgs[0][1]
+    assert "工具结果索引" in msgs[1][1] and "need_tools" in msgs[1][1]
+
+
+def test_build_prompt_phase2_evidence_no_detail_request():
+    from agents.analysis.dashboard_generator import _build_prompt
+
+    msgs = _build_prompt("报告正文", {}, "问题", tool_evidence="【get_positions】持股9只")
+    user = msgs[1][1]
+    assert "工具结果原文" in user and "【get_positions】" in user
+    assert "need_tools" not in user          # 阶段二不再请求下钻
+
+
+def test_generate_two_phase_drilldown():
+    """第一轮返回 need_tools → 第二轮带原文；最终采用第二轮的仪表盘。"""
+    from agents.analysis import dashboard_generator as dg
+
+    seen = []
+
+    async def fake_call(messages, budget, logger_obj, metadata=None, run_config=None):
+        seen.append(messages[1][1])
+        if len(seen) == 1:
+            return {"need_tools": ["get_positions"], "reason": "缺持仓明细"}
+        return {"scenario_tag": "决策仪表盘", "core_verdict": "x", "decision_type": "hold",
+                "confidence_level": 0.5, "sentiment_score": 50, "trend_prediction": "neutral",
+                "quality_tag": "完整分析", "checklist": [], "key_points": [], "next_watch": []}
+
+    with patch.object(dg, "_call_llm", new=AsyncMock(side_effect=fake_call)):
+        data = asyncio.run(dg.generate(
+            "报告正文", {"get_positions": "持股9只"}, "t_x", "问题",
+            tool_calls=[{"name": "get_positions", "tool_output": "持股9只"}],
+        ))
+
+    assert data is not None and len(seen) == 2
+    assert "工具结果索引" in seen[0] and "need_tools" in seen[0]
+    assert "工具结果原文" in seen[1] and "need_tools" not in seen[1]
+
+
+def test_generate_single_phase_when_enough():
+    """第一轮直接给出仪表盘 → 只调一次 LLM。"""
+    from agents.analysis import dashboard_generator as dg
+
+    calls = []
+
+    async def fake_call(messages, budget, logger_obj, metadata=None, run_config=None):
+        calls.append(1)
+        return {"scenario_tag": "决策仪表盘", "core_verdict": "x", "decision_type": "hold",
+                "confidence_level": 0.5, "sentiment_score": 50, "trend_prediction": "neutral",
+                "quality_tag": "完整分析", "checklist": [], "key_points": [], "next_watch": []}
+
+    with patch.object(dg, "_call_llm", new=AsyncMock(side_effect=fake_call)):
+        data = asyncio.run(dg.generate("报告正文", {"get_positions": "持股9只"}, "t_x", "问题"))
+
+    assert data is not None and len(calls) == 1
+
+
+# ══════════════════════════════════════════════════════════════
+# 失败工具不得当证据 / 方向不得由弱规则预置（2026-10-01 事故）
+#   实测链：失败的大宗交易返回含「机构席位」→ 被 _find_slot_values 命中「资金面」
+#   → detail 原样展示失败 JSON；叠加新闻槽后状态变 positive（状态与详情不同源）；
+#   `_extract_decision_type` 关键词计数又预置 decision_type=buy →「综合分析建议买入」。
+# ══════════════════════════════════════════════════════════════
+
+_FAILED_TOOL_OUTPUT = (
+    '{"query": "2026年9月 大宗交易 机构席位 成交 折价", '
+    '"error": "接口返回中无 dataTableDTOList", "status": "failed"}'
+)
+_NEWS_TOOL_OUTPUT = "**来源：证券时报｜龙虎榜 游资席位 净买入** 共12条资讯；9/30沪深两市主力净流出…"
+
+
+def test_find_slot_values_skips_failed_output():
+    """失败输出的文案（机构席位）不得让它变成「资金面」命中"""
+    from agents.analysis.dashboard_generator import _find_slot_values
+    slots = {"mx_data_query": _FAILED_TOOL_OUTPUT}
+    assert _find_slot_values(slots, ("资金", "主力", "机构", "换手")) == []
+
+
+def test_checklist_skips_failed_output():
+    """只看失败数据时不得产出 checklist 项"""
+    from agents.analysis.dashboard_generator import _extract_checklist
+    assert _extract_checklist({"mx_data_query": _FAILED_TOOL_OUTPUT}) == []
+
+
+def test_checklist_detail_shares_source_with_status():
+    """失败 JSON + 新闻：状态与详情必须同源（detail 不能是失败 JSON）"""
+    from agents.analysis.dashboard_generator import _extract_checklist
+    items = _extract_checklist({"mx_data_query": _FAILED_TOOL_OUTPUT,
+                               "mx_search_news": _NEWS_TOOL_OUTPUT})
+    fund = [it for it in items if it.dimension == "资金面"]
+    assert fund, "新闻槽含资金关键词，应产出资金面项"
+    assert "dataTableDTOList" not in fund[0].detail
+    assert "接口返回中无" not in fund[0].detail
+    assert "龙虎榜" in fund[0].detail or "主力" in fund[0].detail
+
+
+def test_slot_results_prefers_usable_over_failed():
+    """同名工具：可用输出优先，不被随后的失败覆盖；失败不覆盖已取到的数据"""
+    from agents.analysis.dashboard_node import _tool_calls_to_slot_results
+    usable = {"tool_name": "mx_data_query", "tool_output": '{"tables_count":1,"total_rows":21}'}
+    failed = {"tool_name": "mx_data_query", "tool_output": _FAILED_TOOL_OUTPUT}
+
+    # 先成功后失败 → 保留成功
+    slots = _tool_calls_to_slot_results([usable, failed])
+    assert "dataTableDTOList" not in slots["mx_data_query"]
+    # 先失败后成功 → 被成功覆盖
+    slots2 = _tool_calls_to_slot_results([failed, usable])
+    assert "dataTableDTOList" not in slots2["mx_data_query"]
+
+
+def test_verdict_map_wording_is_not_directive():
+    """兜底路径的 core_verdict 不得出现"建议买入/卖出"这类指令性表述"""
+    from agents.analysis.dashboard_generator import generate as _gen
+
+    sell_heavy = {"风险分析": "止损 减仓 破位 下跌 走弱 卖出 减持 看空"}
+    with patch.object(Config, "DASHBOARD_LLM_ENABLED", False):
+        data = asyncio.run(_gen(
+            report_content="报告", slot_results=sell_heavy,
+            template_id="stock_deep_dive", user_input="分析贵州茅台",
+        ))
+
+    if data is not None and data.core_verdict:
+        assert "建议买入" not in data.core_verdict
+        assert "建议卖出" not in data.core_verdict
+
+
+def test_llm_prompt_excludes_direction_hints():
+    """方向类规则结论不得进入 LLM 提示词（只留给兜底路径）"""
+    from agents.analysis.dashboard_generator import generate as _gen
+
+    captured = {}
+
+    async def _fake_call_llm(messages, budget, logger_obj, **kwargs):
+        captured["messages"] = messages
+        return None
+
+    sell_heavy = {"风险分析": "止损 减仓 破位 下跌 走弱 卖出 减持 看空"}
+    with patch.object(Config, "DASHBOARD_LLM_ENABLED", True), \
+         patch("agents.analysis.dashboard_generator._call_llm", side_effect=_fake_call_llm):
+        asyncio.run(_gen(
+            report_content="报告", slot_results=sell_heavy,
+            template_id="stock_deep_dive", user_input="分析贵州茅台",
+        ))
+
+    blob = " ".join(str(m) for m in captured.get("messages", []))
+    # 注意：`decision_type` 作为**输出 schema 字段名**本就在 system prompt 里，不能整体断言。
+    # 要断言的是「规则预提取参考」那一段里没有预置方向。
+    marker = "规则预提取参考"
+    if marker in blob:
+        hints_block = blob.split(marker, 1)[1]
+        assert "- decision_type" not in hints_block, "方向类规则结论不得预置给 LLM"
+        assert "- core_verdict" not in hints_block
+        assert "建议买入" not in hints_block
+        assert "规则参考" not in hints_block
+    else:
+        # 连提示块都没有：更彻底（未产出任何规则提示）
+        assert "建议买入" not in blob
+
+
 # ============================================================
 # 直接运行
 # ============================================================
+
+# ══════════════════════════════════════════════════════════════
+# 轻量仪表盘 quick（2026-10-01，配套 quick_lookup 模板）
+# ══════════════════════════════════════════════════════════════
+
+def test_quick_dashboard_def_registered_and_minimal():
+    from agents.analysis.dashboard_config import (
+        get_dashboard_category, get_dashboard_def, list_dashboards)
+    from agents.analysis.template_store import load_template
+
+    assert "quick" in list_dashboards()
+    d = get_dashboard_def("quick")
+    assert d is not None and d["scenario_tag"] == "速览仪表盘"
+    # 轻量：不预置任何扩展字段（方向/仓位/止损类），只用基础字段渲染
+    assert d.get("llm_fields") == []
+    assert [s["renderer"] for s in d.get("sections", [])] == ["verdict_text", "key_points"]
+
+    cat = get_dashboard_category("quick_lookup", load_template("quick_lookup"))
+    assert cat.dashboard_id == "quick"
+    assert cat.scenario_tag == "速览仪表盘"
+
 
 if __name__ == "__main__":
     import traceback

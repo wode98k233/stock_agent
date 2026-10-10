@@ -320,3 +320,19 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df['volume'] = df['volume'].fillna(0)
 
     return df
+
+
+def get_user_positions(source: str = 'eastmoney', db_path: Optional[str] = None):
+    """预留：读取用户真实持仓（东财同步快照），供回测对照/复盘使用。
+
+    用途 a（策略对照）：回测报告附「你的实际持仓」vs「策略建议持仓」对照表
+    用途 b（信号触达）：adopt=track 的信号触发时检查是否命中用户持仓 →
+        推送文案升级为「你持仓中的 002714 触发买点」
+
+    TODO(东财同步 v2.1 链路6)：本期只预留签名不实现（避免范围蔓延）。
+    实现时只读 stock_radar.db 的 portfolio_position（source=? AND qty>0），
+    返回 [{stock_code, stock_name, qty, avg_cost, avail_qty, etf_flag, updated_at}]；
+    参考 server/storage.py::PortfolioStorage.list_positions 的口径。
+    """
+    raise NotImplementedError(
+        "get_user_positions 为预留接口（东财同步链路6），本期不实现")

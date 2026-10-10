@@ -122,38 +122,26 @@ def _check_group_messages():
 
 
 def _check_agent_trace():
-    """验证 agent_trace 记录完整"""
-    from utils.agent_trace.db import resolve_trace_db
-    db_path = resolve_trace_db()
-    if not db_path or not os.path.exists(db_path):
-        pytest.skip("agent_trace.db 不存在，跳过验证")
+    """验证 agent_trace 记录完整（分库：经 store 跨月路由）"""
+    from utils.agent_trace.store import store
 
-    conn = sqlite3.connect(db_path)
-    try:
-        # 检查最近的 run
-        row = conn.execute(
-            "SELECT id, agent_name, status FROM runs ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            pytest.skip("无 trace 记录")
+    if not store.iter_existing_months():
+        pytest.skip("agent_trace 月库不存在，跳过验证")
 
-        run_id, agent_name, status = row
-        print(f"\n  agent_trace: run_id={run_id}, agent={agent_name}, status={status}")
+    run = store.find_latest_run()
+    if not run:
+        pytest.skip("无 trace 记录")
 
-        # 检查 steps
-        cursor = conn.execute(
-            "SELECT step_type, step_name, status FROM steps WHERE run_id=? ORDER BY id",
-            (run_id,)
-        )
-        steps = cursor.fetchall()
-        print(f"  trace steps: {len(steps)} 个")
-        for step_type, step_name, step_status in steps:
-            print(f"    - [{step_type}] {step_name}: {step_status}")
+    run_id, agent_name, status = run["id"], run["agent_name"], run["status"]
+    print(f"\n  agent_trace: run_id={run_id}, agent={agent_name}, status={status}")
 
-        assert len(steps) >= 2, f"trace 步骤过少: {len(steps)}"
+    # 检查 steps
+    steps = store.get_steps(run_id)
+    print(f"  trace steps: {len(steps)} 个")
+    for step in steps:
+        print(f"    - [{step['step_type']}] {step['step_name']}: {step['status']}")
 
-    finally:
-        conn.close()
+    assert len(steps) >= 2, f"trace 步骤过少: {len(steps)}"
 
 
 def _check_token_metrics():

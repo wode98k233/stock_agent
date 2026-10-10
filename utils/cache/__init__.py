@@ -15,9 +15,11 @@ from utils.cache.api import (
     get_industry_valuation_cache, set_industry_valuation_cache,
     get_fund_flow_cache, set_fund_flow_cache,
     get_margin_cache, set_margin_cache,
+    get_macro_cache, set_macro_cache,
     get_block_trade_cache, set_block_trade_cache,
     get_sector_rotation_cache, set_sector_rotation_cache,
     get_risk_metrics_cache, set_risk_metrics_cache,
+    get_chip_distribution_cache, set_chip_distribution_cache,
 )
 from utils.cache.cleaners import (
     CacheCleaner, CacheCleanerRegistry,

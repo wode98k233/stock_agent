@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException, Request
 
 from server.deps import get_web_state
 from server.constants import TRACE_ICONS
-from utils.agent_trace.db import get_trace_conn
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,9 @@ router = APIRouter()
 
 
 def query_trace_steps(run_id: str) -> dict:
-    """查询指定 run 的所有 steps。"""
-    conn = get_trace_conn()
+    """查询指定 run 的所有 steps（分库：经 store 按月路由）。"""
+    from utils.agent_trace.store import store
+    conn = store.conn_for_run(run_id)
     if not conn:
         return {"items": []}
     try:
@@ -38,27 +38,6 @@ def query_trace_steps(run_id: str) -> dict:
         return {"items": items}
     except Exception:
         return {"items": []}
-
-
-def query_step_messages(conn, step_id: int) -> list:
-    """查询指定 step 的消息列表。"""
-    try:
-        rows = conn.execute(
-            "SELECT role, content, tool_calls, tool_call_id, reasoning FROM messages WHERE step_id=? ORDER BY seq",
-            (step_id,),
-        ).fetchall()
-        msgs = []
-        for row in rows:
-            m = dict(row)
-            if m.get("tool_calls") and isinstance(m["tool_calls"], str):
-                try:
-                    m["tool_calls"] = json.loads(m["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            msgs.append(m)
-        return msgs
-    except Exception:
-        return []
 
 
 # 里程碑节点中文标签（面向用户的执行回放）
@@ -127,7 +106,8 @@ def query_trace_chain(run_id: str) -> dict:
       - milestone:  阶段节点（意图分类/执行规划/报告增强…）
     按 step id 升序天然为时间序（决策步骤先于其工具执行步骤）。
     """
-    conn = get_trace_conn()
+    from utils.agent_trace.store import store
+    conn = store.conn_for_run(run_id)
     if not conn:
         return {"items": []}
     try:
@@ -199,27 +179,9 @@ def query_trace_chain(run_id: str) -> dict:
 
 
 def find_trace_run_by_input(user_input: str, approx_created_at: str | None = None) -> str | None:
-    """按用户输入内容查找最近的 trace run。"""
-    conn = get_trace_conn()
-    if not conn:
-        return None
-    try:
-        encoded = json.dumps(user_input)
-        if approx_created_at:
-            row = conn.execute(
-                "SELECT id FROM runs WHERE input=? AND created_at<=? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (encoded, approx_created_at),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT id FROM runs WHERE input=? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (encoded,),
-            ).fetchone()
-        return row["id"] if row else None
-    except Exception:
-        return None
+    """按用户输入内容查找最近的 trace run（分库：经 store 跨月反查）。"""
+    from utils.agent_trace.store import store
+    return store.find_run_by_input(user_input, before=approx_created_at or "")
 
 
 @router.get("/api/traces/runs/{run_id}/steps")
@@ -233,32 +195,34 @@ async def trace_chain(run_id: str):
     return query_trace_chain(run_id)
 
 
-@router.get("/api/traces/steps/{step_id}/detail")
-async def trace_step_detail(step_id: int):
-    conn = get_trace_conn()
-    if not conn:
+@router.get("/api/traces/runs/{run_id}/steps/{step_id}/detail")
+async def trace_step_detail(run_id: str, step_id: int):
+    """单 step 详情（分库后 step_id 仅在 run 所在月库内唯一，路由必须带 run_id）。"""
+    from utils.agent_trace.store import store
+    detail = store.get_step_detail(run_id, step_id)
+    if not detail:
         return {"input": None, "output": None, "messages": []}
-    try:
-        row = conn.execute(
-            "SELECT input, output FROM steps WHERE id=?",
-            (step_id,),
-        ).fetchone()
-        if not row:
-            return {"input": None, "output": None, "messages": []}
-        result = {}
-        for field in ("input", "output"):
-            val = row[field]
-            if val and isinstance(val, str):
-                try:
-                    result[field] = json.loads(val)
-                except (json.JSONDecodeError, TypeError):
-                    result[field] = val
-            else:
+    result = {}
+    for field in ("input", "output"):
+        val = detail.get(field)
+        if val and isinstance(val, str):
+            try:
+                result[field] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
                 result[field] = val
-        result["messages"] = query_step_messages(conn, step_id)
-        return result
-    except Exception:
-        return {"input": None, "output": None, "messages": []}
+        else:
+            result[field] = val
+    msgs = []
+    for m in detail.get("messages") or []:
+        msg = dict(m)
+        if msg.get("tool_calls") and isinstance(msg["tool_calls"], str):
+            try:
+                msg["tool_calls"] = json.loads(msg["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        msgs.append(msg)
+    result["messages"] = msgs
+    return result
 
 
 @router.get("/api/dialogs/{dialog_uuid}/trace")

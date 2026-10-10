@@ -9,54 +9,42 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS runs (
-    id            TEXT PRIMARY KEY,
-    agent_name    TEXT NOT NULL,
-    input         TEXT,
-    output        TEXT,
-    status        TEXT NOT NULL DEFAULT 'running',
-    error         TEXT,
-    created_at    TEXT NOT NULL,
-    finished_at   TEXT,
-    duration_ms   REAL
-);
 
-CREATE TABLE IF NOT EXISTS steps (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id          TEXT NOT NULL,
-    event_run_id    TEXT NOT NULL,
-    parent_run_id   TEXT,
-    step_type       TEXT NOT NULL,
-    step_name       TEXT,
-    input           TEXT,
-    output          TEXT,
-    status          TEXT NOT NULL DEFAULT 'running',
-    error           TEXT,
-    started_at      TEXT NOT NULL,
-    finished_at     TEXT,
-    duration_ms     REAL,
-    extra           TEXT,
-    FOREIGN KEY (run_id) REFERENCES runs(id)
-);
+def _collect_migrations(table_defs):
+    """把 TableDef.migrate 归集为迁移函数列表（与 registry._with_migrate 同口径）。"""
+    migs = []
+    for td in table_defs:
+        if td.migrate:
+            migs.extend(td.migrate if isinstance(td.migrate, (list, tuple)) else [td.migrate])
+    return migs
 
-CREATE TABLE IF NOT EXISTS messages (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    step_id       INTEGER NOT NULL,
-    seq           INTEGER NOT NULL,
-    role          TEXT NOT NULL,
-    content       TEXT,
-    tool_calls    TEXT,
-    tool_call_id  TEXT,
-    FOREIGN KEY (step_id) REFERENCES steps(id) ON DELETE CASCADE
-);
 
-CREATE INDEX IF NOT EXISTS idx_steps_run     ON steps(run_id);
-CREATE INDEX IF NOT EXISTS idx_steps_run_type ON steps(run_id, step_type);
-CREATE INDEX IF NOT EXISTS idx_steps_parent  ON steps(parent_run_id);
-CREATE INDEX IF NOT EXISTS idx_messages_step ON messages(step_id);
-CREATE INDEX IF NOT EXISTS idx_runs_ts       ON runs(created_at DESC);
-"""
+def _ensure_tables(conn, table_defs) -> None:
+    """把 conn 对齐到给定表定义（幂等加性）。"""
+    from utils.db_schema.migrator import ensure_schema
+    ensure_schema(conn, table_defs, _collect_migrations(table_defs))
+
+
+def ensure_month_schema(conn) -> None:
+    """月库表结构：runs/steps/messages（分库后月库不含 reviews）。"""
+    from utils.db_schema.tables.agent_trace import MONTH_TABLES
+    _ensure_tables(conn, MONTH_TABLES)
+
+
+def ensure_reviews_schema(conn) -> None:
+    """主库表结构：仅 reviews。"""
+    from utils.db_schema.tables.agent_trace import REVIEW_TABLES
+    _ensure_tables(conn, REVIEW_TABLES)
+
+
+def ensure_full_schema(conn) -> None:
+    """单文件全 4 表结构（显式路径兼容：测试/导出导入工具/迁移前旧库）。"""
+    from utils.db_schema.tables.agent_trace import TABLES
+    _ensure_tables(conn, TABLES)
+
+
+# 兼容别名：既有调用点（core/db_adapter/测试）引用的旧名
+ensure_trace_schema = ensure_full_schema
 
 
 @contextmanager
@@ -69,21 +57,18 @@ def _connect(conn: sqlite3.Connection):
         raise
 
 
-def _ensure_db(db: Path):
+def _ensure_db(db: Path, full: bool = True):
+    """建库文件并 ensure 表结构（幂等）。
+
+    full=True 全 4 表（显式单文件路径：测试/导出导入工具）；
+    full=False 月库 3 表（runs/steps/messages，分库默认路由）。
+    """
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
-        conn.executescript(_DDL)
-        # 幂等迁移：新增列（v2 reasoning 思考过程），列已存在时静默跳过
-        for col_sql in [
-            "ALTER TABLE messages ADD COLUMN reasoning TEXT",
-        ]:
-            try:
-                conn.execute(col_sql)
-            except sqlite3.OperationalError:
-                pass  # 列已存在
+        ensure_full_schema(conn) if full else ensure_month_schema(conn)
         conn.commit()
     except Exception:
         conn.rollback()

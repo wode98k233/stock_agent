@@ -80,6 +80,36 @@ def extract_token_usage(response) -> dict:
     return dict(_ZERO_USAGE)
 
 
+def extract_model_name(response) -> str:
+    """从 LLM 响应中提取实际服务的模型名（用于按模型维度统计 token）。
+
+    优先级：
+    1. llm_output.model_name（langchain-openai 标准字段）
+    2. llm_output.model（部分 provider）
+    3. generations 里消息的 response_metadata.model_name
+    找不到返回 ""（调用方按 unknown 处理或跳过）。
+
+    从响应本身取而非调用配置取，可覆盖网关降级/故障转移场景——
+    响应里的 model_name 是服务方如实回报的模型。
+    """
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(llm_output, dict):
+        name = llm_output.get("model_name") or llm_output.get("model")
+        if name:
+            return str(name)
+
+    generations = getattr(response, "generations", None) or []
+    for gen_list in generations:
+        for gen in gen_list:
+            msg = getattr(gen, "message", gen)
+            meta = getattr(msg, "response_metadata", None)
+            if isinstance(meta, dict):
+                name = meta.get("model_name") or meta.get("model")
+                if name:
+                    return str(name)
+    return ""
+
+
 def _extract_reasoning_tokens(usage: dict) -> int:
     """从 usage 字典提取思考 token 数，兼容多种形态。
 

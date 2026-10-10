@@ -15,14 +15,13 @@
     "mx_search"
   ],
   "fallback_skills": [
-    "technical_analysis"
+    "stock_analysis"
   ],
   "output_blocks": [
     "core_summary",
     "evidence_table",
     "position_sizing",
     "trade_discipline",
-    "user_profile_fit",
     "action_plan_compact",
     "next_watch",
     "risk_warning",
@@ -115,7 +114,6 @@
     }
   ],
   "common_rules": [
-    "investor_perspective",
     "position_holding"
   ],
   "qa_rules": [
@@ -124,7 +122,7 @@
     "加仓/减仓信号必须包含具体条件（如'回调至MA20且MACD未死叉'）。",
     "趋势反转预警信号必须具体（如'MACD顶背离+量价背离+跌破MA20'）。",
     "短线交易建议必须包含竞价、放量、封板、炸板、止损纪律；新手不适合的高风险动作必须明确禁止。",
-    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
+    "必须完整输出全部板块：核心结论/关键证据/仓位与风险预算/交易纪律/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可。"
   ],
   "skill_plan": [
     {

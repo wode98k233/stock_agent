@@ -222,6 +222,7 @@ class HybridBackend(MemoryBackend):
     """
 
     _RRF_K = 60  # RRF 常数
+    _CONTEXT_MIN_NORM = 0.3  # 历史上下文路径的弱相关门槛（归一化分数低于此不参与融合）
 
     def __init__(self, fts5: FTS5Backend, embedding: EmbeddingBackend,
                  reranker: Optional[Reranker] = None):
@@ -271,9 +272,7 @@ class HybridBackend(MemoryBackend):
           但当前提问未直接点名的记忆（如上一轮问过的大盘/CPO，本轮追问「补充数据」）也能召回。
         - 历史上下文路径权重(0.6)略低于当前问题(1.0)，避免稀释当前信号。
         """
-        K = self._RRF_K
         emb_available = self._embedding.is_available()
-
         # ── 当前问题路径 ──
         fts5_cur = self._fts5.search(query, top_k=top_k * 3)
         emb_cur: list = []
@@ -294,7 +293,11 @@ class HybridBackend(MemoryBackend):
             if self._reranker and self._reranker.is_available():
                 results = self._reranker.rerank(query, results)
             if confidence_threshold > 0:
-                results = [e for e in results if e.score >= confidence_threshold]
+                # 语义修正（2026-09-20）：这里过滤的必须是**内容置信度** e.confidence，
+                # 不是检索相关分 e.score —— 原实现拿「置信度门槛」去过滤 BM25 分，
+                # 而 BM25/RRF 量纲通常在 0.00x~0.3，0.4 的门槛会把命中结果几乎全砍光
+                # （embedding 降级路径下表现为「永远查不到记忆」）。
+                results = [e for e in results if e.confidence >= confidence_threshold]
             results = self._apply_confidence_weight(results)
             results = self._exclude_incomplete(results)
             _log.debug("[hybrid] search fts5-only hits=%d ctx=%s query=%r", len(results), bool(context), query[:60])
@@ -311,26 +314,12 @@ class HybridBackend(MemoryBackend):
                 emb_ctx = []
             emb_ctx = [entry for entry in emb_ctx if self._fts5.is_active(entry.entry_id)]
 
-        scores: dict = {}
-        entry_map: dict = {}
-
-        def _add(results, w):
-            for rank, e in enumerate(results):
-                scores[e.entry_id] = scores.get(e.entry_id, 0.0) + w / (K + rank + 1)
-                entry_map.setdefault(e.entry_id, e)
-
-        _add(fts5_cur, 1.0)
-        _add(emb_cur, 1.0)
+        paths = [(fts5_cur, 1.0, 0.0), (emb_cur, 1.0, 0.0)]
         if context:
-            _add(fts5_ctx, 0.6)   # 历史上下文路径权重略低，避免稀释当前问题信号
-            _add(emb_ctx, 0.6)
-
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        results = []
-        for entry_id, rrf_score in ranked[:top_k * 2]:
-            entry = entry_map[entry_id]
-            entry.score = round(rrf_score, 4)   # 检索相关性分（RRF 量纲）
-            results.append(entry)
+            # 历史上下文路径：权重略低 + 弱相关门槛（防「最近聊过但不相关」污染）
+            paths.append((fts5_ctx, 0.6, self._CONTEXT_MIN_NORM))
+            paths.append((emb_ctx, 0.6, self._CONTEXT_MIN_NORM))
+        results = self._rrf_fuse(paths, top_k * 2)
 
         # Cross-encoder 精排（按当前 query 重排；e.score 保持 RRF 原始分）
         if self._reranker and self._reranker.is_available():
@@ -354,20 +343,55 @@ class HybridBackend(MemoryBackend):
         return results
 
     @staticmethod
-    def _apply_confidence_weight(results: List[MemoryEntry]) -> List[MemoryEntry]:
-        """v2: 每条结果的最终分数 = 精排分 × 内容置信度 × 时间新鲜度（让低信/过期记忆下沉）。
+    def _rrf_fuse(paths, top_k: int) -> List[MemoryEntry]:
+        """分数感知的 RRF 融合（2026-09-23）。
 
-        精排分优先取 rerank_score（Cross-encoder 0~1 量纲）；无 rerank 时回退 RRF/BM25 分。
-        confidence 缺省按 0.5 处理，避免未打分记忆被清零。
-        时间新鲜度：metadata.date 距今天越近权重越高（分档衰减，封底不归零），
-        解决「今天/最近」类查询时语义相近的旧记忆反超新记忆的问题。
+        ``paths``: ``[(results, weight, min_norm), ...]``。每条路径内按各自 max 归一化分数，
+        贡献 = ``weight × norm / (K + rank + 1)``。相比纯排名 RRF，弱命中（norm 低）贡献更小，
+        避免「BM25 勉强命中」与「语义强命中」同权。
+        ``min_norm`` > 0 时，该路径内归一化分数低于门槛的命中直接丢弃（用于上下文路径防污染）。
         """
-        for e in results:
-            base = e.rerank_score if getattr(e, "rerank_score", 0) else e.score
+        K = HybridBackend._RRF_K
+        scores: dict = {}
+        entry_map: dict = {}
+        for results, w, min_norm in paths:
+            if not results:
+                continue
+            mx = max((e.score or 0.0) for e in results)
+            for rank, e in enumerate(results):
+                # 该路径无分数信息（全 0）时退化为纯排名（norm=1.0）
+                norm = ((e.score or 0.0) / mx) if mx > 0 else 1.0
+                if min_norm and norm < min_norm:
+                    continue
+                scores[e.entry_id] = scores.get(e.entry_id, 0.0) + w * norm / (K + rank + 1)
+                entry_map.setdefault(e.entry_id, e)
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        fused: List[MemoryEntry] = []
+        for entry_id, rrf_score in ranked[:top_k]:
+            entry = entry_map[entry_id]
+            entry.score = round(rrf_score, 4)
+            fused.append(entry)
+        return fused
+
+    @staticmethod
+    def _apply_confidence_weight(results: List[MemoryEntry]) -> List[MemoryEntry]:
+        """精排为主导、置信度/新鲜度仅作 tie-break（2026-09-23 调整）。
+
+        原实现 ``score = rerank × conf × recency`` 会**覆盖** cross-encoder 的相关性排序，
+        稀释掉最好的相关性信号（低信但高相关的记忆被压到后面）。
+        现改为：主序 = 精排分（无 rerank 时回退检索分）；**同分**时才用 ``conf × recency`` 决胜。
+        """
+        def _primary(e: MemoryEntry) -> float:
+            return e.rerank_score if getattr(e, "rerank_score", 0) else e.score
+
+        def _tie(e: MemoryEntry) -> float:
             conf = e.confidence if e.confidence > 0 else 0.5
-            recency = HybridBackend._recency_factor(e)
-            e.score = round(base * conf * recency, 4)
-        results.sort(key=lambda x: x.score, reverse=True)
+            return conf * HybridBackend._recency_factor(e)
+
+        for e in results:
+            e.score = round(_primary(e), 4)
+        results.sort(key=lambda x: (_primary(x), _tie(x)), reverse=True)
+        return results
         return results
 
     @staticmethod
@@ -438,6 +462,20 @@ class HybridBackend(MemoryBackend):
                 self._embedding.mark_superseded(entry_ids, new_entry_id, reason=reason)
             except Exception:
                 pass
+        return count
+
+    def backfill_chunk_columns(self, records) -> int:
+        """回填 chunk 元数据列：FTS5 权威 + Chroma 同步。
+
+        records: 可迭代 ``(chunk_index, chunk_count, chunk_group_id, entry_id)``。
+        """
+        records = list(records)
+        count = self._fts5.backfill_chunk_columns(records)
+        if self._embedding.is_available() and hasattr(self._embedding, "update_chunk_metadata"):
+            try:
+                self._embedding.update_chunk_metadata(records)
+            except Exception:
+                _log.warning("[hybrid] chunk metadata backfill to chroma failed", exc_info=True)
         return count
 
     def clean_expired(self, as_of: str | None = None) -> int:
@@ -595,6 +633,7 @@ def create_memory_backend(
     embedding_ready_timeout: float = EMBEDDING_READY_TIMEOUT,
     embedding_ready_interval: float = EMBEDDING_READY_INTERVAL,
     min_similarity: float = 0.0,
+    similarity_margin: float = 0.0,
 ) -> MemoryBackend:
     """
     创建记忆检索后端。
@@ -609,7 +648,8 @@ def create_memory_backend(
         db_path = get_stock_memory_db_path()
 
     fts5 = FTS5Backend(db_path)
-    emb = EmbeddingBackend(embedding_fn=embedding_fn, min_similarity=min_similarity)
+    emb = EmbeddingBackend(embedding_fn=embedding_fn, min_similarity=min_similarity,
+                           similarity_margin=similarity_margin)
     reranker = _build_reranker()
 
     if mode == "fts5":

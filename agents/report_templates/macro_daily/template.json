@@ -78,6 +78,10 @@
     {
       "skill": "mx_data",
       "purpose": "获取关键资产表现"
+    },
+    {
+      "skill": "macro_data",
+      "purpose": "获取 M2/LPR/CPI 等宏观指标定量数据（最新值与前值对比，禁止凭记忆编造数字）"
     }
   ],
   "common_rules": [

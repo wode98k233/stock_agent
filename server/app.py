@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 
+def _prewarm_review_engine():
+    """后台预加载对话评审引擎（含 langchain），避免首次 POST 冷加载阻塞。"""
+    try:
+        from eval.review import engine, store  # noqa: F401
+    except Exception:
+        logger.debug("对话评审引擎预热失败（忽略）", exc_info=True)
+
+
 def _require_fastapi():
     try:
         from fastapi import FastAPI, HTTPException
@@ -37,23 +45,57 @@ def create_app(state: WebAppState | None = None):
     async def lifespan(app):
         web = get_state(app)
         # 路由在 lifespan 阶段（即 uvicorn 打印 "Started server process" 之后）才注册：
-        # 路由模块会拉入 pandas/plotly/matplotlib/backtest 等重依赖（约 1.8s），
-        # 延后加载可让首行 INFO 提前出现，不影响请求（lifespan 完成前不接请求）。
+        # 路由模块会拉入 pandas/plotly/matplotlib/backtest 等重依赖，延后加载可让首行
+        # INFO 提前出现，不影响请求（lifespan 完成前不接请求）。
         register_routes(app)
+        # Skill / Agent / Memory 后台预热必须在路由注册完成之后再启动：
+        # 预热线程（langgraph/torch、chromadb/embedding 均为重 CPU/纯 Python 初始化）
+        # 与路由导入并发会在 GIL 下互相争抢，实测启动可翻倍变慢。
+        try:
+            from utils.bootstrap_common import start_agent_warmup, start_skill_warmup
+            start_skill_warmup(web.agent_context.skill_register)
+            start_agent_warmup()
+            from server.bootstrap import start_memory_warmup
+            start_memory_warmup(web.memory_sdk)
+        except Exception:
+            logger.debug("lifespan 后台预热启动失败（忽略）", exc_info=True)
+        try:
+            import threading
+            threading.Thread(
+                target=_prewarm_review_engine, name="review-engine-prewarm", daemon=True,
+            ).start()
+        except Exception:
+            logger.debug("对话评审引擎预热线程启动失败（忽略）", exc_info=True)
         try:
             yield
         finally:
             shutdown = getattr(web.runtime, "shutdown", None)
             if shutdown:
                 await shutdown()
+            # 优雅退出：关闭 WebStorage / trace 全局连接，消除 shutdown 阶段 ResourceWarning
+            storage_close = getattr(web.storage, "close", None)
+            if storage_close:
+                try:
+                    storage_close()
+                except Exception:
+                    logger.debug("storage 关闭失败（忽略）", exc_info=True)
+            try:
+                from utils.agent_trace.db import close_trace_conn
+                close_trace_conn()
+            except Exception:
+                logger.debug("trace 连接关闭失败（忽略）", exc_info=True)
 
     app = FastAPI(title="选股雷达 Web", lifespan=lifespan)
     if hasattr(app, "add_middleware"):
         from starlette.middleware.gzip import GZipMiddleware
         app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
+        # 启动导入门闸：预热 import 期间请求异步等待（先于 AccessLog 注册 →
+        # AccessLog 在外层，日志耗时含等待时间，便于观察预热期排队）
+        from server.middleware import AccessLogMiddleware, WarmupGateMiddleware
+        app.add_middleware(WarmupGateMiddleware)
+
         # 添加请求日志中间件
-        from server.middleware import AccessLogMiddleware
         app.add_middleware(AccessLogMiddleware)
 
     app.state.web = state
@@ -77,59 +119,25 @@ def create_app(state: WebAppState | None = None):
 
 
 def register_routes(app):
-    """在 lifespan 阶段注册路由：延后拉入路由模块的重依赖（pandas/plotly/backtest 等）。
+    """在 lifespan 阶段注册路由（按固定顺序串行导入 + include）。
 
-    路由模块在 import 时会触发 pandas / plotly / matplotlib / backtest 等库加载（约 1.8s），
-    放在 uvicorn 打印 "Started server process" 之后的 lifespan 注册，可让该首行 INFO 提前出现；
-    路由在 lifespan 完成前注册完毕，不影响首个请求。
+    提速说明：路由模块 import 会拉入 pandas/plotly/backtest 等重依赖，但多数共享
+    依赖（config/utils）已经加载，实测 29 个路由模块冷串行仅 ~3.3s。
+    不用线程池并行——并行 + 后台预热线程并发会在 GIL 下互相争抢，实测启动反而
+    翻倍变慢（预热已改为路由注册完成后再启动）；串行简单、可预测、无线程开销。
     """
-    from server.routes.static import router as static_router
-    from server.routes.meta import router as meta_router
-    from server.routes.dialogs import router as dialogs_router
-    from server.routes.tasks import router as tasks_router
-    from server.routes.traces import router as traces_router
-    from server.routes.config import router as config_router
-    from server.routes.notifications import router as notifications_router
-    from server.routes.skills import router as skills_router
-    from server.routes.report_templates import router as report_templates_router
-    from server.routes.calendar import router as calendar_router
-    from server.routes.watchlist import router as watchlist_router
-    from server.routes.charts import router as charts_router
-    from server.routes.data_tasks import router as data_tasks_router
-    from server.routes.backtest import router as backtest_router
-    from server.routes.group_messages import router as group_messages_router
-    from server.routes.dashboards import router as dashboards_router
-    from server.routes.news import router as news_router
-    from server.routes.flow import router as flow_router
-    from server.routes.monitor import router as monitor_router
-    from server.routes.eval import router as eval_router
-    from server.routes.memory import router as memory_router
-    from server.routes.logs import router as logs_router
-    from server.routes.signal_eval import router as signal_eval_router
+    import importlib
 
-    app.include_router(static_router)
-    app.include_router(meta_router)
-    app.include_router(dialogs_router)
-    app.include_router(tasks_router)
-    app.include_router(traces_router)
-    app.include_router(config_router)
-    app.include_router(notifications_router)
-    app.include_router(skills_router)
-    app.include_router(report_templates_router)
-    app.include_router(calendar_router)
-    app.include_router(watchlist_router)
-    app.include_router(charts_router)
-    app.include_router(data_tasks_router)
-    app.include_router(backtest_router)
-    app.include_router(group_messages_router)
-    app.include_router(dashboards_router)
-    app.include_router(news_router)
-    app.include_router(flow_router)
-    app.include_router(monitor_router)
-    app.include_router(eval_router)
-    app.include_router(memory_router)
-    app.include_router(signal_eval_router)
-    app.include_router(logs_router)
+    module_names = [f"server.routes.{m}" for m in (
+        "static", "meta", "dialogs", "tasks", "traces", "config", "notifications",
+        "skills", "report_templates", "calendar", "watchlist", "charts", "data_tasks",
+        "backtest", "group_messages", "dashboards", "news", "flow", "monitor", "eval",
+        "memory", "logs", "signal_eval", "quality", "market_monitor", "portfolio",
+        "strategy_research", "llm_cache", "data_monitor", "short_line", "market_dashboard",
+        "thesis", "crowding", "scans", "reviews", "overview",
+    )]
+    for name in module_names:
+        app.include_router(importlib.import_module(name).router)
 
 
 app = create_app()

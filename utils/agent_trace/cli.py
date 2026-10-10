@@ -28,13 +28,19 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 
 def _db_path(args) -> str:
+    """显式 --db（单文件工具语义：export/import/单库直查）；默认当月月库。"""
     if args.db:
         return args.db
     try:
-        from utils.app_paths import get_trace_db_path
-        return get_trace_db_path()
+        from utils.agent_trace.store import store
+        return store.current_month_db()
     except Exception:
         return "agent_trace.db"
+
+
+def _store():
+    from utils.agent_trace.store import store
+    return store
 
 
 @contextmanager
@@ -52,45 +58,25 @@ def _conn(db: str):
 
 
 def cmd_ls(args):
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
     n = args.n or 30
-    where = ""
-    params: list = []
-    if args.status:
-        where = "WHERE status=?"
-        params.append(args.status)
-    with _conn(db) as c:
-        rows = c.execute(
-            f"SELECT id,agent_name,status,created_at,duration_ms "
-            f"FROM runs {where} ORDER BY created_at DESC LIMIT ?",
-            params + [n],
-        ).fetchall()
-    if not rows:
+    runs = _store().list_runs(limit=n, status=args.status or "")
+    if not runs:
         print("无记录")
         return
-    for r in rows:
+    for r in runs:
         icon = {"success": "✅", "error": "❌", "running": "⏳"}.get(r["status"], "?")
         ms = f"{r['duration_ms']:.0f}ms" if r["duration_ms"] else "—"
         print(f"  {icon} {r['id']}  {r['agent_name']:<16}  {ms:<10}  {r['created_at']}")
 
 
 def cmd_show(args):
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
+    st = _store()
     run_id = args.run_id
-    with _conn(db) as c:
-        run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        if not run:
-            print(f"未找到 run: {run_id}")
-            return
-        steps = c.execute(
-            "SELECT * FROM steps WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
+    run = st.get_run(run_id)
+    if not run:
+        print(f"未找到 run: {run_id}")
+        return
+    steps = st.get_steps(run_id)
 
     icon = {"success": "✅", "error": "❌", "running": "⏳"}.get(run["status"], "?")
     ms = f"{run['duration_ms']:.0f}ms" if run["duration_ms"] else "—"
@@ -121,20 +107,14 @@ def cmd_show(args):
 
 
 def cmd_tree(args):
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
+    st = _store()
     run_id = args.run_id
     verbose = getattr(args, "verbose", False)
-    with _conn(db) as c:
-        run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        if not run:
-            print(f"未找到 run: {run_id}")
-            return
-        steps = c.execute(
-            "SELECT * FROM steps WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
+    run = st.get_run(run_id)
+    if not run:
+        print(f"未找到 run: {run_id}")
+        return
+    steps = st.get_steps(run_id)
 
     # 把 sqlite3.Row 转换为 dict
     steps_dicts = [dict(s) for s in steps]
@@ -194,60 +174,48 @@ def cmd_tree(args):
 
 
 def cmd_stats(args):
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
+    st = _store()
     n = args.n or 30
-    with _conn(db) as c:
-        runs = c.execute(
-            "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (n,)
-        ).fetchall()
-        if not runs:
-            print("无记录")
-            return
+    runs = st.list_runs(limit=n)
+    if not runs:
+        print("无记录")
+        return
 
-        total = len(runs)
-        ok = sum(1 for r in runs if r["status"] == "success")
-        err = sum(1 for r in runs if r["status"] == "error")
-        durations = [r["duration_ms"] for r in runs if r["duration_ms"]]
-        avg_d = sum(durations) / len(durations) if durations else 0
-        min_d = min(durations) if durations else 0
-        max_d = max(durations) if durations else 0
+    total = len(runs)
+    ok = sum(1 for r in runs if r["status"] == "success")
+    err = sum(1 for r in runs if r["status"] == "error")
+    durations = [r["duration_ms"] for r in runs if r["duration_ms"]]
+    avg_d = sum(durations) / len(durations) if durations else 0
+    min_d = min(durations) if durations else 0
+    max_d = max(durations) if durations else 0
 
-        agents: dict = {}
-        for r in runs:
-            agents[r["agent_name"]] = agents.get(r["agent_name"], 0) + 1
+    agents: dict = {}
+    for r in runs:
+        agents[r["agent_name"]] = agents.get(r["agent_name"], 0) + 1
 
-        run_ids = [r["id"] for r in runs]
-        placeholders = ",".join("?" * len(run_ids))
-        steps = c.execute(
-            f"SELECT * FROM steps WHERE run_id IN ({placeholders}) AND step_type='llm'",
-            run_ids,
-        ).fetchall()
-
-        total_in = 0
-        total_out = 0
-        model_stats: dict = {}
-        for s in steps:
-            extra = s["extra"]
-            if extra:
-                try:
-                    d = json.loads(extra)
-                    from utils.token_usage import normalize_token_usage_dict
-                    tu = normalize_token_usage_dict(d.get("token_usage"))
-                    inp = tu["input_tokens"]
-                    out = tu["output_tokens"]
-                    total_in += inp
-                    total_out += out
-                    mn = s["step_name"]
-                    if mn not in model_stats:
-                        model_stats[mn] = {"calls": 0, "in": 0, "out": 0}
-                    model_stats[mn]["calls"] += 1
-                    model_stats[mn]["in"] += inp
-                    model_stats[mn]["out"] += out
-                except (json.JSONDecodeError, TypeError):
-                    pass
+    total_in = 0
+    total_out = 0
+    model_stats: dict = {}
+    extras_by_run = st.llm_steps_totals([r["id"] for r in runs])
+    for item in (it for lst in extras_by_run.values() for it in lst):
+        extra = item.get("extra")
+        if extra:
+            try:
+                d = json.loads(extra)
+                from utils.token_usage import normalize_token_usage_dict
+                tu = normalize_token_usage_dict(d.get("token_usage"))
+                inp = tu["input_tokens"]
+                out = tu["output_tokens"]
+                total_in += inp
+                total_out += out
+                mn = item.get("step_name") or "unknown"
+                if mn not in model_stats:
+                    model_stats[mn] = {"calls": 0, "in": 0, "out": 0}
+                model_stats[mn]["calls"] += 1
+                model_stats[mn]["in"] += inp
+                model_stats[mn]["out"] += out
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     err_rate = err / total * 100 if total else 0
     print(f"📊 Stats (最近 {total} runs)")
@@ -263,18 +231,7 @@ def cmd_stats(args):
 
 
 def cmd_search(args):
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
-    keyword = f"%{args.keyword}%"
-    with _conn(db) as c:
-        rows = c.execute(
-            "SELECT id,agent_name,status,created_at FROM runs "
-            "WHERE input LIKE ? OR output LIKE ? OR error LIKE ? "
-            "ORDER BY created_at DESC LIMIT 20",
-            (keyword, keyword, keyword),
-        ).fetchall()
+    rows = _store().search_runs(args.keyword, limit=20)
     if not rows:
         print("未找到匹配记录")
         return
@@ -316,86 +273,24 @@ def cmd_import(args):
 
 
 def cmd_calendar(args):
-    """按日期分组展示 run 的 token 统计和耗时。"""
-    db = _db_path(args)
-    if not Path(db).exists():
-        print(f"数据库不存在: {db}")
-        return
+    """按日期分组展示 run 的 token 统计和耗时（分库：经 calendar_query 逐月合并）。"""
     n = args.n or 30
     year = getattr(args, "year", None)
     month = getattr(args, "month", None)
 
-    with _conn(db) as c:
-        # 构造查询条件
-        where_parts = []
-        params: list = []
-        if year:
-            prefix = f"{year}-"
-            if month:
-                prefix = f"{year}-{month:02d}-"
-            where_parts.append("r.created_at LIKE ?")
-            params.append(f"{prefix}%")
+    from utils.agent_trace.calendar_query import query_trace_calendar
+    data = query_trace_calendar(_store(), year, month)
+    run_days = data.get("run_days") or {}
+    if not run_days:
+        print("无记录")
+        return
 
-        where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
-
-        rows = c.execute(
-            f"SELECT r.id, r.agent_name, r.status, r.created_at, r.duration_ms "
-            f"FROM runs r{where_sql} ORDER BY r.created_at DESC",
-            params,
-        ).fetchall()
-
-        if not rows:
-            print("无记录")
-            return
-
-        # 按日期分组
-        from collections import OrderedDict
-        days: OrderedDict[str, list] = OrderedDict()
-        for r in rows:
-            created = r["created_at"] or ""
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(created)
-                day_str = dt.strftime("%Y-%m-%d")
-            except Exception:
-                day_str = created[:10]
-            days.setdefault(day_str, []).append(dict(r))
-
-        # 限制天数
-        day_keys = list(days.keys())[:n]
-
-        # 查询所有相关 run 的 token 统计
-        all_run_ids = []
-        for dk in day_keys:
-            for r in days[dk]:
-                all_run_ids.append(r["id"])
-
-        token_map: dict = {}
-        if all_run_ids:
-            placeholders = ",".join("?" * len(all_run_ids))
-            steps = c.execute(
-                f"SELECT run_id, extra FROM steps "
-                f"WHERE run_id IN ({placeholders}) AND step_type='llm'",
-                all_run_ids,
-            ).fetchall()
-
-            from utils.token_usage import normalize_token_usage_dict
-            for s in steps:
-                rid = s["run_id"]
-                extra_str = s["extra"]
-                if not extra_str:
-                    continue
-                try:
-                    d = json.loads(extra_str)
-                    tu = normalize_token_usage_dict(d.get("token_usage"))
-                    if rid not in token_map:
-                        token_map[rid] = {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-                    token_map[rid]["llm_calls"] += 1
-                    token_map[rid]["input_tokens"] += tu["input_tokens"]
-                    token_map[rid]["output_tokens"] += tu["output_tokens"]
-                    token_map[rid]["total_tokens"] += tu["total_tokens"]
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    continue
+    # 按日期分组（query 已带 token 统计），倒序取最近 n 天
+    from collections import OrderedDict
+    days: OrderedDict[str, list] = OrderedDict()
+    for day_str in sorted(run_days.keys(), reverse=True):
+        days[day_str] = run_days[day_str]
+    day_keys = list(days.keys())[:n]
 
     # 输出
     print(f"📅 Trace Calendar (最近 {len(day_keys)} 天)")
@@ -413,11 +308,10 @@ def cmd_calendar(args):
         day_calls = 0
         durations = []
         for r in runs:
-            tm = token_map.get(r["id"], {})
-            day_in += tm.get("input_tokens", 0)
-            day_out += tm.get("output_tokens", 0)
-            day_total += tm.get("total_tokens", 0)
-            day_calls += tm.get("llm_calls", 0)
+            day_in += r.get("input_tokens", 0)
+            day_out += r.get("output_tokens", 0)
+            day_total += r.get("total_tokens", 0)
+            day_calls += r.get("llm_calls", 0)
             if r.get("duration_ms"):
                 durations.append(r["duration_ms"])
 
@@ -440,8 +334,7 @@ def cmd_calendar(args):
         for r in runs:
             icon = {"success": "✅", "error": "❌", "running": "⏳"}.get(r["status"], "?")
             ms = f"{r['duration_ms']/1000:.1f}s" if r.get("duration_ms") else "—"
-            tm = token_map.get(r["id"], {})
-            tok = f"{tm.get('total_tokens', 0):,} tok" if tm.get("total_tokens") else ""
+            tok = f"{r.get('total_tokens', 0):,} tok" if r.get("total_tokens") else ""
             agent = r["agent_name"][:20]
             rid = r["id"][:8]
             print(f"    {icon} {rid}  {agent:<20} {ms:<8} {tok}")
@@ -449,16 +342,40 @@ def cmd_calendar(args):
 
 def cmd_calendar_json(args) -> dict:
     """返回日历统计的 JSON 数据（供 API 使用）。"""
-    db = _db_path(args)
-    if not Path(db).exists():
-        return {"year": None, "month": None, "run_days": {}}
-
     year = getattr(args, "year", None)
     month = getattr(args, "month", None)
 
     from utils.agent_trace.calendar_query import query_trace_calendar
-    with _conn(db) as c:
-        return query_trace_calendar(c, year, month)
+    return query_trace_calendar(_store(), year, month)
+
+
+def cmd_cleanup(args):
+    """清理过期月库（保留最近 N 个月；无 --apply 时仅预览）。"""
+    from utils.agent_trace import cleanup as trace_cleanup
+
+    keep = args.keep_months
+    plan = trace_cleanup.preview(keep)
+    if not plan.months:
+        print(f"无可清理月库（现有月份：{store_months() or '无'}，保留 {keep} 个月）")
+        return
+    print(f"将清理 {len(plan.months)} 个月库（保留最近 {keep} 个月）：")
+    for m in plan.months:
+        print(f"  {m.month}: {m.runs} runs / {m.steps} steps / {m.messages} messages "
+              f"→ {m.db_path}（{m.size_mb} MB）")
+    print(f"合计释放约 {plan.total_size_mb} MB、{plan.total_runs} 个 run")
+    if not args.apply:
+        print("预览完成（未删除）。加 --apply 正式执行。")
+        return
+    result = trace_cleanup.apply(plan)
+    print(f"已删除 {len(result['removed_months'])} 个月库，"
+          f"释放 {result['freed_mb']} MB，级联清理 reviews {result['reviews_deleted']} 条")
+
+
+def store_months() -> list:
+    try:
+        return _store().iter_existing_months()
+    except Exception:
+        return []
 
 
 def main():
@@ -501,6 +418,10 @@ def main():
     p_cal.add_argument("--year", type=int, default=None, help="过滤年份")
     p_cal.add_argument("--month", type=int, default=None, help="过滤月份")
 
+    p_cleanup = sub.add_parser("cleanup", help="清理过期月库（默认保留 6 个月）")
+    p_cleanup.add_argument("--keep-months", type=int, default=6, help="保留最近 N 个月（默认 6）")
+    p_cleanup.add_argument("--apply", action="store_true", help="正式删除（默认仅预览）")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -515,6 +436,7 @@ def main():
         "export": cmd_export,
         "import": cmd_import,
         "calendar": cmd_calendar,
+        "cleanup": cmd_cleanup,
     }
     fn = cmds.get(args.command)
     if fn:

@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from utils.agent_trace.models import _DDL, _json, _now
+from utils.agent_trace.models import ensure_trace_schema, _json, _now
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +49,23 @@ class DBAdapter:
 
 
 class SQLiteAdapter(DBAdapter):
-    def __init__(self, db_path: str = "agent_trace.db"):
+    def __init__(self, db_path: str | None = None):
+        # db_path=None → 当月月库（分库默认路由）；":memory:" → 内存；
+        # 显式路径 → 直写该单文件并 ensure 全 4 表（测试/导出导入工具兼容语义）
+        self._routed_monthly = db_path is None
+        if self._routed_monthly:
+            from utils.agent_trace.store import store
+            db_path = store.current_month_db()
+            full_schema = False
+        else:
+            full_schema = True
         self._db = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = threading.RLock()
         self._ddl_ran: bool = False
         if str(self._db) != ":memory:":
             from utils.agent_trace.models import _ensure_db
-            _ensure_db(self._db)
+            _ensure_db(self._db, full=full_schema)
             self._ddl_ran = True
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -65,13 +74,19 @@ class SQLiteAdapter(DBAdapter):
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
-            if not self._ddl_ran:
-                self._conn.executescript(_DDL)
-                self._conn.commit()
-                self._ddl_ran = True
+            self._ensure_ddl()
         return self._conn
 
+    def _ensure_ddl(self):
+        """建表走统一 schema（agent_trace 组，幂等加性）。"""
+        if self._ddl_ran:
+            return
+        ensure_trace_schema(self._conn)
+        self._conn.commit()
+        self._ddl_ran = True
+
     def init_schema(self):
+        """确保表结构就绪（统一入口，幂等）。"""
         self._get_conn()
 
     def insert_run(self, run: dict) -> str:
@@ -194,6 +209,12 @@ class SQLiteAdapter(DBAdapter):
             return [dict(r) for r in rows]
 
     def delete_run(self, run_id: str):
+        if self._routed_monthly:
+            # 分库模式：跨库两段（runs/steps/messages 在月库，reviews 在主库）
+            from utils.agent_trace.store import store
+            store.delete_run(run_id)
+            return
+        # 单文件模式（显式路径/:memory:）：全 4 表同库
         with self._lock:
             c = self._get_conn()
             step_ids = [
@@ -208,6 +229,10 @@ class SQLiteAdapter(DBAdapter):
                     f"DELETE FROM messages WHERE step_id IN ({placeholders})",
                     step_ids,
                 )
+            c.execute(
+                "DELETE FROM reviews WHERE scope='run' AND target_id=?",
+                (run_id,),
+            )
             c.execute("DELETE FROM steps WHERE run_id=?", (run_id,))
             c.execute("DELETE FROM runs WHERE id=?", (run_id,))
             c.commit()
@@ -252,61 +277,58 @@ def get_decision_chain(run_id: str) -> dict:
     供 memory/provenance.py 的 ProvenanceQuerier 使用。
     返回结构化 dict 供前端展示"这条结论是怎么推断出来的"。
     """
-    import os as _os
-    db_path = _os.environ.get(
-        "AGENT_TRACE_DB",
-        _os.path.join(_os.path.dirname(__file__), "..", "..", "agent_trace.db"),
-    )
-    db_path = _os.path.abspath(db_path)
-    if not _os.path.exists(db_path):
+    from utils.agent_trace.store import store
+
+    steps = store.get_steps_with_messages(run_id)
+    if not steps:
         return None
 
-    adapter = SQLiteAdapter(db_path)
-    try:
-        adapter.init_schema()
-        steps = adapter.get_steps_with_messages(run_id)
-        if not steps:
-            return None
+    tool_calls = []
+    llm_calls = []
+    for s in steps:
+        step_type = s.get("step_type", "")
+        step_name = s.get("step_name", "")
+        messages = s.get("messages", [])
 
-        tool_calls = []
-        llm_calls = []
-        for s in steps:
-            step_type = s.get("step_type", "")
-            step_name = s.get("step_name", "")
-            messages = s.get("messages", [])
+        if step_type == "tool":
+            tool_calls.append({
+                "name": step_name,
+                "input": s.get("input", ""),
+                "status": s.get("status", ""),
+            })
+        elif step_type in ("llm", "chat"):
+            for m in messages:
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if content:
+                    llm_calls.append({
+                        "step": step_name,
+                        "role": role,
+                        "content": content[:500],
+                        "tool_calls": m.get("tool_calls"),
+                    })
 
-            if step_type == "tool":
-                tool_calls.append({
-                    "name": step_name,
-                    "input": s.get("input", ""),
-                    "status": s.get("status", ""),
-                })
-            elif step_type in ("llm", "chat"):
-                for m in messages:
-                    role = m.get("role", "")
-                    content = m.get("content", "")
-                    if content:
-                        llm_calls.append({
-                            "step": step_name,
-                            "role": role,
-                            "content": content[:500],
-                            "tool_calls": m.get("tool_calls"),
-                        })
+    # 构造推理路径（串联 LLM 调用摘要）
+    reasoning_parts = []
+    for llm_call in llm_calls:
+        content = llm_call.get("content", "")
+        if content and len(content) > 20:
+            reasoning_parts.append(content[:200])
+    reasoning_path = " → ".join(reasoning_parts)
 
-        # 构造推理路径（串联 LLM 调用摘要）
-        reasoning_parts = []
-        for llm_call in llm_calls:
-            content = llm_call.get("content", "")
-            if content and len(content) > 20:
-                reasoning_parts.append(content[:200])
-        reasoning_path = " → ".join(reasoning_parts)
+    return {
+        "tool_calls": tool_calls,
+        "llm_calls": llm_calls,
+        "reasoning_path": reasoning_path[:2000],
+    }
 
-        return {
-            "tool_calls": tool_calls,
-            "llm_calls": llm_calls,
-            "reasoning_path": reasoning_path[:2000],
-        }
-    except Exception:
-        return None
-    finally:
-        adapter.close()
+
+def get_adapter(kind: str = "sqlite") -> DBAdapter:
+    """trace 存储后端工厂。
+
+    当前仅 SQLite。未来切 PG 时在此分支返回 PostgresAdapter 并新增
+    TRACE_DB_URI 配置（见 docs/arch/2026-09-09-统一DBSchema初始化-设计.md §8）。
+    """
+    if kind == "sqlite":
+        return SQLiteAdapter()
+    raise ValueError(f"不支持的 trace 存储后端: {kind}")

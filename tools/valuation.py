@@ -132,6 +132,34 @@ def calc_industry_compare(stock_valuation: dict, industry_data: dict) -> dict:
     return result
 
 
+def is_etf_code(symbol: str) -> bool:
+    """场内基金（ETF）代码段判定 —— 用于「ETF 无 PE/PB 口径」这类标的类型分流。
+
+    口径与 `tools/fetcher/hithink_ds.py::_is_etf` 对齐（按交易所基金代码段，
+    避免把 LOF/REITs 误判为 ETF）：
+    - 沪市：51/52/56/58 宽口径 + 显式补充 530（类指数）/551（科创债）新段；
+    - 深市：仅 158/159 为 ETF 专用段（15 宽口径会把 16 开头的 LOF 如 161725、
+      18 开头的 REITs/封基如 180101 误判）。
+
+    ETF 与个股不同：**没有 PE(TTM)/PB 概念**，估值历史分位不适用。
+    """
+    s = str(symbol or "").strip().upper()
+    for prefix in ("SH", "SZ"):
+        if s.startswith(prefix):
+            s = s[2:]
+            break
+    code = s.split(".")[0]
+    if not (len(code) == 6 and code.isdigit()):
+        return False
+    suffix = s.split(".")[1] if "." in s else ""
+    if suffix == "SZ":
+        return code.startswith(("158", "159"))
+    if suffix == "SH":
+        return code.startswith(("51", "52", "56", "58", "530", "551"))
+    # 无后缀：按前缀推断（51/52/56/58/530/551 只可能是沪市，158/159 只可能是深市）
+    return code.startswith(("51", "52", "56", "58", "530", "551", "158", "159"))
+
+
 def calc_percentile(history_df: pd.DataFrame, current_valuation: dict, years: int = 5) -> dict:
     result = {'years': years}
 

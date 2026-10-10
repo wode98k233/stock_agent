@@ -20,11 +20,12 @@ from agents.state import PlanExecute
 from agents.agent_context import AgentContext
 from agents.prompts import EXECUTOR_SYSTEM
 from agents.user_decision import ask_user_decision, format_step_status
-from agents.plan.analyze import extract_step_info, is_abnormal_result
+from agents.plan.analyze import extract_step_info, is_abnormal_result, is_empty_step_result
 from agents.shared.exception_utils import handle_budget_exceeded
-from agents.shared.tool_utils import merge_tools_for_step
+from agents.shared.tool_utils import merge_tools_for_skills
 from agents.shared.step_utils import restore_exempt_window, check_budget_with_exempt, ErrorDeduplicator
 from tools.skills import SkillPromptBuilder
+from utils.agent_trace.core import get_active_recorder
 from utils.budget import BudgetExceeded, BudgetExemptWindow
 from utils.logger import RequestContext, ensure_radar
 
@@ -56,6 +57,20 @@ def _build_step_result(step_idx, skill_name, status, summary,
 def _check_budget_with_exempt(state, budget, logger, exempt_window):
     """统一的预算检查 — 委托共享版本（overrun_limit=MAX_USER_APPROVED_OVERRUN）"""
     return check_budget_with_exempt(state, budget, logger, exempt_window, overrun_limit=MAX_USER_APPROVED_OVERRUN)
+
+
+def _record_skill_activate(skill_name, tool_names, source, step_num):
+    """上报技能激活事件（渐进披露可见性，无活动 trace 时静默跳过）"""
+    try:
+        recorder = get_active_recorder()
+        if recorder is not None:
+            recorder.record_skill_event("activate", {
+                "active_skill": skill_name, "source": source,
+                "tools": list(tool_names), "step": step_num,
+            })
+    except Exception:
+        pass
+
 
 def _handle_step_failure(step_info, state, last_error, memory, logger, progress):
     """步骤失败后与用户交互，返回 return_dict 或 None（表示重试）"""
@@ -136,6 +151,12 @@ async def _run_step_with_retry(state, step_info, tools, registry, ctx, budget, e
         # 构建上下文并执行子图
         context_msgs = []
 
+        # L1 渐进披露：注入当前步骤涉及技能的工具用法详情（多技能逐个注入，与 Unified 对齐）
+        for _sk in (step_info.get("skills") or ([skill_name] if skill_name else [])):
+            tools_detail = SkillPromptBuilder.build_tools_detail_prompt(registry, _sk)
+            if tools_detail:
+                context_msgs.append(("system", f"可用工具详情：\n{tools_detail}"))
+
         # 注入对话历史
         if ctx.memory and ctx.memory.enabled:
             history = ctx.memory.get_history()
@@ -176,6 +197,18 @@ async def _run_step_with_retry(state, step_info, tools, registry, ctx, budget, e
             # 异常结果检查
             if is_abnormal_result(result_text) or result_text.strip().startswith("Sorry, need more steps"):
                 raise ValueError(f"Agent 返回异常结果: {repr(result_text)}")
+
+            # 空转门禁（2026-09-27）：零工具调用 + 缺标的/空数据语料 → 判失败走重试。
+            # 否则「我没拿到标的所以没查」会被记成 success，replanner 直接换方向，
+            # 用户的核心问题整轮被静默跳过（2026-09-26 实测事故）。
+            if is_empty_step_result(result_text, len(collected_tool_calls)):
+                logger.warning(
+                    "E",
+                    f"Step {step_num} 零工具调用且未获取数据 → 判为失败: {result_text[:120]}",
+                )
+                raise ValueError(
+                    f"Agent 返回空转结果（工具调用 0 次，未获取数据）: {repr(result_text[:200])}"
+                )
 
             # tool_call XML 幻觉检查：循环检测强制总结时 LLM 可能输出 tool_call XML
             if result_text and _TOOL_CALL_XML_PATTERN.search(result_text):
@@ -313,9 +346,15 @@ async def execute_step(state: PlanExecute, ctx: AgentContext, run_config=None):
             return {"response": f"用户取消了执行，已完成的结果:\n\n{summary}"}
         return {"response": "用户取消了执行"}
 
-    # 加载工具
-    tools = merge_tools_for_step(ctx.skill_registry, step_info["skill_name"], state.get("selected_skills", []), logger, log_tag="E")
+    # 加载工具（多技能：装 step["skills"] 全量，缺失时回退主技能）
+    step_skills = step_info.get("skills") or ([step_info["skill_name"]] if step_info["skill_name"] else [])
+    tools = merge_tools_for_skills(
+        ctx.skill_registry, step_skills,
+        selected_skills=state.get("selected_skills", []),
+        logger=logger, log_tag="E", fallback_skill=step_info["skill_name"],
+    )
     logger.debug("E", f"加载工具: {[t.name for t in tools]}")
+    _record_skill_activate(step_info["skill_name"], [t.name for t in tools], "plan_step", step_info["step_num"])
 
     # 执行
     return_dict, exempt_window = await _run_step_with_retry(

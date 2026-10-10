@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from config import Config
 from agents.utils import (
     _is_abnormal_result,
+    _looks_like_missing_target,
     _error_fingerprint,
     _keyword_overlap,
 )
@@ -17,6 +18,17 @@ from agents.utils import (
 
 def is_abnormal_result(text: str) -> bool:
     return _is_abnormal_result(text)
+
+
+def is_empty_step_result(text: str, tool_call_count: int = 0) -> bool:
+    """判定「空转步骤」：一次工具都没调用，且回复明说拿不到标的/数据。
+
+    只在零工具调用时生效——有工具调用的步骤一律放行，避免误伤正常报告
+    （正常报告里出现「无法获取」是结论的一部分，不是空转）。
+    """
+    if tool_call_count:
+        return False
+    return _is_abnormal_result(text) or _looks_like_missing_target(text)
 
 
 def error_fingerprint(e: Exception) -> str:
@@ -50,12 +62,33 @@ def check_termination(state: Dict[str, Any], original_plan_len: int) -> Tuple[bo
     return False, None
 
 
+def _step_skills(step: Dict[str, Any]) -> List[str]:
+    """步骤技能列表：优先 ``skills``（归一后的全量），回退单个 ``skill``。"""
+    for raw in (step.get("skills"), step.get("skill", "")):
+        if isinstance(raw, (list, tuple)):
+            items = [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+        elif isinstance(raw, str) and raw.strip():
+            items = [raw.strip()]
+        else:
+            items = []
+        if items:
+            return items
+    return []
+
+
+def _primary_skill(step: Dict[str, Any]) -> str:
+    """步骤主技能名：兼容 skill 为字符串或技能名数组（取首个有效项）。"""
+    skills = _step_skills(step)
+    return skills[0] if skills else ""
+
+
 def extract_step_info(plan: List[Dict], step_index: int) -> Optional[Dict]:
     if not plan or step_index < 0 or step_index >= len(plan):
         return None
     step = plan[step_index]
     return {
-        "skill_name": step.get("skill", ""),
+        "skill_name": _primary_skill(step),
+        "skills": _step_skills(step),
         "instruction": step.get("instruction", ""),
         "purpose": step.get("purpose", ""),
         "step_num": step.get("step", step_index + 1),
@@ -79,41 +112,59 @@ def match_pending_steps(
 ) -> dict:
     """匹配新步骤与未执行步骤，返回 {new_idx: old_plan_idx} 的替换映射。
 
-    规则：
-    - 多个新步骤匹配同一老步骤 → 取 overlap 最高的
-    - overlap < threshold → 视为全新步骤（不映射）
+    判定规则（2026-09-27 决策 A）：
+    1. **跨 skill 一律不替换**。不同 skill = 不同能力，替换等于静默丢掉一个已规划步。
+       原先的纯关键词判定对「短而泛化的 instruction」会虚高到满分：老步 instruction
+       「综合结论」（4 个去重汉字）对比 51 字的新指令，交集 4 / 分母 min(4,51)=4 → 1.0 > 阈值，
+       于是 `stock_analysis` 被 `hang_seng_env` 顶掉，且全程无告警（实测复现）。
+    2. 同 skill：
+       - 未执行段该 skill 只有一个候选 → 直接替换（措辞变化不改变能力等价）
+       - 有多个候选 → 用关键词挑最像的；若都低于 threshold → 视为新任务，交给调用方追加
+
+    注：`threshold` 现在只用于「同 skill 多候选」的消歧，不再决定跨 skill 的替换。
     """
     pending_start = current_step
     pending_end = len(original_plan)
     if pending_start >= pending_end:
         return {}
 
-    match_map = {}  # new_idx -> old_plan_idx
-    used_old = set()  # 已被匹配的老步骤索引
+    # 未执行段按 skill 归集候选下标
+    candidates_by_skill: Dict[str, List[int]] = {}
+    for old_idx in range(pending_start, pending_end):
+        skill = _primary_skill(original_plan[old_idx])
+        if skill:
+            candidates_by_skill.setdefault(skill, []).append(old_idx)
 
-    # 计算所有 (new_idx, old_idx) 的 overlap，按 overlap 降序排列
-    # 同时检查 instruction 和 purpose
-    candidates = []
+    match_map: Dict[int, int] = {}
+    used_old: set = set()
+
     for new_idx, step in enumerate(new_steps):
-        step_instruction = step.get("instruction", "")
-        step_purpose = step.get("purpose", "")
-        for old_idx in range(pending_start, pending_end):
-            old_instruction = original_plan[old_idx].get("instruction", "")
-            old_purpose = original_plan[old_idx].get("purpose", "")
-            overlap = max(
-                keyword_overlap(step_instruction, old_instruction),
-                keyword_overlap(step_purpose, old_purpose) * 0.9,  # purpose 匹配略降权
-            )
-            if overlap > threshold:
-                candidates.append((overlap, new_idx, old_idx))
-
-    # 按 overlap 降序贪心匹配（最佳匹配优先）
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    for overlap, new_idx, old_idx in candidates:
-        if new_idx in match_map or old_idx in used_old:
+        new_skill = _primary_skill(step)
+        if not new_skill:
             continue
-        match_map[new_idx] = old_idx
-        used_old.add(old_idx)
+
+        cands = [i for i in candidates_by_skill.get(new_skill, []) if i not in used_old]
+        if not cands:
+            continue
+
+        if len(cands) == 1:
+            chosen = cands[0]
+        else:
+            def _score(old_idx: int) -> float:
+                old_step = original_plan[old_idx]
+                return max(
+                    keyword_overlap(step.get("instruction", ""), old_step.get("instruction", "")),
+                    keyword_overlap(step.get("purpose", ""), old_step.get("purpose", "")) * 0.9,
+                )
+
+            scored = sorted(((_score(i), i) for i in cands), key=lambda x: -x[0])
+            if scored[0][0] <= threshold:
+                # 同 skill 但内容都不相似 → 当作新增任务，不替换（避免吃掉已规划步）
+                continue
+            chosen = scored[0][1]
+
+        match_map[new_idx] = chosen
+        used_old.add(chosen)
 
     return match_map
 

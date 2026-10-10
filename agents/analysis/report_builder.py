@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any, Optional
 
+from agents.analysis.evidence_view import _text, _tool_items, tool_output_status
 from agents.analysis.models import SlotResult, SectionPlan, ReportSection
 from config import Config
 from utils.budget import BudgetExceeded
@@ -16,9 +17,251 @@ from utils.budget import BudgetExceeded
 logger = logging.getLogger(__name__)
 
 
-def _min_report_tokens() -> int:
-    """报告最低 token 目标，支持运行时配置。"""
-    return max(0, int(getattr(Config, "REPORT_MIN_TOKENS", 3500) or 0))
+def _min_report_tokens(template: dict | None = None) -> int:
+    """报告最低 token 目标，支持运行时配置，并允许**模板级覆盖**。
+
+    模板可用 `min_report_tokens` 覆盖全局 `REPORT_MIN_TOKENS`（默认 2200）。
+    **设 0 表示"轻量模板"**：不触发 `_expand_report_if_short` 扩写，且提示词里
+    把「全文目标不少于 N token」换成「简洁优先、只答用户所问」。
+    背景（2026-10-01）：`max_report_words` 只被模板管理界面消费、生成路径不读，
+    因此单靠模板字段无法让报告变短 —— 用户明明说「只需要这个就行了」，
+    报告仍会被扩写机制拉到 3500 token 量级（实测 7283 字符）。
+    2026-10-10 下调 3500→2200：3500 的下限 + 扩写指令「必须增加表格/矩阵/Mermaid」
+    是报告注水的直接来源（实测核心结论+行动方案仅占全文 9%）。
+    """
+    if template is not None and template.get("min_report_tokens") is not None:
+        try:
+            return max(0, int(template["min_report_tokens"]))
+        except (TypeError, ValueError):
+            pass
+    return max(0, int(getattr(Config, "REPORT_MIN_TOKENS", 2200) or 0))
+
+
+def _max_report_words(template: dict | None = None) -> int:
+    """模板声明的全文上限（字），0 表示未声明。生成路径消费，不再只是界面字段。"""
+    if template:
+        try:
+            return max(0, int(template.get("max_report_words") or 0))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 报告图表归集辅助：去重 + 技术面图板注入
+# ═══════════════════════════════════════════════════════════════
+
+def _dedupe_chart_markers(markers: list) -> list:
+    """按图表的 (stock_code, chart_type) 去重，同组保留最后出现的（最新）。
+
+    查不到元数据的 ID 原样保留，绝不因去重丢图。
+    """
+    if not markers:
+        return markers
+    try:
+        from agents.analysis.chart_extractor import get_fragment
+        seen: dict = {}          # (code, type) -> marker（后出现的覆盖前面的）
+        fallback: list = []      # 查不到元数据的标记，原样保留
+        for m in markers:
+            cid = re.sub(r"^@@CHART:|@@$", "", m)
+            frag = get_fragment(cid) if cid else None
+            if not frag:
+                fallback.append((m, len(seen)))
+                continue
+            key = (frag.get("stock_code") or "", frag.get("chart_type") or "")
+            seen[key] = m
+        # fallback 按原顺序插入，且不与已保留的标记重复
+        result = list(seen.values())
+        for m, pos in fallback:
+            if m not in result:
+                result.insert(min(pos, len(result)), m)
+        return result
+    except Exception:
+        logger.debug("report_builder: 图表去重失败，保留原标记", exc_info=True)
+        return markers
+
+
+# 工具证据中的 6 位股票/ETF 代码（避免被更长数字串包含）
+_EVIDENCE_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+# 合法 A 股/ETF 代码前缀（沪 6/9/51/52/56/58，深 0/3/15/16/18，北 4/8）
+_VALID_CODE_PREFIX = ("6", "9", "5", "0", "3", "1", "4", "8")
+
+
+def _is_plausible_stock_code(code: str) -> bool:
+    """粗校验：6 位且前缀像 A 股/ETF 代码，滤掉证据里的金额/数量等杂数字。"""
+    return bool(re.fullmatch(r"\d{6}", code)) and code[0] in _VALID_CODE_PREFIX
+
+
+def _tech_panel_max() -> int:
+    """报告技术面图板数量上限（可经 .env / 页面配置面板调整，0=不注入）。"""
+    try:
+        return max(0, int(getattr(Config, "REPORT_TECH_PANEL_MAX", 3)))
+    except Exception:
+        return 3
+
+
+# 显式例外：即使模板自描述为市场类，也不按指数解释（扩展口，当前为空）
+_STOCK_FIRST_TEMPLATE_IDS: frozenset = frozenset()
+
+
+def _prefer_index_symbols(template: dict) -> bool:
+    """该报告的「标的类型」是否应按 A 股指数解释。
+
+    依据模板自描述字段（`agents/report_templates/*/template.json`）：
+    `asset_type == 'market'`（标的是市场整体）且 `intent_type == 'daily_summary'`
+    → market_daily（市场日报）/ macro_daily（经济日报）。
+
+    这类报告里出现的同码标的必然指指数，而不是同码个股——实测
+    `index_info ∩ stock_info` 只有一个 **000001**（上证指数 ↔ 平安银行）。
+    2026-09-30「今日股市总结」把平安银行当主图注入，根因就是缺这一层判定。
+
+    注意：`asset_type='market'` 但不做限制的还有 event_impact / hot_news——
+    那两类报告的主标的是具体事件/个股，不在此列。
+    """
+    tid = str((template or {}).get("id") or "")
+    if tid and tid in _STOCK_FIRST_TEMPLATE_IDS:
+        return False
+    return ((template or {}).get("asset_type") == "market"
+            and (template or {}).get("intent_type") == "daily_summary")
+
+
+def _is_index_code(code: str) -> bool:
+    """该码是否存在于指数表（异常一律按 False 处理）。"""
+    try:
+        from utils.cache.market_data_db import is_index_code
+        return bool(is_index_code(str(code)))
+    except Exception:
+        return False
+
+
+def _index_symbols(codes: list) -> Optional[list]:
+    """把候选码收敛为「指数码」；判定通道不可用时返回 None（调用方回退原行为，
+    不能因一次 DB 异常就把市场类报告的技术面图板全部吞掉）。"""
+    try:
+        from utils.cache.market_data_db import is_index_code
+        return [c for c in codes if is_index_code(str(c))]
+    except Exception:
+        logger.debug("report_builder: 指数码判定失败，回退原行为", exc_info=True)
+        return None
+
+
+def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
+                             prefer_index_symbols: bool = False) -> list:
+    """提取涉及的主标的（按出现频次前 N），每个尝试生成一张技术面图板。
+
+    板块分析场景：报告覆盖多只个股时，每只各有一张图板（上限 REPORT_TECH_PANEL_MAX）。
+    主 code 来源优先级：
+      1. 图表元数据中出现频次最高的 stock_code（有基础图时）
+      2. 工具证据中高频出现的 6 位代码（无基础图时回退——如 ETF 查询
+         妙想未返回指标表，报告一张图都没有的场景）
+
+    prefer_index_symbols=True（市场日报类报告，见 `_prefer_index_symbols`）：
+      候选**收敛为指数码**，且歧义码（000001）显式按 INDEX 解释。这类报告的
+      技术面图板应当是大盘指数；找不到指数码就不注入，绝不拿证据里的高频
+      个股/ETF 码顶替（那正是平安银行被注入的路径）。
+
+    本地 K 线数据不足、查不到或任何异常 → 返回 []（报告保持原样，绝不抛错）。
+    """
+    if not chart_markers and not tool_evidence:
+        return []
+    try:
+        from collections import Counter
+        from agents.analysis.chart_extractor import get_fragment, ensure_tech_panel
+
+        max_panels = _tech_panel_max()
+        if max_panels <= 0:
+            return []
+
+        codes = []
+        names = {}
+        for m in chart_markers or []:
+            cid = re.sub(r"^@@CHART:|@@$", "", m)
+            frag = get_fragment(cid) if cid else None
+            if frag and frag.get("stock_code") and frag.get("chart_type") != "tech_panel":
+                code = str(frag["stock_code"])
+                codes.append(code)
+                if code not in names and frag.get("stock_name"):
+                    names[code] = str(frag["stock_name"])
+
+        if not codes and tool_evidence:
+            # 回退：从工具证据文本提取高频 6 位代码（mx_data query 里 code 会多次出现）
+            found = [c for c in _EVIDENCE_CODE_RE.findall(tool_evidence)
+                     if _is_plausible_stock_code(c)]
+            if found:
+                codes = found
+
+        if not codes:
+            return []
+
+        if prefer_index_symbols:
+            index_codes = _index_symbols(codes)
+            if index_codes is None:
+                prefer_index_symbols = False     # 判定不可用 → 回退原行为
+            else:
+                codes = index_codes
+                if not codes:
+                    return []
+
+        panels = []
+        for main_code, count in Counter(codes).most_common(max_panels):
+            is_idx = prefer_index_symbols and _is_index_code(main_code)
+            # 指数走 ensure_tech_panel 内部自己的形态校验（H11001/HSTECH 等带字母）
+            if not is_idx and not _is_plausible_stock_code(main_code):
+                continue
+            panel_id = ensure_tech_panel(main_code, name=names.get(main_code, ""),
+                                         market="INDEX" if is_idx else None)
+            if panel_id:
+                # 注意：模块级 logger 是标准 logging（非 RadarLogger），
+                # 不能用 log.info("A", ...) 的分类标签风格
+                logger.info("技术面图板已注入: %s(%s) 类型=%s 主图来源=%d张",
+                            names.get(main_code) or main_code, main_code,
+                            "INDEX" if is_idx else "STOCK", count)
+                panels.append(f"@@CHART:{panel_id}@@")   # 统一带壳
+        return panels
+    except Exception:
+        logger.debug("report_builder: 技术面图板生成失败（跳过）", exc_info=True)
+        return []
+
+
+def _merge_chart_markers(content: str, tool_evidence: str = "",
+                         template: dict = None) -> str:
+    """归集图表标记到报告末尾（统一入口，任何异常返回原 content）。
+
+    1) 收集 tool_evidence 与正文复述中的图表 id，按 (stock_code, chart_type) 去重；
+    2) 清理 LLM 在正文里复述的标记——LLM 抄写常丢壳（@@CHART: 前缀/@@ 后缀），
+       残留裸 UUID 会污染正文且无法渲染；
+    3) 尝试注入「技术面图板」增强卡（`template` 决定标的类型：市场日报类按指数）；
+    4) 统一以完整 ``@@CHART:id@@`` 格式拼到报告末尾。
+    """
+    try:
+        markers = re.findall(r"@@CHART:[0-9a-f-]+@@", tool_evidence or "")
+        # LLM 复述的完整标记并入（dict.fromkeys 保序去重）
+        markers += re.findall(r"@@CHART:[0-9a-f-]+@@", content or "")
+        unique = _dedupe_chart_markers(list(dict.fromkeys(markers)))
+
+        # 清理正文中的复述标记：完整标记整体删除；已知 id 的裸 UUID（LLM 抄坏的）也删除
+        known_ids = set(re.findall(r"@@CHART:([0-9a-f-]+)@@", content or ""))
+        if known_ids or markers:
+            cleaned = re.sub(r"\s*@@CHART:[0-9a-f-]+@@\s*", " ", content)
+            for cid in known_ids:
+                cleaned = cleaned.replace(cid, " ")
+            cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+            content = cleaned
+
+        # 尝试注入技术面图板（支持多标的，板块分析每只个股各一张；失败静默）
+        panels = _maybe_build_tech_panels(
+            unique, tool_evidence=tool_evidence,
+            prefer_index_symbols=_prefer_index_symbols(template or {}),
+        )
+        unique.extend(panels)
+
+        if unique:
+            content = content.rstrip() + "\n\n" + " ".join(unique)
+        return content
+    except Exception:
+        logger.debug("report_builder: 图表标记归集失败，保留原 content", exc_info=True)
+        return content
 
 
 def _rough_token_count(text: str) -> int:
@@ -51,7 +294,7 @@ def _expand_report_if_short(content: str, template: dict, user_input: str,
     """报告过短时扩写一次，补足深度和图表化结构。"""
     from utils.llm_factory import tracked_invoke
 
-    min_tokens = _min_report_tokens()
+    min_tokens = _min_report_tokens(template)
     current_tokens = _rough_token_count(content)
     if min_tokens <= 0 or current_tokens >= min_tokens:
         return content
@@ -103,6 +346,169 @@ def _format_tool_calls(tool_calls: list) -> str:
     return "\n".join(lines)
 
 
+# ── 索引 → 序号下钻（报告证据聚焦） ────────────────────────────────────
+# 默认开启：全量工具证据改为「编号索引 → LLM 按序号选 → 只载入选中全文」。
+# 核心目的不是省 token，而是让报告 LLM 的注意力集中到与问题相关的原始数据上；
+# 未入选的调用以「已取到但未载入（可补取）」清单显式告知，绝不允许被写成「数据缺失」。
+
+def _tool_status(output) -> str:
+    """工具调用状态：ok / failed / empty（「数据缺失」只允许来自 failed/empty）。
+
+    实现已抽到 `evidence_view.tool_output_status`，与仪表盘共用同一事实源。
+    """
+    return tool_output_status(output)
+
+
+def _parse_need_indices(raw_json, max_index: int) -> list:
+    """解析 {"need_tools": [1,3,5]} → 有效序号（1-based，去重保序）。"""
+    if not isinstance(raw_json, dict):
+        return []
+    nums = raw_json.get("need_tools")
+    if nums is None:
+        nums = raw_json.get("need_indices")
+    if isinstance(nums, (int, float, str)):
+        nums = [nums]
+    if not isinstance(nums, list):
+        return []
+    seen, out = set(), []
+    for n in nums:
+        try:
+            idx = int(float(str(n).strip()))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= idx <= max_index and idx not in seen:
+            seen.add(idx)
+            out.append(idx)
+    return out
+
+
+def _build_selection_prompt(items: list, user_input: str, raw_result: str) -> list:
+    """阶段一 prompt：用户问题 + 分析草稿（全文，不截断）+ 编号工具索引。"""
+    lines = []
+    for i, it in enumerate(items, 1):
+        text = _text(it.get("output"))
+        args = (it.get("args") or "").replace("\n", " ")[:120]
+        status = _tool_status(it.get("output"))
+        tag = {"failed": "（失败）", "empty": "（空结果）", "ok": ""}[status]
+        preview = text.strip()[:120].replace("\n", " ")
+        lines.append(
+            f"{i}. {it['name']} | 参数:{args or '—'} | 长度:{len(text)}{tag} | 预览:{preview or '（空）'}"
+        )
+
+    system = (
+        "你是报告撰写前的证据筛选器。输入包含：用户问题、agent 已写好的分析草稿、"
+        "以及本次运行收集到的全部工具结果索引（每条带序号）。\n"
+        "任务：挑出「为写出高质量最终报告，需要载入全文」的工具结果序号。\n"
+        "原则：\n"
+        "1. 按「报告会直接引用」的标准选择：与用户问题、分析草稿结论直接相关的原始数据必选；"
+        "草稿未覆盖但问题涉及维度的条目也要选。\n"
+        "2. 低信息量条目（长度很短、只有报错或元信息）不必选；"
+        "同类重复的调用只保留信息最完整的一条（如多次查询同一主题且后一条已包含前一条内容）。\n"
+        "3. 已标注失败/空结果的条目不选，它们不提供数据。\n"
+        "4. 未入选不等于丢弃：下游会把未入选调用以「未载入（可补取）」显式标注，"
+        "不会造成数据缺失误报；因此请按相关性做真实筛选，不要为保险起见全选。\n"
+        "5. 数量不设上限：需要几个选几个。\n"
+        '只输出严格 JSON，不要任何其他文字：{"need_tools": [序号, ...]}'
+    )
+    user = (
+        f"## 用户问题\n{user_input}\n\n"
+        f"## 分析草稿（全文）\n{raw_result or '（本轮没有中间草稿，请仅凭问题与索引选择）'}\n\n"
+        f"## 工具结果索引\n" + "\n".join(lines)
+        + '\n\n请输出 JSON：{"need_tools": [序号, ...]}'
+    )
+    return [("system", system), ("user", user)]
+
+
+def _format_remaining_calls(items: list, selected_indices: set) -> str:
+    """未入选调用的状态清单：未载入（可补取）+ 失败/空结果（缺失唯一来源）。"""
+    failed, unloaded = [], []
+    for i, it in enumerate(items, 1):
+        if i in selected_indices:
+            continue
+        args = (it.get("args") or "").replace("\n", " ")[:100]
+        status = _tool_status(it.get("output"))
+        if status == "failed":
+            failed.append(f"- #{i} {it['name']} | 参数:{args or '—'} → 调用失败，无数据")
+        elif status == "empty":
+            failed.append(f"- #{i} {it['name']} | 参数:{args or '—'} → 空结果，无数据")
+        else:
+            unloaded.append(
+                f"- #{i} {it['name']} | 参数:{args or '—'} | 长度:{len(_text(it.get('output')))}"
+            )
+    parts = []
+    if unloaded:
+        parts.append(
+            "## 已取到但未载入全文的调用（可补取）\n"
+            + "\n".join(unloaded)
+            + "\n以上结果已由工具取到，只是为聚焦注意力未载入全文："
+            "**只能表述为「未载入（可补取）」，不得写成「数据缺失」**。"
+        )
+    if failed:
+        parts.append(
+            "## 失败/空结果调用（「数据缺失」的唯一直属来源）\n"
+            + "\n".join(failed)
+            + "\n只有以上调用才允许在报告中写「数据缺失」。"
+        )
+    return "\n\n".join(parts)
+
+
+async def _select_tool_indices(items: list, user_input: str, raw_result: str,
+                               budget, log, metadata, run_config) -> Optional[list]:
+    """阶段一：LLM 按序号选择。返回 1-based 序号列表；None = 放弃下钻（退回全量）。"""
+    total_chars = sum(len(_text(it.get("output"))) for it in items)
+    min_tools = int(getattr(Config, "REPORT_DRILLDOWN_MIN_TOOLS", 8) or 8)
+    min_chars = int(getattr(Config, "REPORT_DRILLDOWN_MIN_CHARS", 12000) or 12000)
+    if len(items) < min_tools and total_chars < min_chars:
+        return None  # 证据太小，下钻不划算
+    if budget is not None:
+        try:
+            remaining = budget.limits.max_llm_calls_per_query - budget.get_calls()
+            if remaining <= 1:
+                log.info("A", "报告下钻跳过：预算紧张")
+                return None
+        except Exception:
+            pass
+
+    from utils.llm_factory import get_report_llm, llm_json_with_retry
+    messages = _build_selection_prompt(items, user_input, raw_result)
+    try:
+        raw = llm_json_with_retry(
+            get_report_llm(), messages, log, label="report-select",
+            max_retries=1, budget=budget, metadata=metadata, run_config=run_config,
+        )
+    except BudgetExceeded:
+        raise
+    except Exception as e:
+        log.info("A", f"报告下钻选择失败，退回全量: {e}")
+        return None
+    indices = _parse_need_indices(raw, len(items))
+    if not indices:
+        log.info("A", f"报告下钻未选中任何调用，退回全量（raw={str(raw)[:120]}）")
+        return None
+    return indices
+
+
+async def _build_drilldown_evidence(items: list, user_input: str, raw_result: str,
+                                    budget, log, metadata, run_config) -> str:
+    """下钻证据装配：选中全文 + 未入选状态清单；任何异常 → 全量（零回归）。"""
+    if not getattr(Config, "REPORT_DRILLDOWN_ENABLED", True) or not items:
+        return _format_tool_calls(items)
+    selected = await _select_tool_indices(
+        items, user_input, raw_result, budget, log, metadata, run_config)
+    if not selected:
+        return _format_tool_calls(items)
+    sel_set = set(selected)
+    picked = [it for i, it in enumerate(items, 1) if i in sel_set]
+    body = _format_tool_calls(picked)
+    remaining = _format_remaining_calls(items, sel_set)
+    if remaining:
+        body = (body + "\n\n" + remaining).strip()
+    total_chars = sum(len(_text(it.get("output"))) for it in items)
+    log.info("A", f"报告下钻: 选中 {len(picked)}/{len(items)} 个调用，"
+                  f"证据 {total_chars}→{len(body)} 字符（序号 {selected}）")
+    return body
+
+
 def _append_template_qa_rules(parts: list, template: dict):
     """将当前模板的质量要求作为软约束注入最终报告 prompt。"""
     qa_rules = template.get("qa_rules", [])
@@ -118,12 +524,20 @@ def _append_template_qa_rules(parts: list, template: dict):
 async def build(template: dict, slot_results: dict, user_input: str,
                 budget=None, logger_obj=None, raw_result: str = "",
                 tool_calls: list = None, selected_skills: list = None,
-                metadata=None, run_config=None, step_results: list = None) -> dict:
+                metadata=None, run_config=None, step_results: list = None,
+                raw_result_is_seed: bool = False) -> dict:
     """
-    快速模式报告合成。1 次 LLM 调用。
+    快速模式报告合成。
 
-    raw_result: Agent 原始输出
+    默认 2 次 LLM 调用：序号下钻选择（report-select）+ 报告生成（report-fast）；
+    证据过小 / 选择失败 / 下钻关闭时退回 1 次全量调用（与旧行为一致，零回归）。
+
+    raw_result: Agent 原始输出（下钻选择的种子，全文使用，不截断）
     tool_calls: 工具调用历史，直接传入 prompt 作为原始证据
+    raw_result_is_seed: raw_result 只是「下钻种子」而非待注入素材
+        —— 仅 agent_group 使用（它的原始数据走条目/下钻通道，raw_result 只是选择依据）。
+        ⚠️ 默认 False = 保持既有行为：React / Unified / Plan / PDOR 模式
+        （它们的 raw_result 是报告草稿，必须注入）。改这个默认值会同时影响 5 个模式。
     返回 ReportDocument dict: {"title", "summary", "sections": [ReportSection], "disclaimer"}
     """
     log = logger_obj or logger
@@ -138,7 +552,7 @@ async def build(template: dict, slot_results: dict, user_input: str,
 
         has_rich_raw = raw_result and len(raw_result) > 500
 
-        # 格式化原始工具调用结果
+        # 格式化原始工具调用结果（默认走「索引→序号下钻」聚焦证据；失败自动退回全量）
         tool_evidence = ""
         if tool_calls:
             raw_sizes = []
@@ -149,7 +563,9 @@ async def build(template: dict, slot_results: dict, user_input: str,
                     sz = len(getattr(tc, "tool_output", "") or "")
                 raw_sizes.append(sz)
             log.info("A", f"工具输出大小: {raw_sizes}, 总计={sum(raw_sizes)}字符")
-            tool_evidence = _format_tool_calls(tool_calls)
+            items = _tool_items(tool_calls)
+            tool_evidence = await _build_drilldown_evidence(
+                items, user_input, raw_result, budget, log, metadata, run_config)
             if tool_evidence:
                 log.info("A", f"工具证据（格式化后）: {len(tool_evidence)} 字符")
 
@@ -158,6 +574,7 @@ async def build(template: dict, slot_results: dict, user_input: str,
             raw_result=raw_result,
             tool_evidence=tool_evidence,
             step_results=step_results,
+            raw_result_is_seed=raw_result_is_seed,
         )
         resp = tracked_invoke(get_report_llm(), messages, log, label="report-fast", budget=budget, metadata=metadata, run_config=run_config)
         content = resp.content if hasattr(resp, "content") else str(resp)
@@ -166,17 +583,17 @@ async def build(template: dict, slot_results: dict, user_input: str,
             content, template, user_input, report_llm, log, budget=budget, metadata=metadata, run_config=run_config
         )
 
-        # 图表标记追加：从工具证据中收集萃取生成的 @@CHART:uuid@@ 标记，
-        # 追加到报告末尾（代码层保证，不依赖 LLM 是否引用；失败不影响报告展示）
-        try:
-            chart_markers = []
-            if tool_evidence:
-                chart_markers = re.findall(r"@@CHART:[0-9a-f-]+@@", tool_evidence)
-            if chart_markers:
-                unique = list(dict.fromkeys(chart_markers))
-                content = content.rstrip() + "\n\n" + " ".join(unique)
-        except Exception:
-            pass
+        # 图表标记归集：从工具证据中收集萃取生成的 @@CHART:uuid@@ 标记。
+        # 1) 按 (stock_code, chart_type) 去重——同一股票同类型图表只保留最新一张
+        #    （此前只按 ID 去重，而每次 mx_data_query 都生成新 UUID，
+        #     导致报告中出现 2~3 张同 code 的 MACD）。
+        # 2) 对主股票尝试注入一张「技术面图板」增强卡（本地 K 线 + 全指标 +
+        #    金叉死叉/突破信号，前端 Tab 切换）。有枣打两棍子：失败静默跳过。
+        # 图表标记归集：去重 + 清理 LLM 复述残留 + 注入技术面图板（统一入口）
+        # template 决定标的类型口径：市场日报类（asset_type=market +
+        # intent_type=daily_summary）里的 000001 按上证指数解释，而非平安银行
+        content = _merge_chart_markers(content, tool_evidence=tool_evidence,
+                                       template=template)
 
         if has_rich_raw:
             # 模式 A：LLM 输出是结构化增强后的完整报告，直接使用
@@ -219,7 +636,7 @@ async def build(template: dict, slot_results: dict, user_input: str,
 
 def _build_prompt(template: dict, slot_results: dict, user_input: str,
                   raw_result: str = "", tool_evidence: str = "",
-                  step_results: list = None) -> list:
+                  step_results: list = None, raw_result_is_seed: bool = False) -> list:
     """构建报告合成 prompt。
 
     核心原则：原始工具数据 > 第一次总结 > 模板结构
@@ -256,18 +673,38 @@ def _build_prompt(template: dict, slot_results: dict, user_input: str,
             if max_words:
                 prompt_parts.append(f"字数限制：{max_words}字以内")
             if not required:
-                prompt_parts.append("仅在数据充分时输出，数据不足可跳过")
+                # 措辞与模板 qa_rules「必须完整输出全部板块」对齐：
+                # `required` 约束的是**数据是否为硬要求**，不是「板块能否省略」。
+                # 原措辞「数据不足可跳过」与 qa_rules 直接冲突，会让模型静默丢板块。
+                # 2026-09-21 收敛：缺失提示**只在本板块留一句**，缺什么/怎么补统一写进
+                # 末尾「数据缺口声明」——避免同一缺口在正文+表格+风险矩阵+声明里各写一遍
+                # （实测一份报告里 4 类缺口被写了 22 次，观感上像"满屏缺失"）。
+                prompt_parts.append(
+                    "本板块必须输出；数据不足时本板块只写一句「数据缺失：<字段>」，"
+                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」一次性说明，"
+                    "禁止省略或整块留空，禁止在本板块内重复罗列补齐方案"
+                )
             if prompt_parts:
                 sys_parts.append("要求：" + "；".join(prompt_parts))
 
         # system[1]: 核心要求 + 分析判读框架 + 交叉验证 + 格式规范 + QA 规则
         req_parts = []
         req_parts.append("## 核心要求")
-        req_parts.append("1. 所有结论必须引用【原始工具数据】中的具体数字和事实")
+        req_parts.append("1. 所有结论必须引用【原始工具数据 / 原始素材】中的具体数字和事实")
         req_parts.append("2. 禁止编造任何未在原始数据中提及的信息")
         req_parts.append("3. 必须同时列出正面和负面事实，不能只说一面")
         req_parts.append("4. 补充交叉验证分析（各维度是否共振/矛盾）")
-        req_parts.append("5. 数据不足的板块必须标注'数据缺失'，不能跳过也不能编造")
+        req_parts.append("5. 数据不足的板块必须在板块内写一句「数据缺失：<字段>」，并在报告末尾用「数据缺口声明」统一汇总（缺什么 + 怎么补），不能跳过也不能编造")
+        # 术语边界（2026-09-22）：主动截断 ≠ 数据缺失。原始工具输出里若出现
+        # 「主动截断 / 已省略中间 N 字符」，说明数据**已取到**、只是未全量载入上下文，
+        # 应标为「主动截断（可补取）」；只有工具返回错误/空结果才叫「数据缺失」。
+        # 实测踩过：把「省略日K中段 24,735 字符」错写成「周K/月K 数据缺失（数据源截断）」。
+        req_parts.append(
+            "6. 术语区分（不得混淆）：**主动截断**（输出过长、数据已被工具取到但未全量载入上下文，"
+            "原文标有「主动截断」「已省略中间 N 字符」）必须写成「主动截断（可补取）」，"
+            "**不得**写成「数据缺失」；只有工具**明确返回错误/空结果/接口失败**才算「数据缺失」。"
+            "也不得由某段被截断推断其它周期/字段缺失"
+        )
 
         framework = template.get("analysis_framework")
         if framework:
@@ -325,8 +762,15 @@ def _build_prompt(template: dict, slot_results: dict, user_input: str,
                 purpose = sr.get("purpose", "")
                 result = sr.get("result", "")
                 messages.append(("ai", f"### Step {step_num} [{skill}]: {purpose}\n{result}"))
-        else:
-            messages.append(("user", f"## 已有分析框架（参考结构，数据以上面的原始工具数据为准）\n{raw_result}"))
+        elif not (raw_result_is_seed and tool_evidence):
+            # 注入 raw_result 作为原始素材。
+            # 唯一的例外：agent_group 传 raw_result_is_seed=True —— 它的 raw_result
+            # 只是下钻选择的种子，原始数据已由 tool_evidence（条目索引 → 按需载入）承载，
+            # 再注入会重复。**其余模式（React/Unified/Plan/PDOR）默认 False，行为与改动前完全一致**
+            # —— 注意 React/Unified 的 step_results 为空、tool_calls 非空，raw_result 是它们的
+            # 报告草稿（state["final_result"] / response），不能被冲掉。
+            # 2026-10-01 事故：原实现 `if step_results / else raw_result` 使 group 恒拿不到底版。
+            messages.append(("user", f"## 原始素材（优先引用，所有结论必须基于此）\n{raw_result}"))
 
         extra_slots = []
         for slot_name, sr in slot_results.items():
@@ -344,10 +788,26 @@ def _build_prompt(template: dict, slot_results: dict, user_input: str,
 
     else:
         # ── 系统消息：角色 + 稳定模板内容（最大化缓存前缀命中） ──
-        sys_parts = [
-            role,
-            f"\n## 长文与版式要求\n- 全文目标不少于 {_min_report_tokens()} token 级别。\n- 优先使用 Markdown 表格、情景矩阵、条件树和流程图。\n- 关键结论必须结构化，禁止用大段纯文字硬堆。",
-        ]
+        _min_tok = _min_report_tokens(template)
+        _max_w = _max_report_words(template)
+        if _min_tok > 0:
+            _len_line = f"- 全文目标 {_min_tok} token 级别即可，不追求越长越好，禁止为凑篇幅注水。\n- 优先把篇幅给「核心结论」「行动方案」：结论要方向+价位，行动要触发条件+失效条件。\n- 表格/矩阵/条件树只在能承载判断时使用，禁止为版式新增空洞表格或重复风险提示。\n- 关键结论必须结构化，禁止用大段纯文字硬堆。"
+            if _max_w:
+                _len_line += f"\n- 全文不超过 {_max_w} 字，超过即为注水。"
+            sys_parts = [
+                role,
+                f"\n## 长文与版式要求\n{_len_line}",
+            ]
+        else:
+            # 轻量模板（min_report_tokens=0）：反向要求——短就是对的
+            sys_parts = [
+                role,
+                "\n## 篇幅要求（重要）\n"
+                "- **简洁优先**：只输出用户明确要求的内容。能用一行表格或一句话说清，就绝不分节展开。\n"
+                "- **禁止补充用户没要的板块**：分析、建议、候选排序、仓位、交易纪律、投资视角、"
+                "风险矩阵、小白版翻译等一律不写。\n"
+                "- 必须标注数据口径（具体交易日 / 数据源），取不到就写「数据缺失：<字段>」。",
+            ]
 
         # 输出结构（稳定模板内容，放入系统消息）
         sys_parts.append("\n## 报告结构")
@@ -358,6 +818,14 @@ def _build_prompt(template: dict, slot_results: dict, user_input: str,
             sys_parts.append(f"要求：{section['prompt']}")
             if section.get("max_words"):
                 sys_parts.append(f"字数限制：{section['max_words']}字以内")
+            if not section.get("required", False):
+                # 2026-09-21 口径收敛（与上面 req_parts / template_store 同一口径）：
+                # 缺失只在本板块留一句最短标注，缺什么与怎么补统一进末尾「数据缺口声明」。
+                sys_parts.append(
+                    "数据不足时本板块只写一句「数据缺失：<字段>」，"
+                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」说明，"
+                    "禁止在本板块内重复罗列补齐方案"
+                )
 
         # 交叉验证规则（稳定模板内容，放入系统消息）
         cross_checks = template.get("cross_checks", [])

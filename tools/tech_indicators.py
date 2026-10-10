@@ -98,12 +98,30 @@ def _kdj_talib(high, low, close):
 
 # ── 核心函数 ────────────────────────────────────────────────
 
+# 计算全套指标所需的最少交易日数。取 20 是因为对外承诺的均线包含 MA20/MA60，
+# 序列过短会让这些字段变成 NaN，进而在 int() 转换处抛错或输出无意义的 nan。
+# 低于该阈值应判为「数据不足」，由调用方转成结构化降级（不要输出 NaN 报告）。
+MIN_INDICATOR_ROWS = 20
+
+
 def calc_indicators(df: pd.DataFrame) -> dict:
     """
     计算全部技术指标
     输入: 含 close, high, low, volume 列的 DataFrame（按日期升序）
     返回: 指标字典
+
+    行数不足 MIN_INDICATOR_ROWS 时抛 ValueError（由调用方转成结构化降级）：
+    短序列会让多项指标得到 NaN，进而在 int(...) 处抛难以定位的
+    `cannot convert float NaN to integer`，或在下标访问处 IndexError
+    （2026-09-20 实测：被实时快照污染的历史K线只有 1 行）。
     """
+    if df is None or len(df) < MIN_INDICATOR_ROWS:
+        got = 0 if df is None else len(df)
+        raise ValueError(
+            f"技术指标计算需要至少 {MIN_INDICATOR_ROWS} 个交易日，实际只有 {got} 个"
+            "（数据可能不是历史K线，而是当日快照）"
+        )
+
     df = df.sort_index()
     close = df['close'].values.astype(float)
     high = df['high'].values.astype(float)
@@ -144,7 +162,13 @@ def calc_indicators(df: pd.DataFrame) -> dict:
 
     # ── 7. OBV（能量潮）──
     obv = _obv(close, volume)
-    obv_trend = "上升" if obv[-1] > obv[-6] else "下降"
+    # 短序列保护：原先直接取 obv[-6]，遇到只有 1 行的「快照型」输入会
+    # IndexError: index -6 is out of bounds（2026-09-20 实测，
+    # 由被实时快照污染的历史K线缓存触发）
+    if len(obv) >= 6:
+        obv_trend = "上升" if obv[-1] > obv[-6] else "下降"
+    else:
+        obv_trend = "数据不足"
 
     # ── 8. ATR（真实波幅）──
     atr = _atr(high, low, close)

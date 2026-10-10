@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from memory.backend.base import MemoryEntry
 from memory.backend.hybrid import HybridBackend
 from memory.backend.fts5 import FTS5Backend, ensure_jieba_ready
-from memory.sdk import _is_incomplete_result
+from memory.sdk import _is_incomplete_result, _truncate_at_boundary
 
 # FTS5 检索依赖 jieba 分词（写入/查询都需先分词加空格），未初始化会退化为逐字匹配导致零召回。
 ensure_jieba_ready()
@@ -35,11 +35,12 @@ def _entry(eid, content, confidence=0.5, incomplete=False, rerank_score=0.0):
 # ── 问题2-C：置信度权重 ──
 
 def test_confidence_weight_sinks_low_confidence():
+    # 精排分相同 → 用置信度 tie-break，低信下沉（2026-09-23 起 conf 不再乘进主分）
     hi = _entry("a", "x", confidence=0.9, rerank_score=0.9)
     lo = _entry("b", "y", confidence=0.2, rerank_score=0.9)
     out = HybridBackend._apply_confidence_weight([hi, lo])
     assert out[0].entry_id == "a"
-    assert out[0].score > out[1].score
+    assert out[0].score == out[1].score == 0.9  # 主序=精排分，置信度不改变分数
 
 
 def test_confidence_weight_equal_rerank_orders_by_conf():
@@ -79,17 +80,27 @@ def test_recency_factor_bad_date_neutral():
 
 
 def test_new_memory_beats_old_despite_lower_confidence():
-    """用户场景：语义相近时，「今天」的新记忆应排旧记忆前面，
-    即使新记忆来源置信度更低（时间新鲜度修正 conf 偏差）。"""
+    """精排主导：精排分更高的新记忆排前（即使其置信度更低）。
+
+    注：2026-09-23 起 conf/recency 降为 tie-break，不再乘进主分。
+    """
     new = _dated_entry("new", datetime.now().isoformat(),
                        confidence=0.3, rerank_score=0.25)
     old = _dated_entry("old", (datetime.now() - timedelta(days=40)).isoformat(),
                        confidence=0.5, rerank_score=0.14)
     out = HybridBackend._apply_confidence_weight([old, new])
     assert out[0].entry_id == "new"
-    # 验证分数：new = 0.25×0.3×1.0=0.075 > old = 0.14×0.5×0.65=0.0455（40 天 → 0.65 档）
-    assert abs(out[0].score - 0.075) < 1e-6
-    assert abs(out[1].score - 0.0455) < 1e-6
+    assert abs(out[0].score - 0.25) < 1e-6
+    assert abs(out[1].score - 0.14) < 1e-6
+
+
+def test_tie_break_prefers_recent_when_rerank_equal():
+    """精排分相同时，用 conf × recency 决胜 → 新记忆排前。"""
+    new = _dated_entry("new", datetime.now().isoformat(), confidence=0.5, rerank_score=0.5)
+    old = _dated_entry("old", (datetime.now() - timedelta(days=120)).isoformat(),
+                       confidence=0.5, rerank_score=0.5)
+    out = HybridBackend._apply_confidence_weight([old, new])
+    assert out[0].entry_id == "new"
 
 
 # ── 问题2-A：incomplete 排除 ──
@@ -171,3 +182,28 @@ def test_search_context_does_not_break_basic_query(tmp_path):
     res = hb.search("猪肉板块 牧原 上涨", top_k=5,
                     context="昨日大盘高开跳水，科技股回调")
     assert eid in [e.entry_id for e in res]
+
+
+# ── 展示截断：片段不再停在半句话/半行上 ──
+
+def test_truncate_at_boundary_short_text_unchanged():
+    assert _truncate_at_boundary("短文本", 300) == "短文本"
+
+
+def test_truncate_at_boundary_cuts_at_sentence():
+    text = "第一句。" * 100 + "第二句被截断" + "x" * 400
+    out = _truncate_at_boundary(text, 300)
+    assert len(out) <= 300
+    assert out.endswith("。")  # 停在句号边界
+
+
+def test_truncate_at_boundary_cuts_at_line():
+    text = "A" * 250 + "\n" + "B" * 250
+    out = _truncate_at_boundary(text, 300)
+    assert "\n" not in out  # 截在换行处，不留下半行
+
+
+def test_truncate_at_boundary_no_boundary_returns_hard_cut():
+    text = "x" * 500  # 无任何边界字符
+    out = _truncate_at_boundary(text, 300)
+    assert len(out) == 300

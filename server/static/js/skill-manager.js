@@ -154,6 +154,7 @@
     html += '</div>';
 
     // 工具列表
+    const toolMetas = []; // 工具元数据走闭包数组，避免 JSON 进 HTML 属性被引号截断
     if (d.tools && d.tools.length) {
       html += `<div class="skill-section">
         <div class="skill-section-head">
@@ -172,12 +173,13 @@
           : '-';
         const buildable = t.buildable ? 'ok' : '缺失';
         const badgeClass = t.buildable ? 'brand' : '';
+        const toolIdx = toolMetas.push(t) - 1;
         html += `<tr>
           <td class="skill-mono">${esc(t.tool_name)}</td>
           <td class="skill-mono">${esc(params)}</td>
           <td>${esc(t.description || '-')}</td>
           <td><span class="skill-badge ${badgeClass}">${buildable}</span></td>
-          <td>${t.buildable ? `<button class="skill-btn skill-tool-test-btn" data-tool='${JSON.stringify(t)}' data-skill='${esc(d.name)}'>测试</button>` : '-'}</td>
+          <td>${t.buildable ? `<button class="skill-btn skill-tool-test-btn" data-tool-idx="${toolIdx}">测试</button>` : '-'}</td>
         </tr>`;
       }
       html += '</tbody></table></div>';
@@ -249,8 +251,8 @@
     // 绑定工具测试按钮
     el.querySelectorAll('.skill-tool-test-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        const toolMeta = JSON.parse(btn.dataset.tool);
-        openToolTestModal(btn.dataset.skill, toolMeta);
+        const toolMeta = toolMetas[Number(btn.dataset.toolIdx)];
+        if (toolMeta) openToolTestModal(d.name, toolMeta);
       });
     });
   }

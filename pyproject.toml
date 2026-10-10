@@ -12,6 +12,7 @@ markers = [
     "mx: 需要 MX_APIKEY",
     "tavily: 需要 TAVILY_API_KEYS",
     "hithink: 需要 HITHINK_FINANCE_API_KEY",
+    "live_network: 真连外部网络且消耗配额，需显式 SR_LIVE_SKILLS=1 启用",
     "timeout(N): 超时秒数",
 ]
 asyncio_mode = "auto"

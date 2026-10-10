@@ -7,8 +7,22 @@ from agents.agent_context import AgentContext
 from agents.pdor.node.utils import _tool_results_to_tool_calls
 from agents.shared.step_utils import restore_exempt_window, create_exempt_window, ErrorDeduplicator
 from config import Config
+from utils.agent_trace.core import get_active_recorder
 from utils.budget import BudgetExceeded
 from utils.logger import ensure_radar
+
+
+def _record_skill_activate(skill_name, tool_names, source, step_num):
+    """上报技能激活事件（渐进披露可见性，无活动 trace 时静默跳过）"""
+    try:
+        recorder = get_active_recorder()
+        if recorder is not None:
+            recorder.record_skill_event("activate", {
+                "active_skill": skill_name, "source": source,
+                "tools": list(tool_names), "step": step_num,
+            })
+    except Exception:
+        pass
 
 
 async def executor_node(state: PdorState, ctx: AgentContext, run_config=None) -> dict:
@@ -155,14 +169,15 @@ async def _run_react_step(step, state, ctx, llm, logger, failed_tools: list = No
 
     registry = ctx.skill_registry
     tools = merge_tools_for_step(registry, step["skill"], selected_skills=state.get("selected_skills", []), logger=logger)
+    _record_skill_activate(step["skill"], [t.name for t in tools], "pdor_step", step["step"])
 
     # 构建上下文（原 build_context_for_step，内联）
     context_messages = _build_context_for_step(step, state, ctx)
     tools_detail = SkillPromptBuilder.build_tools_detail_prompt(registry, step["skill"])
 
-    # 在 context 前插入工具详情
+    # 在 context 前插入工具详情（无详情时不插入空 system）
     full_context = [
-        ("system", f"可用工具详情：\n{tools_detail}"),
+        *( [("system", f"可用工具详情：\n{tools_detail}")] if tools_detail else [] ),
         *context_messages,
     ]
 

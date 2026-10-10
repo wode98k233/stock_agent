@@ -71,6 +71,7 @@ class ReactStockAgent(BaseAgent):
         user_input = self._enrich_user_input(
             user_input, progress_callback=progress_callback,
             history=memory.get_history() if memory else None,
+            logger=logger,
         )
 
         ctx = AgentContext(
@@ -113,6 +114,7 @@ class ReactStockAgent(BaseAgent):
                 resp = await graph.ainvoke(
                     user_input=user_input,
                     config=invoke_config,
+                    raw_user_input=original_user_input,
                 )
 
                 if not resp.get("is_stock_related", True) and resp.get("classify_response"):

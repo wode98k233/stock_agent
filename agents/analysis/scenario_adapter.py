@@ -79,7 +79,7 @@ def _build_stock_analysis_evidence(handler_data: dict) -> dict:
     - data.rating → stock_rating（评级数据）
     - data.financial → financial_data（财务指标）
     - tech → technical_indicator（技术指标）
-    - sentiment → sentiment_analysis（情感分析）
+    - sentiment → market_review（情感分析，原 sentiment_analysis 已并入 market_review）
     - analysis → llm_analysis（LLM 分析结论）
     """
     items = []

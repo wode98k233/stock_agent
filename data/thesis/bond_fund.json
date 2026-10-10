@@ -1,0 +1,592 @@
+{
+  "id": "bond_fund",
+  "name": "债券基金环境因子包",
+  "version": "1.2",
+  "asset_label": "中国债券基金（纯债为主）",
+  "description": "把「现在买债基安不安全」拆成 6 个可重复取数的因子。锚是国内利率水平与央行政策，不是美联储——22 年数据（2004–2026 三轮加息周期）显示中长期纯债基金指数从未出现年度负收益，真正的风险是「内外双紧」与赎回负反馈。",
+  "_说明_锚定": "债基的定价锚是国内 10Y 国债 + 央行资金面。中美利差已倒挂至 -332bp（2002 年以来最大），但美债 20 日冲击下中债各期限上行概率仅 47%–54%、中位数≈0，故美债只作为「内外双紧」的次要轴，不单独打分。",
+  "_说明_阈值格式": "区间打分表，每行 [下限, 上限, 得分]，下限含、上限不含；得分范围 -2 ~ 2。",
+  "_说明_得分含义": "2=很有利 1=有利 0=中性 -1=偏不利 -2=不利",
+  "_说明_数据源变更": "v1.1：④ 汇率、⑤ 赎回压力由手工项改为自动因子（2026-09-22）。④ 走中行牌价央行中间价（usdcny，日频）；⑤ 走中证全债指数 H11001 近 5 日涨跌幅（代理口径，非真实申赎）。仅 ⑥ 政府债供给保留手工：公开源只有发行量、无到期量，直接替换会与「净融资」口径不符。",
+  "subject": {
+    "index_code": "H11001",
+    "index_name": "中证全债",
+    "benchmark_code": "H11001",
+    "benchmark_name": "中证全债",
+    "fund_index": "885008.WI 中长期纯债型基金指数",
+    "scope_note": "口径为纯债/利率债基金；可转债基金近 3 月 -7.57% 来自权益属性，与利率无关，不在本台账范围。benchmark_code 填自身（债基无股票基准）"
+  },
+  "data": {
+    "cn10_y": {
+      "kind": "macro",
+      "code": "cn10_y",
+      "periods": 400
+    },
+    "us10_y": {
+      "kind": "macro",
+      "code": "us10_y",
+      "periods": 400
+    },
+    "shibor_1w": {
+      "kind": "macro",
+      "code": "shibor_1w",
+      "periods": 400
+    },
+    "usdcny": {
+      "kind": "macro",
+      "code": "usdcny",
+      "periods": 400
+    },
+    "bond_index": {
+      "kind": "index_daily",
+      "code": "H11001",
+      "name": "中证全债",
+      "label": "中证全债指数",
+      "days": 900
+    },
+    "cn_term_spread": {
+      "kind": "macro",
+      "code": "cn_term_spread",
+      "periods": 400
+    }
+  },
+  "factors": [
+    {
+      "key": "coupon",
+      "compute": "rate_level_trend",
+      "name": "① 票息垫子",
+      "series": "cn10_y",
+      "code": "cn10_y",
+      "metric": "cn10_y",
+      "unit": "%",
+      "thresholds_key": "cn10_y_bond_pct",
+      "higher_is_better": false,
+      "source": "中债国债收益率曲线",
+      "note": "利率越低票息保护越薄，但当前 1.69% 处历史极低位、且资金面宽松，故低利率在本台账判为有利（与红利低波台账同向）",
+      "confidence": {
+        "level": "high",
+        "why": "中债官方口径，日频"
+      }
+    },
+    {
+      "key": "double_tighten",
+      "compute": "double_tightening",
+      "name": "② 内外双紧",
+      "cn": "cn10_y",
+      "us": "us10_y",
+      "matrix": "double_tighten",
+      "metric": "double_tighten",
+      "cn_metric": "cn10_y",
+      "us_metric": "us10_y",
+      "cn_chg_metric": "cn10_chg_bp",
+      "us_chg_metric": "us10_chg_bp",
+      "lookback_days": 20,
+      "move_bp": 10,
+      "unit": "档",
+      "source": "中债/美债收益率自算",
+      "note": "以中债为主轴：历史上 5 个债基负收益年中，只有 2004、2017 两年是「美联储加息 + 中国央行收紧」同时发生",
+      "confidence": {
+        "level": "mid",
+        "why": "判定矩阵为建模选择；美债仅作次要轴，中债平坦时一律 0 分"
+      }
+    },
+    {
+      "key": "funding",
+      "compute": "rate_level_trend",
+      "name": "③ 资金面（Shibor 1W）",
+      "series": "shibor_1w",
+      "code": "shibor_1w",
+      "metric": "shibor_1w",
+      "unit": "%",
+      "thresholds_key": "shibor_funding_pct",
+      "higher_is_better": false,
+      "trend_lookback_days": 10,
+      "trend_move_bp": 5,
+      "source": "上海银行间同业拆放利率（akshare rate_interbank）",
+      "note": "代理指标：该源不含 DR007/R007（质押式回购），以 Shibor 1W 作为银行间资金面宽松度代理；资金面变化快，趋势窗口用 10 日 / 5bp",
+      "confidence": {
+        "level": "mid",
+        "why": "源不含 DR007/R007，以 Shibor 1W 代理；原始研究用 DR007−R007 利差衡量分层压力"
+      }
+    },
+    {
+      "key": "fx",
+      "compute": "level_trend_pct",
+      "name": "④ 汇率约束",
+      "series": "usdcny",
+      "metric": "usdcny",
+      "unit": "CNY/USD",
+      "thresholds_key": "fx_usdcny",
+      "higher_is_better": false,
+      "trend_lookback_days": 20,
+      "trend_move_pct": 0.5,
+      "down_label": "人民币升值",
+      "up_label": "人民币贬值",
+      "source": "中国银行外汇牌价（央行中间价，经 akshare currency_boc_sina）",
+      "note": "升值一侧=正向（货币政策宽松空间不受挤压）；转为趋势性贬值=负向。水平阈值按 2024–2026 观察区间 6.7–7.3 设定，需定期复核。趋势档用相对变动 0.5%（20 日）——汇率报价不适用 bp 表述",
+      "confidence": {
+        "level": "high",
+        "why": "官方央行中间价，日频当日有值"
+      }
+    },
+    {
+      "key": "redemption",
+      "compute": "index_shock",
+      "name": "⑤ 赎回 / 流动性",
+      "frame": "bond_index",
+      "metric": "bond_shock_5d",
+      "shock_lookback_days": 5,
+      "unit": "%",
+      "thresholds_key": "bond_shock_pct",
+      "source": "index_daily 自算（中证全债 H11001 近 5 日涨跌幅）",
+      "note": "代理口径，非真实申赎：基金份额是季报口径、无公开日频数据，但「净值下跌 → 赎回 → 被抛售 → 再下跌」这条负反馈链的起点与表征都是价格。实测 2013-06 钱荒 -0.90%、2016-12 债灾 -1.54%、2020-05 债灾 -0.93%、2022-11 理财赎回潮 -0.77%，常态 p50 仅 +0.11%，区分度足够。判为负反馈时，风险性质从利率风险升级为流动性风险",
+      "confidence": {
+        "level": "mid",
+        "why": "代理口径（债市冲击），非真实净申赎；阈值锚 2013/2016/2020/2022 四次债灾"
+      }
+    },
+    {
+      "key": "gov_supply",
+      "compute": "manual",
+      "name": "⑥ 政府债供给",
+      "manual": "gov_supply",
+      "value_field": "net_supply_yi",
+      "metric": "gov_supply_yi",
+      "stale_metric": "gov_supply_stale",
+      "unit": "亿元",
+      "thresholds_key": "gov_supply_yi",
+      "detail_template": "当月净融资 {net_supply_yi} 亿元（环比 {wow_yi} 亿元）；{note}",
+      "source": "手动配置（data/thesis/bond_fund.json）",
+      "note": "供给放量直接压低存量债券价格（负向）。保留手工的原因：公开源（bond_treasure_issue_cninfo / bond_local_government_issue_cninfo）只有发行量、无到期量，直接替换会与「净融资」口径不符；且同一只债在沪深、银行间多市场重复成行，需按债券名称去重",
+      "confidence": {
+        "level": "low",
+        "why": "手工值，公开源只有发行量无到期量；月度更新且为测算值"
+      }
+    },
+    {
+      "key": "term_spread",
+      "compute": "rate_level_trend",
+      "name": "⑦ 期限利差（10Y−2Y）",
+      "series": "cn_term_spread",
+      "code": "cn_term_spread",
+      "metric": "cn_term_spread",
+      "unit": "%",
+      "thresholds_key": "term_spread_pct",
+      "higher_is_better": true,
+      "trend_lookback_days": 20,
+      "trend_move_bp": 10,
+      "source": "中债国债收益率曲线（经 akshare bond_zh_us_rate）",
+      "note": "★ 久期环境的**代理**，不等于机构持仓久期（后者无公开日频源）：曲线越平坦，长端相对短端越没有补偿，拉久期的性价比越低——这也是 2024 年以来「久期拥挤」被反复提示的机制。⚠️ 它替代不了报告提到的「机构久期 4.05 年处高分位」这个真实读数，只能反映曲线形状。阈值按 2020-09 以来 1505 个交易日分位设定（p5=0.245 / p25=0.359 / p75=0.500 / p90=0.575）。",
+      "confidence": {
+        "level": "mid",
+        "why": "回测：与中证全债未来 20/60 日收益相关 +0.17/+0.15、Q5−Q1 +0.18/+0.33pp（方向正确但强度低——弱验证，保留观察）"
+      }
+    }
+  ],
+  "params": {
+    "trend_lookback_days": 20,
+    "trend_move_bp": 10,
+    "trend_move_pct": 0.5,
+    "funding_lookback_days": 10,
+    "funding_move_bp": 5,
+    "shock_lookback_days": 5,
+    "index_hist_days": 900,
+    "index_stale_days": 5
+  },
+  "matrices": {
+    "double_tighten": {
+      "_说明": "以中债为主轴（债基定价锚在国内），美债为次要轴；bp 阈值用 move_bp",
+      "flat": 0,
+      "cn_down_us_up": 2,
+      "cn_down_us_down": 1,
+      "cn_up_us_down": -1,
+      "cn_up_us_up": -2
+    }
+  },
+  "thresholds": {
+    "cn10_y_bond_pct": [
+      [
+        -99,
+        1.65,
+        2
+      ],
+      [
+        1.65,
+        1.85,
+        1
+      ],
+      [
+        1.85,
+        2.0,
+        0
+      ],
+      [
+        2.0,
+        2.3,
+        -1
+      ],
+      [
+        2.3,
+        99,
+        -2
+      ]
+    ],
+    "shibor_funding_pct": [
+      [
+        -99,
+        1.6,
+        2
+      ],
+      [
+        1.6,
+        1.9,
+        1
+      ],
+      [
+        1.9,
+        2.3,
+        0
+      ],
+      [
+        2.3,
+        2.8,
+        -1
+      ],
+      [
+        2.8,
+        99,
+        -2
+      ]
+    ],
+    "fx_usdcny": [
+      [
+        -99,
+        6.85,
+        2
+      ],
+      [
+        6.85,
+        7.15,
+        0
+      ],
+      [
+        7.15,
+        7.35,
+        -1
+      ],
+      [
+        7.35,
+        99,
+        -2
+      ]
+    ],
+    "bond_shock_pct": [
+      [
+        -99,
+        -0.5,
+        -2
+      ],
+      [
+        -0.5,
+        -0.2,
+        -1
+      ],
+      [
+        -0.2,
+        99,
+        1
+      ]
+    ],
+    "gov_supply_yi": [
+      [
+        -99,
+        8000,
+        1
+      ],
+      [
+        8000,
+        15000,
+        0
+      ],
+      [
+        15000,
+        1000000000.0,
+        -1
+      ]
+    ],
+    "term_spread_pct": [
+      [
+        -99,
+        0.28,
+        -2
+      ],
+      [
+        0.28,
+        0.36,
+        -1
+      ],
+      [
+        0.36,
+        0.5,
+        0
+      ],
+      [
+        0.5,
+        0.58,
+        1
+      ],
+      [
+        0.58,
+        99,
+        2
+      ]
+    ]
+  },
+  "manual": {
+    "_说明": "没有自动数据源的因子在此手工维护；updated_at 超过 stale_days 会标 stale 并进 warnings。v1.1 起仅剩 ⑥ 一项（④⑤ 已接自动源）。",
+    "gov_supply": {
+      "label": "⑥ 政府债供给",
+      "updated_at": "2026-09-17",
+      "net_supply_yi": 17500,
+      "wow_yi": 6400,
+      "note": "9 月净融资预计 1.75 万亿元，环比增加超 6400 亿元，直接压低存量债券价格",
+      "stale_days": 30,
+      "source_note": "月度更新；thresholds 以万亿为档位，8000 亿以下为宽松供给环境。数值来自 2026-09-17《美联储加息对债基与红利低波基金影响分析》"
+    }
+  },
+  "verdicts": [
+    {
+      "min_total": 7,
+      "verdict": "对债基有利",
+      "action": "可持有 / 分批买入"
+    },
+    {
+      "min_total": 4,
+      "verdict": "中性偏有利",
+      "action": "可持有，关注资金面变化"
+    },
+    {
+      "min_total": -1,
+      "verdict": "中性",
+      "action": "观望，等信号明确"
+    },
+    {
+      "min_total": -7,
+      "verdict": "偏不利",
+      "action": "控制久期敞口，优先中短债"
+    },
+    {
+      "min_total": -99,
+      "verdict": "不利",
+      "action": "考虑规避 / 降低敞口"
+    }
+  ],
+  "signals": {
+    "buy": [
+      {
+        "metric": "cn10_y",
+        "op": "<",
+        "value": 1.7,
+        "label": "10Y 国债 < 1.70%（利率低位 + 资金面宽松）"
+      },
+      {
+        "metric": "double_tighten",
+        "op": ">=",
+        "value": 1,
+        "label": "国内利率独立下行（外紧内松或内外双松）"
+      },
+      {
+        "metric": "shibor_1w",
+        "op": "<",
+        "value": 1.6,
+        "label": "Shibor 1W < 1.60%（资金面宽松）"
+      },
+      {
+        "metric": "usdcny",
+        "op": "<",
+        "value": 6.85,
+        "label": "人民币偏强（贬值约束小）"
+      },
+      {
+        "metric": "bond_shock_5d",
+        "op": ">",
+        "value": -0.2,
+        "label": "债市近 5 日无冲击（赎回负反馈未启动）"
+      },
+      {
+        "metric": "gov_supply_yi",
+        "op": "<",
+        "value": 8000,
+        "label": "政府债净融资 < 8 千亿（供给压力小）"
+      },
+      {
+        "metric": "cn_term_spread",
+        "op": ">=",
+        "value": 0.5,
+        "label": "期限利差 ≥ 0.50pp（曲线偏陡，长端补偿厚，拉久期性价比高）"
+      }
+    ],
+    "warn": [
+      {
+        "metric": "cn10_y",
+        "op": ">",
+        "value": 1.9,
+        "label": "10Y 国债 > 1.90%（票息垫子变薄）"
+      },
+      {
+        "metric": "double_tighten",
+        "op": "<=",
+        "value": -1,
+        "label": "国内利率上行（内外双紧迹象）"
+      },
+      {
+        "metric": "shibor_1w",
+        "op": ">",
+        "value": 2.2,
+        "label": "Shibor 1W > 2.20%（资金面收敛）"
+      },
+      {
+        "metric": "usdcny",
+        "op": ">",
+        "value": 7.15,
+        "label": "人民币贬值压力上升"
+      },
+      {
+        "metric": "bond_shock_5d",
+        "op": "<=",
+        "value": -0.2,
+        "label": "债市近 5 日急跌（赎回压力上升）"
+      },
+      {
+        "metric": "gov_supply_yi",
+        "op": ">",
+        "value": 15000,
+        "label": "政府债净融资 > 1.5 万亿（供给压制）"
+      },
+      {
+        "metric": "cn_term_spread",
+        "op": "<=",
+        "value": 0.28,
+        "label": "期限利差 ≤ 0.28pp（曲线极平，长端无补偿，久期风险大）"
+      }
+    ]
+  },
+  "invalidation": {
+    "_说明": "结论失效条件：命中任意一条即说明本台账的结论不再成立，须重新研究。出自 2026-09-17《美联储加息长周期复盘 2004-2026》结论失效条件一节；⑤ 的阈值案件锚自 2013-06 / 2016-12 / 2020-05 / 2022-11 四次债市负反馈。",
+    "rules": [
+      {
+        "metric": "cn10_y",
+        "op": ">",
+        "value": 2.0,
+        "text": "国内 10Y 国债升破 2.00% 并持续上行：债基票息垫子进一步变薄，需重新评估"
+      },
+      {
+        "metric": "double_tighten",
+        "op": "<=",
+        "value": -2,
+        "text": "内外双紧确立（中债与美债同步上行）：历史上债基真正亏钱的组合（2004、2017）"
+      },
+      {
+        "metric": "usdcny",
+        "op": ">",
+        "value": 7.35,
+        "text": "人民币转为趋势性贬值：汇率路径从「方向相反」变为「实质约束」，货币政策宽松空间被压缩"
+      },
+      {
+        "metric": "bond_shock_5d",
+        "op": "<=",
+        "value": -0.5,
+        "text": "债市近 5 日跌幅超 0.5%（负反馈级）：风险从利率风险升级为流动性风险，性质完全不同（参照 2022-11 理财赎回潮 / 2016-12 债灾）"
+      },
+      {
+        "metric": "cn_term_spread",
+        "op": "<=",
+        "value": 0.2,
+        "text": "期限利差压缩到 0.20pp 以下（曲线极度平坦）：长端几乎没有期限补偿，历史上这种形态下久期拥挤风险显著上升，需重新评估久期敞口"
+      }
+    ]
+  },
+  "_说明_口径": "⑤ 赎回压力基于**中证全债 H11001 价格指数**近 5 日涨跌幅（代理口径，非真实净申赎）；纯债基金的实际回报还应加上票息（近年年化 3%~5%）。原始研究另区分 H30269 价格与 H20269 全收益，两者 2022 年相差 5.36pp。",
+  "transmission": [
+    {
+      "path": "① 跨境配置",
+      "status": "基本失效",
+      "mechanism": "中美利差倒挂 → 套保成本上升 → 外资减持人民币利率债 → 中债收益率被动上行",
+      "when": [
+        {
+          "metric": "double_tighten",
+          "op": "<=",
+          "value": 0
+        }
+      ],
+      "effect": "实测：2Y/5Y/10Y 美债 20 日冲击下，各期限中债上行概率仅 47%~54%，中位数≈0"
+    },
+    {
+      "path": "② 汇率约束",
+      "status": "方向相反",
+      "mechanism": "美元走强 → 人民币贬值 → 央行宽松受限 → 利空债市",
+      "when": [
+        {
+          "metric": "usdcny",
+          "op": "<",
+          "value": 7.15
+        }
+      ],
+      "effect": "当前人民币偏升值一侧，部分对冲加息影响；若转趋势性贬值则本条变为实质约束"
+    },
+    {
+      "path": "③ 风险偏好与基本面",
+      "status": "对中债偏正",
+      "mechanism": "全球长久期资产重定价 → 成长股杀估值、海外需求受抑 → 股债跷跷板 + 外需走弱",
+      "when": [
+        {
+          "metric": "cn10_y",
+          "op": "<",
+          "value": 1.85
+        }
+      ],
+      "effect": "风险偏好收缩反而对中债形成支撑"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "基准：年内再加 0~1 次",
+      "probability": 50,
+      "when": [
+        {
+          "metric": "us10_y",
+          "op": "<",
+          "value": 5.2
+        }
+      ],
+      "outcome": "债基中性偏多（纯债小幅正收益，中短债更稳）；A股红利偏正面；港股红利小幅承压",
+      "factors": "10Y 美债在 4.8%~5.2% 震荡、国内 10Y 守住 1.65%~1.75%"
+    },
+    {
+      "name": "紧缩超预期",
+      "probability": 30,
+      "when": [
+        {
+          "metric": "us10_y",
+          "op": ">=",
+          "value": 5.2
+        }
+      ],
+      "outcome": "债基短期承压（情绪扰动加大、长久期波动上升，但中债仍看国内基本面）；港股红利最需警惕",
+      "factors": "年内再加 2 次、油价冲高、10Y 美债上至 5.2%~5.5%"
+    },
+    {
+      "name": "紧缩证伪",
+      "probability": 20,
+      "when": [
+        {
+          "metric": "us10_y",
+          "op": "<",
+          "value": 4.0
+        }
+      ],
+      "outcome": "外部估值天花板解除，长端下行空间打开；红利「债券锚」重新增强",
+      "factors": "油价回落、通胀降温、2027 转向降息预期"
+    }
+  ]
+}

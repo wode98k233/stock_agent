@@ -6,13 +6,9 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 from config import Config
-from utils.cache.market_data_db import get_market_data_db, init_market_data_tables
-from utils.cache.fundamental_db import get_fundamental_db, init_fundamental_tables
-from utils.cache.market_cache_db import get_market_cache_db as _get_cache_db, init_market_cache_tables
-from utils.cache.backtest_db import init_backtest_tables
-
-
+from utils.cache.market_cache_db import get_market_cache_db as _get_cache_db
 from utils.cache.db_utils import make_db_context
+
 
 get_db = make_db_context(lambda: Config.get_db_path())
 
@@ -33,28 +29,32 @@ def ensure_cache_tables():
 
 
 def init_cache_tables():
-    """初始化所有数据库表"""
-    # 初始化 stock_radar.db（现有表）
-    _init_stock_radar_tables()
+    """初始化所有缓存/行情库表（DDL 统一来源 utils/db_schema，幂等加性）。"""
+    from utils.app_paths import (get_db_path, get_market_data_db_path,
+                                 get_fundamental_db_path, get_market_cache_db_path,
+                                 get_backtest_db_path)
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.registry import ALL_DBS
 
-    # 初始化新数据库
-    init_market_data_tables()
-    init_fundamental_tables()
-    init_market_cache_tables()
-    init_backtest_tables()
-
-
-def _init_stock_radar_tables():
-    """初始化 stock_radar.db 表结构（仅业务表，缓存表已迁至 market_cache.db）"""
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS dialog (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dialog_uuid TEXT UNIQUE NOT NULL,
-            user_query TEXT NOT NULL,
-            create_time TIMESTAMP NOT NULL,
-            log_file TEXT NOT NULL
-        )''')
+    for key, path_fn in [
+        ("stock_radar", get_db_path),
+        ("market_data", get_market_data_db_path),
+        ("fundamental", get_fundamental_db_path),
+        ("market_cache", get_market_cache_db_path),
+        ("backtest", get_backtest_db_path),
+    ]:
+        d = ALL_DBS[key]
+        conn = sqlite3.connect(path_fn())
+        try:
+            if key == "backtest":
+                # 保持原 backtest_db 的 WAL 设置（批量回测多线程并发写）
+                conn.execute("PRAGMA journal_mode = WAL")
+            ensure_schema(conn, d.tables, d.special_migrations)
+            for seed in d.seeds:
+                seed(conn)
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ── 过期判断 ──

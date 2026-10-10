@@ -33,26 +33,18 @@ class TraceCommand(CommandHandler):
         return CommandResult(ok=False, message=err(f"未知操作: {action}"))
 
     def _recent(self, limit: int) -> CommandResult:
-        from utils.agent_trace.db import get_trace_conn
-
-        conn = get_trace_conn()
-        if conn is None:
-            return CommandResult(ok=True, message="Trace 数据库不存在或未初始化。")
+        from utils.agent_trace.store import store
 
         try:
-            rows = conn.execute(
-                "SELECT id, agent_name, status, duration_ms, created_at "
-                "FROM runs ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            runs = store.list_runs(limit=limit)
         except Exception as e:
             return CommandResult(ok=False, message=err(f"查询失败: {e}"))
 
-        if not rows:
+        if not runs:
             return CommandResult(ok=True, message="暂无执行记录。")
 
         table_rows = []
-        for r in rows:
+        for r in runs:
             run_id = str(r["id"]) if r["id"] else ""
             agent = r["agent_name"] or ""
             status_icon = _STATUS_ICON.get(r["status"], "?")
@@ -65,30 +57,18 @@ class TraceCommand(CommandHandler):
         return CommandResult(ok=True, message=f"最近执行链：\n{table}")
 
     def _show(self, run_id: str, verbose: bool = False) -> CommandResult:
-        from utils.agent_trace.db import get_trace_conn
-        from utils.agent_trace.models import _TYPE_ICONS
-
-        conn = get_trace_conn()
-        if conn is None:
-            return CommandResult(ok=False, message=err("Trace 数据库不存在。"))
+        from utils.agent_trace.store import store
 
         try:
-            row = conn.execute(
-                "SELECT * FROM runs WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
-                (f"{run_id}%",),
-            ).fetchone()
+            matches = store.find_run_by_id_prefix(f"{run_id}%", limit=1)
         except Exception as e:
             return CommandResult(ok=False, message=err(f"查询失败: {e}"))
 
-        if not row:
+        if not matches:
             return CommandResult(ok=False, message=err(f"未找到 run_id: {run_id}"))
 
-        run_dict = dict(row)
-        steps = conn.execute(
-            "SELECT * FROM steps WHERE run_id=? ORDER BY id",
-            (run_dict["id"],),
-        ).fetchall()
-        steps_dicts = [dict(s) for s in steps]
+        run_dict = matches[0]
+        steps_dicts = store.get_steps(run_dict["id"])
 
         tree_text = _build_tree(run_dict, steps_dicts, verbose)
         return CommandResult(ok=True, message=tree_text)

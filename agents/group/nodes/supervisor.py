@@ -432,14 +432,72 @@ async def supervisor_node(state: GroupState, ctx: AgentContext, run_config=None)
         else:
             agent_names = [name]
 
+    # ── 计划外调度管控（D）：不在任何未完成计划步骤中的 agent 只放行一次 ──
+    extra_executed = list(state.get("_extra_executed", []))
+    extra_dispatched = list(state.get("_extra_dispatched", []))
+    pending_name_sets = [
+        set(s.get("agent_names", []))
+        for s in plan
+        if s.get("status") != "success"
+    ]
+    final_names = []
+    for n in agent_names:
+        if any(n in names for names in pending_name_sets):
+            final_names.append(n)
+        elif n in extra_executed:
+            logger.warning("S", f"Agent {n} 不在计划步骤中且已计划外执行过，跳过重复调度")
+        else:
+            extra_dispatched.append(n)
+            final_names.append(n)
+            logger.warning("S", f"Agent {n} 不在计划步骤中，计划外放行（仅一次）")
+
+    if not final_names:
+        logger.warning("S", "调度目标全部为已执行过的计划外 agent，提前转报告")
+        msg_log.observe(current_idx, "early_stop", "无可调度的有效 agent（计划外重复调度）")
+        return {
+            "observation": "early_stop",
+            "_extra_dispatched": extra_dispatched,
+        }
+    agent_names = final_names
+
     log_label = "并行调度" if len(agent_names) > 1 else "调度"
     logger.info("S", f"{log_label} {agent_names}: {purpose[:80]}...")
-    msg_log.step_start(current_idx + 1, agent_names, purpose)
+
+    # ── 调度槽位重定位（A）：current_step_index 必须与被调度 agent 对齐 ──
+    # 否则重复调度（如补采）会写错计划槽位，导致后续步骤永远匹配不上（空转死循环）
+    name_set = set(agent_names)
+    target_idx = next(
+        (
+            idx
+            for idx, s in enumerate(plan)
+            if s.get("status") != "success"
+            and name_set & set(s.get("agent_names", []))
+        ),
+        None,
+    )
+    if target_idx is None:
+        # 计划外调度：指向第一个未完成步骤（槽位归属由 subagent 侧校验兜底）
+        target_idx = next(
+            (idx for idx, s in enumerate(plan) if s.get("status") != "success"),
+            None,
+        )
 
     result = {
         "current_agent_names": agent_names,
         "current_task_purpose": purpose,
+        "_extra_dispatched": extra_dispatched,
     }
+
+    if target_idx is not None and target_idx != current_idx:
+        logger.info(
+            "S",
+            f"调度槽位重定位: current_step_index {current_idx} → {target_idx}"
+            f" (步骤 {plan[target_idx].get('step')}, {plan[target_idx].get('agent_names')})",
+        )
+        result["current_step_index"] = target_idx
+        current_idx = target_idx
+
+    msg_log.step_start(current_idx + 1, agent_names, purpose)
 
     # 并行执行时初始化 join 计数器
     if len(agent_names) > 1:

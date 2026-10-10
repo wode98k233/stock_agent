@@ -101,8 +101,6 @@ class StockRadarTUI(App):
     # ── 事件路由 ────────────────────────────────────
 
     def on_timeline_step_event(self, event: TimelineStepEvent) -> None:
-        import sys
-        print(f"[TUI DEBUG] on_timeline_step_event: step={event.step} status={event.status}", file=sys.stderr, flush=True)
         timeline = self._main.timeline
         if timeline is None:
             return

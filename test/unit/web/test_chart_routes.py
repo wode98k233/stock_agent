@@ -24,6 +24,8 @@ def test_get_kline_reads_local_data_without_sync(monkeypatch):
         }
     ])
     monkeypatch.setattr(charts, "_sync_kline_sync", lambda code, days: (_ for _ in ()).throw(AssertionError("不应隐式同步")))
+    # 旧数据会触发"新鲜度检查→真实网络增量同步"（生产行为），单测必须隔离，否则会真发外网请求
+    monkeypatch.setattr(charts, "_maybe_refresh_daily", lambda code, df: False)
     monkeypatch.setattr("utils.cache.market_data_db.get_stock_daily", lambda *args, **kwargs: df)
     monkeypatch.setattr("utils.cache.market_data_db.get_stock_info", lambda code: {'name': '贵州茅台'})
 

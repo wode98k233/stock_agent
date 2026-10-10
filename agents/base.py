@@ -31,6 +31,80 @@ def _build_memory_context(user_input: str, history: list = None) -> Optional[str
     return "\n".join(human_texts[-4:])
 
 
+# 持仓账本注入门控关键词（portfolio_advice 路由关键词的核心子集，见 route_rules.json）
+_PORTFOLIO_KEYWORDS = (
+    "持仓", "清仓", "减仓", "补仓", "加仓", "建仓", "割肉", "止损", "止盈",
+    "仓位", "浮亏", "浮盈", "回本", "套牢", "解套", "满仓", "我买", "我卖",
+)
+
+
+def _build_portfolio_block(user_input: str, db_path: str | None = None) -> str:
+    """命中持仓关键词且有持仓时，构造 [用户持仓账本] 注入块。
+
+    三层防护：关键词门控（无关问题零成本短路）→ 开关（PORTFOLIO_ENRICH_ENABLED）
+    → 异常全吞（表不存在/DB 损坏返回空串，不影响主流程）。
+    直接 sqlite 只读 stock_radar.db 的 portfolio_position 快照表——
+    agents 层不反向依赖 server 包。
+    """
+    if not any(kw in (user_input or "") for kw in _PORTFOLIO_KEYWORDS):
+        return ""
+    try:
+        from config import Config
+        if not Config.PORTFOLIO_ENRICH_ENABLED:
+            return ""
+        import sqlite3
+        from utils.app_paths import get_db_path
+        conn = sqlite3.connect(db_path or get_db_path())
+        try:
+            # 兜底注入（主通道=portfolio_query 技能）：带 ETF 标记与来源
+            rows = conn.execute(
+                "SELECT stock_code, stock_name, qty, avg_cost, etf_flag, source"
+                " FROM portfolio_position WHERE qty > 0"
+                " ORDER BY updated_at DESC").fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return ""
+        # 账户资金/组合当日盈亏（东财同步后有值；无则跳过，不编造）
+        account_line = ""
+        try:
+            from server.services.eastmoney_sync import get_account_cache
+            acct = get_account_cache(db_path=db_path) or {}
+            acct_parts = []
+            if acct.get("total_asset") is not None:
+                acct_parts.append(f"账户总资产约{acct['total_asset']:,.2f}元")
+            if acct.get("avail_cash") is not None:
+                acct_parts.append(f"可用资金约{acct['avail_cash']:,.2f}元")
+            if acct.get("today_pnl") is not None:
+                acct_parts.append(f"今日盈亏{acct['today_pnl']:+,.2f}元")
+            if acct.get("snapshot_at") and acct.get("market_status"):
+                status = acct["market_status"]
+                note = "，最新价为盘中快照会波动" if status == "盘中" else ""
+                acct_parts.append(
+                    f"同步于{acct['snapshot_at']}（{status}{note}）")
+            if acct_parts:
+                account_line = "账户：" + " · ".join(acct_parts)
+        except Exception:
+            account_line = ""
+        total_cost = sum(cost * qty for _, _, qty, cost, _, _ in rows)
+        etf_cost = sum(cost * qty for _, _, qty, cost, flag, _ in rows if flag)
+        etf_pct = etf_cost / total_cost * 100 if total_cost else None
+        lines = []
+        if account_line:
+            lines.append(account_line)
+        lines.append("[用户持仓账本]（兜底注入；可用 portfolio_query 技能查询明细）")
+        if etf_pct is not None:
+            lines.append(f"ETF 占组合成本约 {etf_pct:.1f}%")
+        for code, name, qty, cost, etf_flag, source in rows:
+            src = "东财" if (source or "manual") == "eastmoney" else "手动"
+            etf = " ETF" if etf_flag else ""
+            lines.append(
+                f"{name or code}({code}) 成本{cost:.2f}×{qty:g}股{etf}〔{src}〕")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 class BaseAgent:
     """
     🤖 Agent 基类
@@ -116,7 +190,7 @@ class BaseAgent:
             logger.error("I", f"[UserProfile] 更新失败（非阻塞）: {e}")
 
     def _enrich_user_input(self, user_input: str, progress_callback=None,
-                           history: list = None) -> str:
+                           history: list = None, logger=None) -> str:
         """构建增强输入。enrich_with_time 已生成 [背景信息]+[用户问题] 骨架，
         我们只追加画像和记忆，不重复加 [用户问题] 头。
 
@@ -125,11 +199,13 @@ class BaseAgent:
 
         Args:
             history: session 历史消息（LangChain 消息元组列表），用于拼接记忆检索上下文。
+            logger: 请求级 logger（RadarLogger）；传入后记忆检索统计落进本次请求日志。
         """
         from output.time_util import enrich_with_time
         enriched = enrich_with_time(user_input)
         profile_ctx = ""
         memory_block = ""
+        market_status = ""
 
         # 市场开市/休市状态
         try:
@@ -153,11 +229,40 @@ class BaseAgent:
         try:
             sdk = get_sdk()
             context = _build_memory_context(user_input, history)
-            memory_block = sdk.retrieve(user_input, context=context) or ""
+            memory_block = sdk.retrieve(user_input, logger=logger, context=context) or ""
             if memory_block:
                 enriched += "\n" + memory_block
         except Exception:
             memory_block = ""
+
+        # 持仓账本（关键词门控 + 无持仓静默跳过 + 异常全吞，见 _build_portfolio_block）
+        try:
+            portfolio_block = _build_portfolio_block(user_input)
+            if portfolio_block:
+                enriched += "\n" + portfolio_block
+        except Exception:
+            portfolio_block = ""
+
+        # ── A8 sr_* 上下文注入（agents 侧单点）：场景 + 注入摘要哈希 ──
+        # 保守原则：任一键取不到就不注入；异常全吞，绝不影响增强输入主流程。
+        # 只哈希个性化/状态类注入块（市场状态/画像/记忆/持仓），不含时间前缀
+        # （时间逐分钟变化，入哈希会让缓存键必 miss）；无注入 → 固定哨兵 NOINJ。
+        try:
+            from agents.sr_context import (
+                compute_inject_hash,
+                note_run_inject_hash,
+                note_run_scenario,
+            )
+            from agents.scenario_router import classify_scenario
+
+            scenario, _ = classify_scenario(user_input)
+            note_run_scenario(scenario)
+            inject_blocks = [b for b in (market_status, profile_ctx, memory_block, portfolio_block) if b]
+            note_run_inject_hash(
+                compute_inject_hash(*inject_blocks) if inject_blocks else "NOINJ"
+            )
+        except Exception:
+            pass
 
         # 推送「记忆上下文」进度事件：用户原始输入 / 用户画像 / 用户相关记忆片段
         # 始终推送：即便画像/记忆为空，用户也能在页面看到「用户原始输入」这一块，

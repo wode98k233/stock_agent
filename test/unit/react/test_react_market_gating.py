@@ -6,8 +6,15 @@ ReAct 市场能力过滤测试。
 import asyncio
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+
+
+@pytest.fixture(autouse=True)
+def _batch_one(monkeypatch):
+    """本文件聚焦市场过滤语义，用 batch=1 保持单技能（批量默认 3，另测）。"""
+    monkeypatch.setattr("config.Config.REACT_SKILL_BATCH_SIZE", 1, raising=False)
 
 
 def test_infer_market_from_text_recognizes_common_symbols():
@@ -23,7 +30,7 @@ def test_infer_market_from_text_recognizes_common_symbols():
 
 
 def test_select_skills_filters_a_share_only_tools_for_us_stock(mock_logger):
-    """美股/ADR 任务不应把 A 股资金、估值工具暴露给 React LLM。"""
+    """美股/ADR 任务不应把 A 股资金、估值工具暴露给 React LLM；只激活首个技能。"""
     from agents.react.nodes import SelectSkillsNode
     from utils.budget import BudgetController
 
@@ -87,13 +94,17 @@ def test_select_skills_filters_a_share_only_tools_for_us_stock(mock_logger):
             result = await node(state)
 
         names = result.get("all_tool_names", [])
-        assert names == ["mx_data_query", "mx_search_news", "calc_technical_indicators"]
+        # 单技能激活：只加载首个技能（mx_data）的工具，且经过市场过滤后保留美股可用工具
+        assert names == ["mx_data_query"]
+        assert result["active_skill"] == "mx_data"
+        assert "get_stock_fund_flow" not in names
+        assert "get_valuation_percentile" not in names
 
     asyncio.run(run_case())
 
 
 def test_select_skills_keeps_a_share_tools_for_a_share_stock(mock_logger):
-    """A 股任务保持原有工具能力，不做市场过滤退化。"""
+    """A 股任务的 active 技能工具保持原有能力，市场过滤不退化。"""
     from agents.react.nodes import SelectSkillsNode
     from utils.budget import BudgetController
 
@@ -131,8 +142,10 @@ def test_select_skills_keeps_a_share_tools_for_a_share_stock(mock_logger):
             result = await node(state)
 
         names = result.get("all_tool_names", [])
-        assert "get_stock_fund_flow" in names
-        assert "get_valuation_percentile" in names
+        # 单技能激活：active=money_flow 的 A 股工具不被市场过滤掉
+        assert names == ["get_stock_fund_flow"]
+        assert result["active_skill"] == "money_flow"
+        assert "get_valuation_percentile" not in names
 
     asyncio.run(run_case())
 
@@ -199,3 +212,96 @@ def test_is_tool_success_rejects_structured_errors_and_empty_shells():
     assert is_tool_success('{"code": "BABA"}') is False
     assert is_tool_success("工具 get_stock_fund_flow 当前不支持美股 BABA，已跳过") is False
     assert is_tool_success('{"symbol": "BABA", "current_price": 130.0}') is True
+
+
+# ── 通用网搜（web_search）对港美股放行（2026-10-07）──────────────
+# 背景：`web_search` 是市场无关的通用检索（政策/公司背景/产业链/公告），
+# 此前不在 HK_US_ALLOWED_TOOLS → 港美股问题被过滤掉，查不到新闻与背景。
+
+
+def test_web_search_allowed_for_hk_us():
+    """web_search 与市场无关，港美股必须放行；A 股专用工具仍被过滤。"""
+    from tools.tool_capabilities import (
+        HK_US_ALLOWED_TOOLS,
+        filter_tools_for_market,
+        tool_supports_market,
+    )
+
+    assert "web_search" in HK_US_ALLOWED_TOOLS
+    for market in ("ashare", "hk", "us", "unknown"):
+        assert tool_supports_market("web_search", market) is True
+
+    @tool
+    def web_search(query: str) -> str:
+        """通用网搜。"""
+        return query
+
+    @tool
+    def get_stock_fund_flow(symbol: str) -> str:
+        """A 股个股资金流。"""
+        return symbol
+
+    kept, filtered = filter_tools_for_market([web_search, get_stock_fund_flow], "us")
+    assert [t.name for t in kept] == ["web_search"]
+    assert filtered == ["get_stock_fund_flow"]
+
+
+def test_hk_us_whitelist_excludes_a_share_only_tools():
+    """白名单只能放「市场无关或已适配」的工具，A 股专用工具不得混入。"""
+    from tools.tool_capabilities import HK_US_ALLOWED_TOOLS
+
+    for a_share_only in ("search_stock_news", "get_stock_fund_flow",
+                         "get_valuation_percentile", "get_chip_distribution",
+                         "get_stock_history"):
+        assert a_share_only not in HK_US_ALLOWED_TOOLS
+
+
+def test_market_constraint_prompt_mentions_web_search():
+    """市场约束提示要告诉 selector：港美股可以用 web_search。"""
+    from tools.tool_capabilities import market_constraint_prompt
+
+    prompt = market_constraint_prompt("us")
+    assert "web_search" in prompt
+    # 非港美股市场不给该提示（A 股不受限，无需提示）
+    assert market_constraint_prompt("ashare") == ""
+
+
+def test_unsupported_tool_message_suggests_web_search():
+    from tools.tool_capabilities import unsupported_tool_message
+
+    msg = unsupported_tool_message("get_stock_fund_flow", "us", {"symbol": "BABA"})
+    assert "web_search" in msg
+
+
+def test_select_skills_keeps_web_search_for_us_stock(mock_logger):
+    """美股任务里 web_search 技能的工具必须被保留（不再被市场过滤掉）。"""
+    from agents.react.nodes import SelectSkillsNode
+    from utils.budget import BudgetController
+
+    @tool
+    def web_search(query: str) -> str:
+        """通用网搜。"""
+        return query
+
+    class FakeRegistry:
+        def get_skill_catalog(self):
+            return []
+
+        def get_tools(self, skill_name):
+            return {"web_search": [web_search]}.get(skill_name, [])
+
+    async def run_case():
+        node = SelectSkillsNode(object(), FakeRegistry(),
+                                budget=BudgetController(), logger=mock_logger)
+        state = {
+            "user_input": "分析 BABA 阿里巴巴，最近有什么新闻",
+            "selected_template": None,
+        }
+        with patch("agents.react.nodes.llm_json_with_retry",
+                   return_value={"selected_skills": ["web_search"]}):
+            result = await node(state)
+
+        assert result.get("all_tool_names") == ["web_search"]
+        assert result["active_skill"] == "web_search"
+
+    asyncio.run(run_case())

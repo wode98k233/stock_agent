@@ -31,8 +31,8 @@ def test_resource_paths_use_meipass_when_frozen(monkeypatch, tmp_path):
     assert app_paths.get_template_dir() == str(resource_root / "agents" / "report_templates")
     assert app_paths.get_server_static_dir() == str(resource_root / "server" / "static")
     assert app_paths.get_agent_trace_viewer_dir() == str(resource_root / "utils" / "agent_trace")
-    assert app_paths.get_db_path() == str(exe_dir / "stock_radar.db")
-    assert app_paths.get_trace_db_path() == str(exe_dir / "agent_trace.db")
+    assert app_paths.get_db_path() == str(exe_dir / "db" / "stock_radar.db")
+    assert app_paths.get_trace_db_path() == str(exe_dir / "db" / "agent_trace.db")
 
 
 def test_resource_paths_use_repo_root_in_dev_mode(monkeypatch):
@@ -49,6 +49,23 @@ def test_resource_paths_use_repo_root_in_dev_mode(monkeypatch):
     assert Path(app_paths.get_server_static_dir()) == root / "server" / "static"
     assert Path(app_paths.get_agent_trace_viewer_dir()) == root / "utils" / "agent_trace"
     assert Path(app_paths.get_template_dir()) == root / "agents" / "report_templates"
+
+
+def test_monitor_alerts_db_path_in_app_dir(monkeypatch, tmp_path):
+    """盯盘告警库应落在 app 目录（打包态 exe 同级、开发态项目根），不硬编码路径。"""
+    import utils.app_paths as app_paths
+
+    monkeypatch.setattr(app_paths, "get_app_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(app_paths, "_db_migration_done", False)
+    assert app_paths.get_monitor_alerts_db_path() == str(tmp_path / "db" / "monitor_alerts.db")
+
+
+def test_pyinstaller_spec_declares_monitoring_hiddenimport():
+    """main.spec 应显式声明 server.monitoring，防止打包漏收盯盘模块。"""
+    root = Path(__file__).resolve().parents[3]
+    spec_text = (root / "build_spec" / "main.spec").read_text(encoding="utf-8")
+
+    assert "server.monitoring" in spec_text
 
 
 def test_pyinstaller_spec_uses_project_relative_source_paths():

@@ -36,6 +36,27 @@ def _is_abnormal_result(text: str) -> bool:
     return False
 
 
+def _looks_like_missing_target(text: str) -> bool:
+    """检测「拿不到标的/参数，所以没动手」这类空转回复。
+
+    2026-09-26 实测故障：子代理因上下文压缩丢了 instruction（标的与指标），
+    回了一句「目前对话中没有提供基金/ETF 代码或名称，无法直接调取 K 线数据」，
+    零次工具调用却被 executor 记为「成功」，replanner 随即换方向，
+    用户的核心问题整轮被跳过。
+
+    注意：本函数语义窄，仅在「零工具调用」时使用（见 is_empty_step_result），
+    正常报告即使提到「无法获取」也不会被误判——因为它必然有工具调用。
+    """
+    if not text:
+        return False
+    check_text = text.strip()[:300]
+    missing_target_patterns = [
+        "未提供", "没有提供", "未指定", "未明确", "缺少", "请提供", "请补充",
+        "需要先确认", "无法调取", "无法获取", "无法查询", "无法直接查",
+    ]
+    return any(p in check_text for p in missing_target_patterns)
+
+
 def _error_fingerprint(e: Exception) -> str:
     """生成错误指纹，用于判断是否为同类错误"""
     error_type = type(e).__name__

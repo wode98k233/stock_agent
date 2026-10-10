@@ -160,6 +160,23 @@ def get_market_status_text() -> str:
     return "；".join(parts)
 
 
+def is_trading_hours(market: str, current_time: Optional[datetime] = None) -> bool:
+    """判断指定市场当前是否处于盘中连续竞价时段（A股：9:30-11:30 / 13:00-15:00，含边界）。
+
+    只管时段与周末 fail-safe；节假日判断由 is_market_open 负责（调度侧两者取与）。
+    一期仅支持 A 股，其他市场返回 False（多市场盯盘留二期）。
+    """
+    if market != "cn":
+        return False
+    now = get_market_now(market, current_time)
+    if now.weekday() >= 5:  # 周末 fail-safe，不依赖 exchange-calendars
+        return False
+    minutes = now.hour * 60 + now.minute
+    morning = 9 * 60 + 30 <= minutes <= 11 * 60 + 30
+    afternoon = 13 * 60 <= minutes <= 15 * 60
+    return morning or afternoon
+
+
 def get_next_trading_date(market: str, from_date: Optional[date] = None) -> date:
     """获取指定市场的下一个交易日。"""
     if from_date is None:

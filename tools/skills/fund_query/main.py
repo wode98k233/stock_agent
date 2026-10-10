@@ -36,9 +36,14 @@ class FundQuerySkill(SkillBuilder):
         return self._get_etf_spot(symbol, self.logger)
 
     @skill_tool
-    def get_etf_history(self, symbol: str, days: int = 60) -> list:
-        """获取 ETF 历史K线（日线，近 N 天）。symbol 如"510300"。"""
-        return self._get_etf_history(symbol, days, self.logger)
+    def get_etf_history(self, symbol: str, days: int = 60, period: str = "daily") -> list:
+        """获取 ETF 历史K线。symbol 如"510300"；days 为**K 线条数**（默认 60）。
+
+        period 取 `daily`（默认）/ `weekly` / `monthly`——**周/月线必须用 period 单独取一次**，
+        不要在一次调用里同时要日/周/月（单次输出过大会被截断，中段丢失）。
+        周/月线仅东财链路支持；查不到时返回空列表而非日线。
+        """
+        return self._get_etf_history(symbol, days, self.logger, period)
 
     @skill_tool
     def get_open_fund_nav(self, symbol: str, limit: int = 30) -> list:

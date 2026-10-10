@@ -311,14 +311,14 @@ def _merge_rows_into_normalized_fields(rows: list, bag: dict):
 def _parse_known_skill(tool_name: str, parsed: dict, bag: dict):
     """
     解析已知内部技能的结构化输出。
-    technical_analysis, valuation, sentiment_analysis 等。
+    stock_analysis（原 technical_analysis / risk_metrics）、valuation、market_review 等。
     """
     if not isinstance(parsed, dict):
         return
 
     name_lower = tool_name.lower()
 
-    # technical_analysis 技能
+    # stock_analysis 的技术指标工具（calc_technical_indicators）
     if "technical" in name_lower or "技术" in name_lower:
         for key in ("rsi", "RSI", "macd", "MACD", "kdj", "KDJ", "ma", "MA"):
             if key in parsed:
@@ -339,7 +339,7 @@ def _parse_known_skill(tool_name: str, parsed: dict, bag: dict):
             for k, v in data.items():
                 bag["normalized_fields"][k] = v
 
-    # sentiment_analysis 技能
+    # market_review 技能（情感工具 analyze_news_sentiment，按工具名子串匹配）
     if "sentiment" in name_lower or "情绪" in name_lower:
         for key in ("sentiment", "score", "events"):
             if key in parsed:

@@ -152,6 +152,48 @@ class TestStockHist(HithinkTestCase):
         self.assertLessEqual(span_days, 365 * 10 + 1)  # 窗口被截断到 10 年
 
 
+class TestEtfHist(HithinkTestCase):
+    """ETF 历史K线：走基金端点 /api/fund/market/historical（A 股端点 1002 Unknown thscode）。"""
+
+    def test_is_etf_branches(self):
+        self.assertTrue(HithinkDataSource._is_etf("513330"))   # 沪 ETF（黄金）
+        self.assertTrue(HithinkDataSource._is_etf("510300"))   # 沪宽基（51 前缀天然覆盖）
+        self.assertTrue(HithinkDataSource._is_etf("530010"))   # 沪 530 新段
+        self.assertTrue(HithinkDataSource._is_etf("551010"))   # 沪 551 科创债新段
+        self.assertTrue(HithinkDataSource._is_etf("159928"))   # 深 ETF（消费）
+        self.assertTrue(HithinkDataSource._is_etf("158010"))   # 深 158 段
+        self.assertFalse(HithinkDataSource._is_etf("600519"))  # 沪主板个股
+        self.assertFalse(HithinkDataSource._is_etf("000001"))  # 深主板个股
+        self.assertFalse(HithinkDataSource._is_etf("161725"))  # 深 LOF（16 段，非 ETF）
+        self.assertFalse(HithinkDataSource._is_etf("180101"))  # 深 REITs/封基（18 段，非 ETF）
+
+    def test_etf_hist_uses_fund_endpoint(self):
+        with patch("tools.fetcher.hithink_ds.requests.get", return_value=_resp(_hist_payload())) as m:
+            df = HithinkDataSource.get_stock_hist("513330", start="2026-08-01", end="2026-09-09")
+        self.assertEqual(len(df), 2)
+        args, kwargs = m.call_args
+        self.assertEqual(args[0], "https://fuyao.aicubes.cn/api/fund/market/historical")
+        params = kwargs["params"]
+        self.assertEqual(params["thscode"], "513330.SH")
+        self.assertEqual(params["interval"], "1d")
+        self.assertNotIn("adjust", params)  # 基金端点无复权参数
+        self.assertEqual(list(df.columns), ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"])
+
+    def test_etf_hist_window_clamped_to_5y(self):
+        with patch("tools.fetcher.hithink_ds.requests.get", return_value=_resp(_hist_payload())) as m:
+            HithinkDataSource.get_stock_hist("513330", start="2010-01-01", end="2026-01-01")
+        params = m.call_args.kwargs["params"]
+        span_days = (params["end"] - params["start"]) / 86400_000
+        self.assertLessEqual(span_days, 365 * 5 + 1)  # 基金端点窗口截断到 5 年
+
+    def test_etf_hist_error_propagates(self):
+        # 若误传 adjust 或走错端点，上游会回 code=1002；这里保证业务错误照常上抛
+        with patch("tools.fetcher.hithink_ds.requests.get",
+                   return_value=_resp(code=1002, message="Unknown thscode: 513330.SH")):
+            with self.assertRaises(RuntimeError):
+                HithinkDataSource.get_stock_hist("513330")
+
+
 class TestSpot(HithinkTestCase):
 
     def test_spot_em_paginated(self):
@@ -217,8 +259,9 @@ class TestFinancial(HithinkTestCase):
         self.assertEqual(params["limit"], 8)
 
     def test_valuation_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            HithinkDataSource.get_valuation_indicators("600519")
+        # 2026-09 已接入 /api/a-share/valuations/snapshot，此测试由
+        # TestNewCapabilities::test_valuation_batch_maps_columns 取代
+        pass
 
 
 class TestSpecialData(HithinkTestCase):
@@ -341,8 +384,8 @@ class TestSpecialData(HithinkTestCase):
         self.assertEqual(params["board_type"], "all")
 
     def test_auction_snapshot_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            HithinkDataSource.get_auction_snapshot()
+        # 2026-09 已接入 /api/a-share/auction/*，由 TestNewCapabilities 取代
+        pass
 
     def test_hot_stocks_keys(self):
         payload = {"timestamp": 0, "item": [
@@ -410,3 +453,166 @@ class TestStockDataWrappers(HithinkTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNewCapabilities(HithinkTestCase):
+    """2026-09 批量适配：估值/竞价/特色数据/指数板块/公司行为/元信息/基金/导出。"""
+
+    def _call(self, payload, fn, *args, **kwargs):
+        with patch("tools.fetcher.hithink_ds.requests.get", return_value=_resp(payload)) as m:
+            out = fn(*args, **kwargs)
+        return out, m
+
+    def test_valuation_batch_maps_columns(self):
+        payload = {"item": [{"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
+                             "pe_ttm": 22.5, "pe_mrq": 23.1, "pb_mrq": 8.2, "ps_ttm": 15.0, "pcf_ttm": 18.3}]}
+        df, m = self._call(payload, HithinkDataSource.get_valuations_batch, ["600519"])
+        self.assertEqual(df.iloc[0]["市盈率-TTM"], 22.5)
+        self.assertEqual(df.iloc[0]["市净率"], 8.2)
+        params = m.call_args.kwargs["params"]
+        self.assertEqual(params["thscodes"], "600519.SH")
+        # 单只复用
+        df2, _ = self._call(payload, HithinkDataSource.get_valuation_indicators, "600519")
+        self.assertEqual(len(df2), 1)
+
+    def test_auction_benchmark_and_quotes(self):
+        payload = {"date": "2026-09-09", "item": [
+            {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
+             "auction_pct": 1.7, "tags": ["高开"]},
+        ]}
+        rows, m = self._call(payload, HithinkDataSource.get_auction_snapshot, "2026-09-09", 5)
+        self.assertEqual(rows[0]["code"], "600519")
+        self.assertEqual(m.call_args.kwargs["params"]["date"], "2026-09-09")
+
+        payload2 = {"data_status": "ready", "item": [
+            {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
+             "auction_price": 1602.0, "auction_pct": 1.2, "auction_volume": 500,
+             "auction_amount": 800000.0, "auction_unmatched": 10,
+             "pre_close_price": 1583.0, "last_price": 1610.0},
+        ]}
+        rows2, m2 = self._call(payload2, HithinkDataSource.get_auction_quotes, ["600519"])
+        self.assertEqual(rows2[0]["auction_price"], 1602.0)
+        self.assertEqual(m2.call_args.kwargs["params"]["stage"], "final")
+
+    def test_special_data_additions(self):
+        ld, m = self._call({"item": [{"ticker": "000001", "name": "平安银行",
+                                       "price_change_ratio_pct": -10.0, "last_price": 10.0,
+                                       "first_limit_time": "09:25", "last_limit_time": "14:30",
+                                       "turnover_ratio_pct": 1.2}]},
+                           HithinkDataSource.get_limit_down_pool, "2026-09-09", 5)
+        self.assertEqual(ld[0]["code"], "000001")
+        self.assertEqual(m.call_args.kwargs["params"]["date_ms"], HithinkDataSource._to_ms("2026-09-09"))
+
+        sk, _ = self._call({"item": [{"ticker": "300001", "name": "X", "rank": 1,
+                                      "heat": 99.5, "rank_change": 2, "rank_trend": "up"}]},
+                           HithinkDataSource.get_skyrocket_list, "day", 10)
+        self.assertEqual(sk[0]["heat"], 99.5)
+
+        hh, _ = self._call({"item": [{"ticker": "600519", "name": "贵州茅台", "rank": 3}]},
+                           HithinkDataSource.get_hot_stocks_history, "2026-09-08")
+        self.assertEqual(hh[0]["rank"], 3)
+
+        tr, m2 = self._call({"item": [{"date": "2026-09-08", "rank": 5}]},
+                            HithinkDataSource.get_hot_rank_trend, "600519", "2026-09-01", "2026-09-08")
+        self.assertEqual(tr[0]["rank"], 5)
+        params = m2.call_args.kwargs["params"]
+        self.assertEqual(params["thscode"], "600519.SH")
+
+    def test_index_suite(self):
+        lst, m = self._call({"item": [{"thscode": "886042.TI", "name": "人工智能"}]},
+                            HithinkDataSource.get_ths_index_list, "cn_concept")
+        self.assertEqual(lst[0]["thscode"], "886042.TI")
+        self.assertEqual(m.call_args.kwargs["params"]["tag"], "cn_concept")
+
+        cons, _ = self._call({"item": [{"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台"}]},
+                             HithinkDataSource.get_index_constituents, "000300.SH")
+        self.assertEqual(cons[0]["code"], "600519")
+
+        snap, m2 = self._call({"item": [{"ticker": "000300", "last_price": 4000.0}]},
+                              HithinkDataSource.get_index_snapshot, ["000300"])
+        self.assertEqual(snap.iloc[0]["最新价"], 4000.0)
+        self.assertEqual(m2.call_args.kwargs["params"]["thscodes"], "000300.SH")
+
+        hist, m3 = self._call({"item": [{"date_ms": 1716134400000, "open_price": 1, "high_price": 2,
+                                          "low_price": 0.5, "close_price": 1.5, "volume": 10, "turnover": 20}]},
+                              HithinkDataSource.get_index_hist, "000300", "2026-08-01", "2026-09-09")
+        self.assertEqual(hist.iloc[0]["收盘"], 1.5)
+        params = m3.call_args.kwargs["params"]
+        self.assertNotIn("adjust", params)  # 指数无复权概念
+
+    def test_calendar_adjust_search(self):
+        days, _ = self._call({"item": [{"date_ms": 1716134400000, "date": "20240520"}]},
+                             HithinkDataSource.get_trading_days)
+        self.assertEqual(days, ["2024-05-20"])
+
+        adj, m = self._call({"item": [{"ticker": "600519", "ex_date_ms": 1716134400000,
+                                        "dividend_per_share": 30.0, "per_share_bonus": 0}]},
+                            HithinkDataSource.get_adjustment_factors, "600519", "2024-01-01", "2024-12-31")
+        self.assertEqual(adj[0]["dividend_per_share"], 30.0)
+        params = m.call_args.kwargs["params"]
+        self.assertEqual(params["from"], "2024-01-01")  # 复权端点用 from/to 字符串
+
+        res, m2 = self._call({"item": [{"thscode": "600519.SH", "ticker": "600519",
+                                         "name": "贵州茅台", "asset_type": "a-share"}]},
+                             HithinkDataSource.search_ticker, "贵州茅台")
+        self.assertEqual(res[0]["asset_type"], "a-share")
+        self.assertEqual(m2.call_args.kwargs["params"]["q"], "贵州茅台")
+
+    def _fund_payload_item(self):
+        return {"thscode": "513330.SH", "ticker": "513330", "fund_name": "黄金ETF"}
+
+    def test_fund_suite(self):
+        prof, m = self._call({"item": [self._fund_payload_item()]},
+                             HithinkDataSource.get_fund_profile, "513330")
+        self.assertEqual(prof["fund_name"], "黄金ETF")
+        self.assertEqual(m.call_args.kwargs["params"]["thscode"], "513330.SH")  # 场内补后缀
+
+        hold, _ = self._call({"item": [{"ticker": "600519", "stock_name": "贵州茅台",
+                                         "hold_ratio": 8.88}]},
+                             HithinkDataSource.get_fund_holdings, "025480.OF")
+        self.assertEqual(hold[0]["hold_ratio_pct"], 8.88)  # 百分数原值不换算
+
+        nav, m2 = self._call({"item": [{"nav_date": "2026-09-09", "unit_nav": 5.5, "adj_nav": 5.6}]},
+                             HithinkDataSource.get_fund_nav, "513330", range_="year")
+        self.assertEqual(nav[0]["unit_nav"], 5.5)
+        self.assertEqual(m2.call_args.kwargs["params"]["range"], "year")
+
+        rets, _ = self._call({"item": [{"return_year": 12.3, "rank_year": 10}]},
+                             HithinkDataSource.get_fund_returns, "513330")
+        self.assertEqual(rets["return_year"], 12.3)
+
+        div, _ = self._call({"item": [{"per_ten_cash_before_tax": 0.5, "ex_dividend_date_ms": 1716134400000}]},
+                            HithinkDataSource.get_fund_dividends, "513330")
+        self.assertEqual(div[0]["ex_dividend_date"], "2024-05-20")
+
+        news, m3 = self._call({"has_more": True, "offset": "cursor1",
+                                "item": [{"id": 1, "title": "t", "url": "u", "publish_time_ms": 1716134400000}]},
+                              HithinkDataSource.get_fund_news, "513330", limit=10)
+        self.assertTrue(news["has_more"])
+        self.assertEqual(news["next_offset"], "cursor1")
+        self.assertEqual(m3.call_args.kwargs["params"]["limit"], 10)
+
+    def test_market_dump_url(self):
+        url, m = self._call({"presigned_url": "https://s3.example/parquet"},
+                            HithinkDataSource.get_market_dump_url, "daily-k-10d")
+        self.assertEqual(url, "https://s3.example/parquet")
+        self.assertEqual(m.call_args.args[0], "https://fuyao.aicubes.cn/api/dump/market-dumps/daily-k-10d/download-url")
+        with self.assertRaises(ValueError):
+            HithinkDataSource.get_market_dump_url("unknown-kind")
+
+    def test_fetch_quotes_etf_via_fund_endpoint(self):
+        """ETF 报价必须走基金快照端点，A 股端点不覆盖 ETF。"""
+        def fake_get(path, params=None):
+            if path.endswith("/api/fund/market/snapshot"):
+                return {"item": [{"thscode": "513330.SH", "ticker": "513330", "last_price": 0.357,
+                                  "price_change": -0.004, "price_change_ratio_pct": -1.11,
+                                  "open_price": 0.361, "high_price": 0.362, "low_price": 0.355,
+                                  "prev_price": 0.361, "volume": 3029399100,
+                                  "turnover": 1084534520, "turnover_ratio_pct": 7.5}]}
+            return {"item": []}
+        with patch("tools.fetcher.hithink_ds.requests.get",
+                   side_effect=lambda url, **kw: _resp(fake_get(url.replace("https://fuyao.aicubes.cn", "")))):
+            df = HithinkDataSource.fetch_quotes(["513330"])
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["代码"], "513330")
+        self.assertAlmostEqual(df.iloc[0]["最新价"], 0.357)

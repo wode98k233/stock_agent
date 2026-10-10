@@ -1,0 +1,145 @@
+{
+  "id": "asset_allocation",
+  "schema_version": "2.0",
+  "report_family": "asset_allocation",
+  "asset_type": "instrument",
+  "intent_type": "comparison",
+  "dashboard_type": "portfolio",
+  "verbosity": "detailed",
+  "max_report_words": 3000,
+  "name": "多标的取舍与资金配置",
+  "version": "1.0",
+  "role": "你是一名资产配置与组合构建顾问。你的任务是在用户给定的多个候选方向（个股/ETF/板块/商品等，可跨资产）之间做取舍排序，并给出资金分配方案。必须基于各候选的可比数据打分排序，口径差异要标注但不能回避比较。候选必须来自用户点名的方向，不得擅自替换。所有判断必须有数据支撑，不得编造数据，不得承诺收益。",
+  "required_skills": [
+    "mx_data",
+    "mx_search"
+  ],
+  "fallback_skills": [
+    "money_flow",
+    "stock_analysis"
+  ],
+  "output_blocks": [
+    "core_summary",
+    "candidate_ranking",
+    "position_sizing",
+    "evidence_table",
+    "action_plan_compact",
+    "next_watch",
+    "risk_warning",
+    "beginner_translation"
+  ],
+  "data_requirements": {
+    "priority_tools": [
+      "mx_data",
+      "mx_search"
+    ]
+  },
+  "data_contract": [
+    {
+      "slot": "candidate_quotes",
+      "description": "各候选标的同一时点的可比行情与估值；股票/ETF/板块/商品混比时逐项标注标的类型与口径",
+      "fields": [
+        "标的类型",
+        "最新价",
+        "涨跌幅",
+        "近20日涨幅",
+        "近60日涨幅",
+        "成交额",
+        "换手率",
+        "估值或估值分位"
+      ],
+      "tool_capabilities": [
+        "market_data"
+      ],
+      "hard_required": true
+    },
+    {
+      "slot": "capital_and_sentiment",
+      "description": "各候选资金流、催化与情绪对比",
+      "fields": [
+        "主力净流入",
+        "北向资金",
+        "近期催化",
+        "新闻情感",
+        "景气度"
+      ],
+      "tool_capabilities": [
+        "fund_flow",
+        "news_search"
+      ],
+      "hard_required": false
+    },
+    {
+      "slot": "user_allocation_context",
+      "description": "可投资金、投资期限、风险偏好、现有持仓与成本（敞口查重用）",
+      "fields": [
+        "可投资金",
+        "投资期限",
+        "风险偏好",
+        "现有持仓",
+        "持仓成本"
+      ],
+      "tool_capabilities": [
+        "user_input"
+      ],
+      "hard_required": false
+    }
+  ],
+  "cross_checks": [
+    {
+      "dimensions": [
+        "candidate_quotes",
+        "capital_and_sentiment"
+      ],
+      "rule": "某候选行情/资金占优但催化落后（或相反）时，必须判断主导力量并给明确倾向；不同标的类型（个股 vs ETF vs 板块指数 vs 商品）口径不可直接混比，必须在证据表中标注口径差异后再比较。"
+    },
+    {
+      "dimensions": [
+        "user_allocation_context",
+        "candidate_quotes"
+      ],
+      "rule": "候选方向与现有持仓重叠时，必须合并计算同一方向总敞口；已重仓方向不得再建议开新仓，除非给出合并后的仓位上限，或替换方案（卖旧换新）。"
+    }
+  ],
+  "report_format": {
+    "action_required_fields": [
+      "方向取舍",
+      "资金比例",
+      "确认信号"
+    ],
+    "action_template": "取舍：{主配/次配/不配} | 资金比例：{区间} | 确认信号：{技术或事件条件}"
+  },
+  "qa_rules": [
+    "必须给出明确的主配/次配/不配排序和倾向，禁止'都可以配一点'式和稀泥结论；均衡配置必须给出具体比例和理由。",
+    "跨资产比较必须统一口径：同一时点、同一比较周期的涨跌幅、估值/分位和资金流；某候选缺数据必须标注'数据缺失'，既不得编造，也不得因缺数据直接把它排到末位。",
+    "资金分配必须包含：比例区间、分批建仓节奏、单方向仓位上限、止损/止盈/失效条件；缺少可投资金、期限或风险偏好时只能给条件化区间，不得给绝对金额。",
+    "候选清单必须来自用户点名的方向；用户未点名时先给出候选清单及纳入/排除理由，不得擅自替换为其他热门方向。",
+    "必须完整输出全部板块：核心结论/候选标的排序/仓位与风险预算/关键证据/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给核心结论与行动方案。"
+  ],
+  "analysis_framework": {
+    "summary": "分析顺序：先统一对比口径 → 逐候选按同一维度打分排序 → 查重现有持仓敞口 → 给出资金分配与分批节奏 → 输出证伪与再平衡条件。每个分配建议必须有触发条件、比例区间和失效条件。",
+    "rules": [
+      "统一口径优先：不同标的类型先对齐比较周期（同用近20日/近60日涨跌幅、同用估值分位或各自合理估值口径），口径差异在证据表标注，不因口径不同回避比较。",
+      "排序看三要素：当前位置（估值/涨幅分位）、趋势与资金验证、催化与景气。三者共振的方向配主仓，仅单一要素占优的方向只配次仓或观察。",
+      "组合视角：新资金分配必须与现有持仓合并看总敞口，同一方向（同一板块/同一指数成分）视为一个敞口；单方向上限默认不超过总可投资金的 30-40%，除非用户风险偏好明确要求集中。",
+      "分批与失效：主配方向给分批节奏（如回调分 2-3 批），每批必须有确认信号和失效条件；任一候选出现基本面证伪（业绩/政策转向）或跌破失效位，先减该方向再谈其他。"
+    ]
+  },
+  "skill_plan": [
+    {
+      "skill": "mx_data",
+      "purpose": "批量获取各候选同一时点的行情、估值分位和资金流"
+    },
+    {
+      "skill": "mx_search",
+      "purpose": "获取各候选近期催化、景气和风险新闻"
+    },
+    {
+      "skill": "portfolio_query",
+      "purpose": "查询现有持仓，检查候选方向与已有敞口的重叠"
+    }
+  ],
+  "common_rules": [
+    "position_holding"
+  ]
+}

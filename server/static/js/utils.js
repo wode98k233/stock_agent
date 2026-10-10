@@ -29,6 +29,25 @@ window.StockRadar.utils = (() => {
     return d.innerHTML;
   }
 
+  // 轻量 toast（复用盯盘面板 mmToastHost 宿主 + monitor.css 的 mm-toast 样式）
+  function toast(text, kind = "info") {
+    let host = document.getElementById("mmToastHost");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "mmToastHost";
+      document.body.appendChild(host);
+    }
+    const t = document.createElement("div");
+    t.className = `mm-toast mm-toast-${kind}`;
+    t.textContent = text;
+    host.appendChild(t);
+    setTimeout(() => t.classList.add("show"), 10);
+    setTimeout(() => {
+      t.classList.remove("show");
+      setTimeout(() => t.remove(), 300);
+    }, 3000);
+  }
+
   function loadScriptOnce(src, globalName) {
     if (globalName && window[globalName]) {
       return Promise.resolve(window[globalName]);
@@ -48,5 +67,5 @@ window.StockRadar.utils = (() => {
     return _scriptPromises[src];
   }
 
-  return { esc, TYPE_LABELS, TRACE_ICONS, loadScriptOnce };
+  return { esc, toast, TYPE_LABELS, TRACE_ICONS, loadScriptOnce };
 })();

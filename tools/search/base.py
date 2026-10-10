@@ -61,6 +61,14 @@ class BaseSearchProvider(ABC):
 
     name: str = "base"
 
+    # 是否需要 API Key。默认 True；免密的 provider（如妙想 MX 走环境变量/内部鉴权）
+    # 必须显式置 False，否则会被 `search()` 的「未配置 API Key」分支**静默短路**：
+    # 2026-09-21 实测——`MXSearchProvider()` 无参构造 → `_api_keys=[]` →
+    # `_get_next_key()` 返回 None → `_do_search` 从未执行、`search_time` 停在 0.0、
+    # 却因为重写过 `is_available` 而被聚合器当成「可用」，最终只报「所有搜索引擎均无结果」，
+    # 把「provider 结构性不可用」误读成「额度耗尽/没这类新闻」。
+    requires_api_key: bool = True
+
     def __init__(self, api_keys: List[str] = None):
         self._api_keys = api_keys or []
         self._key_cycle = self._create_key_cycle()
@@ -75,7 +83,9 @@ class BaseSearchProvider(ABC):
 
     @property
     def is_available(self) -> bool:
-        """是否有可用的 Key"""
+        """是否可用。默认「有 Key 才可用」；免密 provider 直接视为可用。"""
+        if not self.requires_api_key:
+            return True
         return bool(self._api_keys)
 
     def _get_next_key(self) -> Optional[str]:
@@ -127,12 +137,13 @@ class BaseSearchProvider(ABC):
         """执行搜索（模板方法）
 
         流程：
-        1. 获取 API Key
+        1. 获取 API Key（`requires_api_key=False` 的 provider 跳过此步，用空 key 直接搜）
         2. 调用子类实现
-        3. 记录成功/失败
+        3. 记录成功/失败（免密 provider 不记 key 台账）
         """
-        api_key = self._get_next_key()
-        if not api_key:
+        keyless = not self.requires_api_key
+        api_key = "" if keyless else self._get_next_key()
+        if not keyless and not api_key:
             return SearchResponse(
                 query=query,
                 results=[],
@@ -141,10 +152,15 @@ class BaseSearchProvider(ABC):
                 error_message=f"{self.name} 未配置 API Key"
             )
 
-        start_time = time.time()
+        start_time = time.perf_counter()
         try:
             response = self._do_search(query, api_key, max_results, **kwargs)
-            response.search_time = time.time() - start_time
+            response.search_time = time.perf_counter() - start_time
+
+            if keyless:
+                logger.info(f"[{self.name}] 搜索 '{query}' 返回 {len(response.results)} 条，"
+                            f"耗时 {response.search_time:.2f}s（免密 provider）")
+                return response
 
             if response.success:
                 self._record_success(api_key)
@@ -155,8 +171,9 @@ class BaseSearchProvider(ABC):
             return response
 
         except Exception as e:
-            self._record_error(api_key)
-            elapsed = time.time() - start_time
+            if not keyless:
+                self._record_error(api_key)
+            elapsed = time.perf_counter() - start_time
             logger.error(f"[{self.name}] 搜索 '{query}' 失败: {e}")
             return SearchResponse(
                 query=query,

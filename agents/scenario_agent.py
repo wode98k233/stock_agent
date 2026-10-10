@@ -84,6 +84,7 @@ class ScenarioAgent(BaseAgent):
                 enriched_input = self._enrich_user_input(
                     user_input, progress_callback=progress_callback,
                     history=memory.get_history() if memory else None,
+                    logger=logger,
                 )
                 data_timestamp = get_data_timestamp()
 

@@ -22,6 +22,13 @@ if PROJECT_ROOT not in sys.path:
 from backtest.json_compiler import compile_strategy
 
 
+@pytest.fixture(autouse=True)
+def _no_tail_refresh(monkeypatch):
+    """单测不打数据源：scan() 的读取侧补尾直接短路。"""
+    from backtest import signal_scanner as _ss
+    monkeypatch.setattr(_ss, "refresh_stale_tail", lambda code: False)
+
+
 # ============================================================
 # 数据与运行辅助
 # ============================================================

@@ -412,7 +412,10 @@ class TestContextVarLifecycle:
     def test_empty_collect_is_safe(self):
         reset()
         collected = collect_metadata()
-        assert collected == {}
+        # 空上下文必须安全：除 `_tool_extracts`（恒存在，供 sdk.archive 判定
+        # 来源类型 → confidence）外不应有其他键。
+        assert collected.get("_tool_extracts") == []
+        assert {k for k in collected if k != "_tool_extracts"} == set()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -620,4 +623,96 @@ class TestCollectMetadataSubjectPrecedence:
         collected = collect_metadata("603986韦尔股份估值贵吗")
         assert collected.get("subject_kind") == "stock"
         assert collected.get("source_query") == "603986韦尔股份估值贵吗"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 标的提取修正：量词剥离 / 市场级判定 / name-code 同源
+# ═══════════════════════════════════════════════════════════════
+
+class TestStockNameQuantityPrefix:
+    """股票名提取应剥掉量词前缀，如「一手牧原股份」→「牧原股份」"""
+
+    def setup_method(self):
+        reset()
+
+    def teardown_method(self):
+        reset()
+
+    @pytest.mark.parametrize("query,expected", [
+        ("我目前持有一手牧原股份,5手工商银行", "牧原股份"),
+        ("2000股南方航空亏损5%", "南方航空"),
+        ("两手韦尔股份还能拿吗", "韦尔股份"),
+    ])
+    def test_quantity_prefix_stripped(self, query, expected):
+        name = _extract_stock_name_from_input({"query": query})
+        assert name == expected
+
+    @pytest.mark.parametrize("query,expected", [
+        # 动词残留前缀：贪婪匹配超 4 字时截尾取合法短名
+        ("给我深入分析下南方航空这个股,目前合适买入吗", "南方航空"),
+        ("是南方航空吗", "南方航空"),
+        ("帮看看长城汽车", "长城汽车"),
+        # 正常名不受影响
+        ("帮我看看韦尔股份走势", "韦尔股份"),
+    ])
+    def test_verb_prefix_truncated(self, query, expected):
+        name = _extract_stock_name_from_input({"query": query})
+        assert name == expected
+
+    def test_regression_na_retair(self):
+        """回归：用户示例「深入分析下南方航空」曾产出「析下南方航空」"""
+        subj = classify_query_subject("给我深入分析下南方航空这个股,目前合适买入吗")
+        assert subj["subject_kind"] == "stock"
+        assert subj["stock_name"] == "南方航空"
+        assert subj["stock_code"] == ""
+
+    def test_market_question_with_today_keyword(self):
+        """「今天大跌找方向」这类市场级问题应归为 market，不再判 unknown"""
+        subj = classify_query_subject(
+            "今天基本上是全都大跌啊,你能从今天找出表现不错的方向吗,我要看这个月的主线是什么")
+        assert subj["subject_kind"] == "market"
+        assert subj["stock_code"] == ""
+
+    def test_market_query_not_assigned_tool_stock(self):
+        """市场级问题：agent 顺路查询的股票不得成为分析标的（防张冠李戴）"""
+        push_tool_extract({"stock_code": "300857", "stock_name": "协创数据"})
+        collected = collect_metadata("今天基本上是全都大跌啊,找出表现不错的方向")
+        assert collected["subject_kind"] == "market"
+        assert collected.get("stock_code", "") == ""
+
+
+class TestCollectNameCodePairing:
+    """collect_metadata 的 name/code 必须同源，不得跨工具交叉组合"""
+
+    def setup_method(self):
+        reset()
+
+    def teardown_method(self):
+        reset()
+
+    def test_unknown_subject_no_cross_tool_pairing(self):
+        """unknown 主题：A 工具只有 name、B 工具只有 code 时不得拼接出
+        「工商银行 (300857)」这类错误组合"""
+        push_tool_extract({"stock_name": "工商银行"})   # 无 code → _generic 组
+        push_tool_extract({"stock_code": "300857"})     # 有 code 无 name → primary
+        collected = collect_metadata("随便看看")
+        # primary 只有 code 没有 name → 不得从 _generic 借 name
+        assert collected.get("stock_code") == "300857"
+        assert collected.get("stock_name") is None
+
+    def test_stock_subject_borrows_code_only_from_same_name(self):
+        """stock 主题：code 只能借自与主题同名的工具记录"""
+        push_tool_extract({"stock_code": "300857", "stock_name": "协创数据"})
+        collected = collect_metadata("牧原股份还能拿吗")
+        assert collected["stock_name"] == "牧原股份"
+        # 工具只查了协创数据，不得把 300857 安给牧原股份
+        assert collected.get("stock_code", "") == ""
+
+    def test_stock_subject_borrows_code_from_matching_name(self):
+        """stock 主题：存在同名工具记录时正确借到 code"""
+        push_tool_extract({"stock_code": "300857", "stock_name": "协创数据"})
+        push_tool_extract({"stock_code": "002714", "stock_name": "牧原股份"})
+        collected = collect_metadata("牧原股份还能拿吗")
+        assert collected["stock_name"] == "牧原股份"
+        assert collected["stock_code"] == "002714"
 

@@ -15,14 +15,13 @@
     "mx_search"
   ],
   "fallback_skills": [
-    "technical_analysis"
+    "stock_analysis"
   ],
   "output_blocks": [
     "core_summary",
     "candidate_ranking",
     "evidence_table",
     "position_sizing",
-    "user_profile_fit",
     "action_plan_compact",
     "next_watch",
     "risk_warning",
@@ -123,7 +122,6 @@
     "action_template": "方向：{做多/做空/观望} | 目标价位：{价格} | 确认信号：{技术条件}"
   },
   "common_rules": [
-    "investor_perspective",
     "position_holding"
   ],
   "qa_rules": [
@@ -132,7 +130,7 @@
     "操作建议必须包含方向、价位和确认信号，缺一不可。",
     "任何维度数据缺失时，必须明确标注，不得用文字描述替代结构化数据。",
     "多股票财务对比表必须使用同一报告期数据（如同为年报或同为一季报），不得混用不同周期。若某股票缺少该周期数据，必须标注'数据缺失'而非用其他周期替代。",
-    "必须完整输出全部板块：核心结论/候选标的排序/关键证据/仓位与风险预算/投资者适配/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给行动方案/观察清单/风险提示。"
+    "必须完整输出全部板块：核心结论/候选标的排序/关键证据/仓位与风险预算/行动方案/观察清单/风险提示/小白版翻译，一个都不能少，禁止省略或合并尾部板块。每个板块写要点即可，把篇幅留给核心结论与行动方案。"
   ],
   "skill_plan": [
     {

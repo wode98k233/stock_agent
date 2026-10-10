@@ -8,7 +8,7 @@
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.25s ease, visibility 0.25s ease;
-  z-index: 910; /* 高于回测弹框(900)，从回测内跳转 K 线不被遮挡 */
+  z-index: 1202; /* 高于回测(900/1100)、持仓/质量/监控等常规面板(1000-1001)——从任意弹窗内跳转 K 线不被遮挡；低于 monitor-panel(2000+)/skill-manager(3000) */
 }
 
 .kline-overlay.open {
@@ -31,7 +31,7 @@
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.25s ease;
-  z-index: 950; /* 高于 .kline-overlay(910) 与 .backtest-overlay(900)，确保从回测/信号评测跳转时浮在最上层 */
+  z-index: 1203; /* 面板本体高于 .kline-overlay(1202)，整体高于回测/持仓/质量等常规面板(900-1101) */
   box-shadow: var(--shadow-lg, 0 8px 30px rgba(0,0,0,0.12));
   overflow: hidden;
 }

@@ -15,8 +15,11 @@ _CACHE_EXPIRE_POLICIES: dict[str, dict] = {
     "financial":          {"trading": 2.0,  "closed": "next_open"},
     "board_list":         {"trading": 2.0,  "closed": "next_open"},
     "news":               {"trading": 1.0,  "closed": 4.0},
-    "valuation_history":  {"trading": 168,  "closed": "same"},
-    "risk_metrics":       {"trading": 168,  "closed": "same"},
+    "valuation_history":  {"trading": 168, "closed": "same"},
+    "risk_metrics":       {"trading": 168, "closed": "same"},
+    "chip_distribution":  {"trading": 0.5,  "closed": "next_open"},
+    # 宏观指标：固定 24h（月度/季度发布节奏，与交易时段无关，不用 next_open 语义）
+    "macro":              {"trading": 24,   "closed": "same"},
     "rating":             {"parent": "general"},
     "board":              {"parent": "general"},
 }

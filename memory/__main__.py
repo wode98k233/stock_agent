@@ -207,15 +207,16 @@ def step4_cleanup(tag: str) -> None:
 
 
 def _clean_dashboard_json() -> None:
-    """清洗存量记忆中的 dashboard JSON 碎片。
+    """清洗存量记忆中的前端装饰碎片（dashboard JSON / CHART 占位符）。
 
     历史版本把 @@DASHBOARD_START@@{json} 原样写入记忆 content（且常被 chunk 截断
     成不完整碎片），既污染 FTS5 检索又污染 embedding 向量。此命令扫描全部记忆，
-    用 dashboard_to_text() 把 JSON 提炼成可读文本后重写（FTS5 REPLACE + chroma upsert）。
-    幂等：无 JSON 碎片的记忆跳过。
+    用 dashboard_to_text() 把 JSON 提炼成可读文本、strip_chart_markers() 移除
+    @@CHART:uuid@@ 后重写（FTS5 REPLACE + chroma upsert）。
+    幂等：无装饰碎片的记忆跳过。
     """
     import sqlite3
-    from memory.chunking import dashboard_to_text
+    from memory.chunking import dashboard_to_text, strip_chart_markers
     from memory.backend.base import MemoryEntry
     from memory.backend import ensure_jieba_ready
 
@@ -232,9 +233,9 @@ def _clean_dashboard_json() -> None:
     cleaned = 0
     for r in rows:
         raw = r.get("raw_content") or ""
-        if "@@DASHBOARD" not in raw:
+        if "@@DASHBOARD" not in raw and "@@CHART" not in raw:
             continue
-        new_content = dashboard_to_text(raw)
+        new_content = strip_chart_markers(dashboard_to_text(raw))
         if new_content == raw:
             continue
         meta = {
@@ -263,7 +264,7 @@ def _clean_dashboard_json() -> None:
             cleaned += 1
         except Exception as e:
             print(f"  重写 {r['entry_id'][:16]} 失败: {e}")
-    print(f"✅ 已清洗 {cleaned} 条含 dashboard JSON 碎片的记忆")
+    print(f"✅ 已清洗 {cleaned} 条含 dashboard JSON / CHART 碎片的记忆")
 
 
 def main():
@@ -275,7 +276,7 @@ def main():
     parser.add_argument("--keep", action="store_true",
                         help="归档后保留测试记忆（默认自动清理）")
     parser.add_argument("--clean-dashboard", action="store_true",
-                        help="清洗存量记忆中的 dashboard JSON 碎片（重写 content + 重嵌）")
+                        help="清洗存量记忆中的 dashboard JSON / CHART 装饰碎片（重写 content + 重嵌）")
     args = parser.parse_args()
 
     if args.clean_dashboard:

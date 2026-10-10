@@ -43,12 +43,16 @@ import os
 from dataclasses import replace
 from typing import List, Optional
 
+from langchain_core.messages import AIMessage
+
 from utils.llm.types import Purpose, ModelProfile, ChatModelSpec, RateLimitConfig
 from utils.llm.registry import ModelRegistry
 from utils.llm.policies.ratelimit import TokenBucket, RateLimited
 from utils.llm.policies.router import build_chain
 from utils.llm.policies.retry import retry_call, aretry_call
 from utils.llm.policies.breaker import CircuitBreaker, CircuitOpenError
+from utils.llm.policies.cache_policy import ResponseCachePolicy
+from utils.llm.policies.routing_policy import ModelRoutingPolicy
 from utils.llm.backends.chat import build_chat_model
 from utils.llm.backends.embed import EmbeddingProvider
 from utils.llm.backends.rerank import RerankProvider
@@ -178,6 +182,9 @@ class LLMGateway:
         self._breakers = {}     # (purpose, model_key) -> CircuitBreaker
         self._embed_provider = None
         self._rerank_provider = None
+        # A8 语义缓存 / 模型路由 policy（懒创建，测试可直接替换实例）
+        self._cache_policy_inst: Optional[ResponseCachePolicy] = None
+        self._routing_policy_inst: Optional[ModelRoutingPolicy] = None
 
     # ── 缓存：限流器 / 熔断器 ──
 
@@ -198,6 +205,87 @@ class LLMGateway:
                 threshold=self._breaker_threshold, cooldown=self._breaker_cooldown
             )
         return self._breakers[key]
+
+    # ── A8：语义缓存 / 模型路由 policy（详见 policies/cache_policy.py、routing_policy.py） ──
+
+    def _get_cache_policy(self) -> ResponseCachePolicy:
+        """懒创建语义缓存 policy（默认读 Config 配置；测试可直接替换 _cache_policy_inst）。"""
+        if self._cache_policy_inst is None:
+            self._cache_policy_inst = ResponseCachePolicy()
+        return self._cache_policy_inst
+
+    def _get_routing_policy(self) -> ModelRoutingPolicy:
+        """懒创建模型路由 policy（默认读 Config 配置；测试可直接替换 _routing_policy_inst）。"""
+        if self._routing_policy_inst is None:
+            self._routing_policy_inst = ModelRoutingPolicy()
+        return self._routing_policy_inst
+
+    @staticmethod
+    def _sr_context(metadata, config) -> dict:
+        """提取 sr_* 保留键上下文：metadata 参数优先，run_config["metadata"] 兜底（M5 通道）。
+
+        另合并 agents 侧 run 级 ContextVar（agents.sr_context：_enrich_user_input /
+        select_and_load_template 单点写入），调用方显式传入的键优先级更高。
+        反向依赖仅此一处且 try/except 防护（agents.sr_context 只依赖 stdlib，无环）。
+        """
+        ctx: dict = {}
+        try:
+            from agents.sr_context import get_sr_metadata
+            ctx.update(get_sr_metadata())
+        except Exception:
+            pass
+        if isinstance(config, dict):
+            m = config.get("metadata")
+            if isinstance(m, dict):
+                ctx.update({k: v for k, v in m.items() if str(k).startswith("sr_")})
+        if isinstance(metadata, dict):
+            ctx.update({k: v for k, v in metadata.items() if str(k).startswith("sr_")})
+        return ctx
+
+    @staticmethod
+    def _last_user_text(messages) -> str:
+        """提取最后一条 user 消息文本（缓存键的 query 来源）。"""
+        items = list(messages) if not isinstance(messages, (list, tuple)) else list(messages)
+        for m in reversed(items):
+            if isinstance(m, tuple) and len(m) == 2 and str(m[0]) in ("user", "human"):
+                return m[1] if isinstance(m[1], str) else str(m[1])
+            t = getattr(m, "type", "")
+            if t in ("user", "human"):
+                content = getattr(m, "content", None)
+                return content if isinstance(content, str) else str(content or "")
+        # 兜底：最后一条消息内容
+        if items:
+            last = items[-1]
+            content = getattr(last, "content", None)
+            if content is None and isinstance(last, tuple) and len(last) == 2:
+                content = last[-1]
+            return content if isinstance(content, str) else str(content or "")
+        return ""
+
+    @staticmethod
+    def _trace_cache_hit(label: str, tier: str, saved_tokens: int, response_head: str) -> None:
+        """缓存命中短路时补记 trace 步骤（无真实 LLM 调用，steps.extra 带 cache_hit=true）。"""
+        try:
+            from utils.agent_trace.core import get_active_recorder
+            rec = get_active_recorder()
+            if rec is not None:
+                rec.record_cache_hit(label=label, model_tier=tier,
+                                     saved_tokens=saved_tokens,
+                                     response_head=(response_head or "")[:200])
+        except Exception as e:  # trace 失败绝不影响主链路
+            _log.debug("[%s] 缓存命中 trace 补记失败（忽略）: %s", label, e)
+
+    def _store_cache(self, cp: ResponseCachePolicy, key, category, ttl, tier,
+                     label: str, query_text: str, model: str, result) -> None:
+        """未命中链路响应成功后回填缓存（失败静默，不影响主链路）。"""
+        try:
+            content = getattr(result, "content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            cp.store(key, category, content, model=model, ttl_s=ttl,
+                     tier=tier, query_head=(query_text or "")[:80])
+        except Exception as e:
+            _log.warning(f"[{label}] 缓存写入失败（忽略）: {e}")
 
     # ── 从 config(callbacks) 解析 logger / label（避免双重 token 记录） ──
 
@@ -277,6 +365,47 @@ class LLMGateway:
     def _run_chat_sync(self, spec, fallback, messages, logger, label,
                        budget, metadata, parent_run_id, config, *args, **kwargs):
         logger = logger or _log
+        # ── A8 T03：语义缓存前置短路（命中直接返回，零 LLM 调用，AC-1） ──
+        sr_ctx = self._sr_context(metadata, config)
+        cp = self._get_cache_policy()
+        cache_key = None
+        cache_category = ""
+        cache_ttl = 0
+        query_text = self._last_user_text(messages)
+        if cp.enabled:
+            phase = cp.current_phase()
+            scenario = str(sr_ctx.get("sr_scenario") or "unknown")
+            cache_category = cp.category_for(scenario)
+            cache_ttl = cp.resolve_ttl(cache_category, phase)
+            if cache_ttl > 0:  # TTL=0（盘中板块/数据查询）天然禁缓存（FR-03）
+                cache_key = cp.build_key(purpose=spec.purpose.value, label=label,
+                                         query=query_text, metadata=sr_ctx, phase=phase)
+            if cache_key:
+                entry = cp.lookup(cache_key, cache_category)
+                if entry is not None:
+                    saved = cp.estimate_saved_tokens(query_text, entry.response)
+                    cp.record_hit(cache_category, saved)
+                    self._trace_cache_hit(label, entry.tier, saved, entry.response)
+                    _log.info(f"[{label}] 语义缓存命中，跳过 LLM 调用（省 ≈{saved} tokens）")
+                    return AIMessage(content=entry.response)
+        # ── A8 T04：模型路由（缓存未命中才路由；只改 primary 模型名，凭证沿用原配置） ──
+        tier = ""
+        rp = self._get_routing_policy()
+        if rp.enabled:
+            decision = rp.resolve(purpose=spec.purpose.value, label=label, metadata=sr_ctx)
+            tier = decision.tier
+            if decision.model_override:
+                spec = replace(spec, primary=replace(spec.primary, model=decision.model_override))
+                _log.info(f"[{label}] 模型路由 → {tier} 档 {decision.model_override}（{decision.reason}）")
+        # 计量字段透传进 trace（steps.extra：cache_hit/model_tier/saved_tokens）；
+        # 两策略均关闭时不动 metadata —— 行为与上线前完全一致（AC-6）
+        if cp.enabled or rp.enabled:
+            merged_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            merged_metadata.setdefault("cache_hit", False)
+            merged_metadata["model_tier"] = tier or "standard"
+            merged_metadata.setdefault("saved_tokens", 0)
+        else:
+            merged_metadata = metadata
         profiles = build_chain(spec) if fallback else [spec.primary]
         last_exc = None
         est = _est_tokens(messages)
@@ -290,10 +419,14 @@ class LLMGateway:
                 result = breaker.call(
                     lambda: tracked_invoke(
                         inner, messages, logger, label,
-                        budget=budget, metadata=metadata, parent_run_id=parent_run_id,
+                        budget=budget, metadata=merged_metadata, parent_run_id=parent_run_id,
                         run_config=config, max_retries=self._chat_retries, *args, **kwargs
                     )
                 )
+                if cache_key:
+                    # 回填缓存（含路由档位，命中方能看到产生响应的 tier）
+                    self._store_cache(cp, cache_key, cache_category, cache_ttl,
+                                      tier or "standard", label, query_text, profile.model, result)
                 return result
             except CircuitOpenError:
                 # 熔断开闸 → 降级到下一个模型
@@ -314,6 +447,45 @@ class LLMGateway:
     async def _run_chat_async(self, spec, fallback, messages, logger, label,
                               budget, metadata, parent_run_id, config, *args, **kwargs):
         logger = logger or _log
+        # ── A8 T03：语义缓存前置短路（与同步链同构，AC-1） ──
+        sr_ctx = self._sr_context(metadata, config)
+        cp = self._get_cache_policy()
+        cache_key = None
+        cache_category = ""
+        cache_ttl = 0
+        query_text = self._last_user_text(messages)
+        if cp.enabled:
+            phase = cp.current_phase()
+            scenario = str(sr_ctx.get("sr_scenario") or "unknown")
+            cache_category = cp.category_for(scenario)
+            cache_ttl = cp.resolve_ttl(cache_category, phase)
+            if cache_ttl > 0:
+                cache_key = cp.build_key(purpose=spec.purpose.value, label=label,
+                                         query=query_text, metadata=sr_ctx, phase=phase)
+            if cache_key:
+                entry = cp.lookup(cache_key, cache_category)
+                if entry is not None:
+                    saved = cp.estimate_saved_tokens(query_text, entry.response)
+                    cp.record_hit(cache_category, saved)
+                    self._trace_cache_hit(label, entry.tier, saved, entry.response)
+                    _log.info(f"[{label}] 语义缓存命中，跳过 LLM 调用（省 ≈{saved} tokens）")
+                    return AIMessage(content=entry.response)
+        # ── A8 T04：模型路由 ──
+        tier = ""
+        rp = self._get_routing_policy()
+        if rp.enabled:
+            decision = rp.resolve(purpose=spec.purpose.value, label=label, metadata=sr_ctx)
+            tier = decision.tier
+            if decision.model_override:
+                spec = replace(spec, primary=replace(spec.primary, model=decision.model_override))
+                _log.info(f"[{label}] 模型路由 → {tier} 档 {decision.model_override}（{decision.reason}）")
+        if cp.enabled or rp.enabled:
+            merged_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            merged_metadata.setdefault("cache_hit", False)
+            merged_metadata["model_tier"] = tier or "standard"
+            merged_metadata.setdefault("saved_tokens", 0)
+        else:
+            merged_metadata = metadata
         profiles = build_chain(spec) if fallback else [spec.primary]
         last_exc = None
         est = _est_tokens(messages)
@@ -326,10 +498,13 @@ class LLMGateway:
                 result = await breaker.acall(
                     lambda: atracked_invoke(
                         inner, messages, logger, label,
-                        budget=budget, metadata=metadata, parent_run_id=parent_run_id,
+                        budget=budget, metadata=merged_metadata, parent_run_id=parent_run_id,
                         run_config=config, max_retries=self._chat_retries, *args, **kwargs
                     )
                 )
+                if cache_key:
+                    self._store_cache(cp, cache_key, cache_category, cache_ttl,
+                                      tier or "standard", label, query_text, profile.model, result)
                 return result
             except CircuitOpenError:
                 last_exc = CircuitOpenError(f"circuit open for {profile.model}")
@@ -348,6 +523,20 @@ class LLMGateway:
     def _run_chat_stream_sync(self, spec, fallback, messages, logger, label,
                               budget, metadata, parent_run_id, config, *args, **kwargs):
         logger = logger or _log
+        # ── A8：流式链一期不接缓存（流式响应缓存语义复杂；缓存主目标——报告类大响应
+        # 走的是 invoke 链）——只接模型路由（设计 §1.1 落锤） ──
+        rp = self._get_routing_policy()
+        if rp.enabled:
+            sr_ctx = self._sr_context(metadata, config)
+            decision = rp.resolve(purpose=spec.purpose.value, label=label, metadata=sr_ctx)
+            if decision.model_override:
+                spec = replace(spec, primary=replace(spec.primary, model=decision.model_override))
+                _log.info(f"[{label}] 模型路由 → {decision.tier} 档 {decision.model_override}（{decision.reason}）")
+            stream_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            stream_metadata.setdefault("cache_hit", False)
+            stream_metadata["model_tier"] = decision.tier
+        else:
+            stream_metadata = metadata  # 路由关闭：metadata 原样透传，行为与上线前一致
         profiles = build_chain(spec) if fallback else [spec.primary]
         last_exc = None
         est = _est_tokens(messages)
@@ -367,7 +556,7 @@ class LLMGateway:
             breaker = self._breaker_for(spec.purpose, profile.model)
             limiter.acquire(est)  # 限流是「全局」的（按用途），不够直接抛，不切 fallback
             inner = build_chat_model(profile)
-            llm_config = _build_llm_config(logger, label, config, budget, metadata, parent_run_id, **kwargs)
+            llm_config = _build_llm_config(logger, label, config, budget, stream_metadata, parent_run_id, **kwargs)
             try:
                 first, gen = breaker.call(lambda: _start(inner))
             except CircuitOpenError:
@@ -391,6 +580,19 @@ class LLMGateway:
     async def _run_chat_stream_async(self, spec, fallback, messages, logger, label,
                                      budget, metadata, parent_run_id, config, *args, **kwargs):
         logger = logger or _log
+        # ── A8：流式链一期不接缓存，只接模型路由（与同步流式链同构） ──
+        rp = self._get_routing_policy()
+        if rp.enabled:
+            sr_ctx = self._sr_context(metadata, config)
+            decision = rp.resolve(purpose=spec.purpose.value, label=label, metadata=sr_ctx)
+            if decision.model_override:
+                spec = replace(spec, primary=replace(spec.primary, model=decision.model_override))
+                _log.info(f"[{label}] 模型路由 → {decision.tier} 档 {decision.model_override}（{decision.reason}）")
+            stream_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            stream_metadata.setdefault("cache_hit", False)
+            stream_metadata["model_tier"] = decision.tier
+        else:
+            stream_metadata = metadata
         profiles = build_chain(spec) if fallback else [spec.primary]
         last_exc = None
         est = _est_tokens(messages)
@@ -408,7 +610,7 @@ class LLMGateway:
             breaker = self._breaker_for(spec.purpose, profile.model)
             await limiter.aacquire(est)
             inner = build_chat_model(profile)
-            llm_config = _build_llm_config(logger, label, config, budget, metadata, parent_run_id, **kwargs)
+            llm_config = _build_llm_config(logger, label, config, budget, stream_metadata, parent_run_id, **kwargs)
             try:
                 first, gen = await breaker.acall(lambda: _start(inner))
             except CircuitOpenError:

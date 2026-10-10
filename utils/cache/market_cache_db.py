@@ -10,14 +10,8 @@ get_market_cache_db = make_db_context(lambda: Config.get_market_cache_db_path())
 
 
 def init_market_cache_tables():
-    """初始化 market_cache.db 表结构"""
+    """初始化 market_cache.db 表结构（DDL 统一来源 utils/db_schema）"""
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.registry import ALL_DBS
     with get_market_cache_db() as conn:
-        c = conn.cursor()
-
-        # 通用 key-value 缓存
-        c.execute('''CREATE TABLE IF NOT EXISTS cache_kv (
-            cache_key TEXT PRIMARY KEY,
-            data TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            expire_at TIMESTAMP
-        )''')
+        ensure_schema(conn, ALL_DBS["market_cache"].tables)

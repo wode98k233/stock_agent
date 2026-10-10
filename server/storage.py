@@ -8,84 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from utils.app_paths import get_db_path
-from utils.agent_trace.db import get_trace_conn
 
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS web_dialogs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dialog_uuid TEXT UNIQUE NOT NULL,
-    title TEXT NOT NULL,
-    current_mode TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_web_dialogs_updated_at
-ON web_dialogs(updated_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_web_dialogs_created_at
-ON web_dialogs(created_at DESC);
-
-CREATE TABLE IF NOT EXISTS web_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_uuid TEXT UNIQUE NOT NULL,
-    dialog_uuid TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    status TEXT NOT NULL,
-    mode TEXT,
-    task_id TEXT,
-    log_uuid TEXT,
-    log_file TEXT,
-    trace_run_id TEXT,
-    error TEXT,
-    extra TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (dialog_uuid) REFERENCES web_dialogs(dialog_uuid)
-);
-
-CREATE INDEX IF NOT EXISTS idx_web_messages_dialog
-ON web_messages(dialog_uuid, created_at);
-
-CREATE INDEX IF NOT EXISTS idx_web_messages_task
-ON web_messages(task_id);
-
-CREATE INDEX IF NOT EXISTS idx_web_messages_dialog_trace
-ON web_messages(dialog_uuid, id DESC)
-WHERE trace_run_id IS NOT NULL AND trace_run_id != '';
-
-CREATE TABLE IF NOT EXISTS watchlist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code TEXT NOT NULL,
-    stock_name TEXT,
-    market TEXT NOT NULL DEFAULT 'cn',
-    market_short TEXT,
-    source TEXT NOT NULL DEFAULT 'mx',
-    tags TEXT DEFAULT '自选股',
-    price REAL,
-    change_pct REAL,
-    change_amt REAL,
-    high_price REAL,
-    low_price REAL,
-    turnover_rate REAL,
-    volume_ratio REAL,
-    volume TEXT,
-    trading_amount TEXT,
-    pe REAL,
-    pb REAL,
-    total_market_value TEXT,
-    circulation_market_value TEXT,
-    added_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(stock_code, market)
-);
-
-CREATE INDEX IF NOT EXISTS idx_watchlist_market
-ON watchlist(market);
-"""
-
+# 表结构 DDL 统一由 utils/db_schema 管理（见 docs/arch/2026-09-09-统一DBSchema初始化-设计.md）。
+# 创建/补列/迁移经 ensure_schema → registry["stock_radar"] 执行；此处不再内嵌 DDL。
 _SQLITE_PARAM_CHUNK_SIZE = 500
 
 
@@ -339,15 +265,26 @@ class WebStorage:
         self._lock = threading.RLock()
         self.ensure_schema()
         self.watchlist = WatchlistStorage(self._conn, self._lock)
+        self.portfolio = PortfolioStorage(self._conn, self._lock)
+
+    def close(self):
+        """关闭底层连接（服务优雅退出时调用，避免 shutdown 阶段 ResourceWarning）。"""
+        try:
+            self._conn.commit()
+        finally:
+            self._conn.close()
 
     def _connect(self):
         return self._conn
 
     def ensure_schema(self):
+        """对齐 stock_radar.db 全部表结构（DDL 单一事实源 utils/db_schema）。"""
         with self._lock:
-            conn = self._conn
-            conn.executescript(_DDL)
-            conn.commit()
+            from utils.db_schema.migrator import ensure_schema as diff_schema
+            from utils.db_schema.registry import ALL_DBS
+            d = ALL_DBS["stock_radar"]
+            diff_schema(self._conn, d.tables, d.special_migrations)
+            self._conn.commit()
 
     def create_dialog(self, title: str = "新对话", mode: str = "react_stock") -> dict[str, Any]:
         now = utc_now()
@@ -369,7 +306,7 @@ class WebStorage:
         with self._lock:
             conn = self._conn
             row = conn.execute(
-                "SELECT dialog_uuid,title,current_mode,created_at,updated_at FROM web_dialogs WHERE dialog_uuid=?",
+                "SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at FROM web_dialogs WHERE dialog_uuid=?",
                 (dialog_uuid,),
             ).fetchone()
         return dict(row) if row else None
@@ -379,7 +316,7 @@ class WebStorage:
             conn = self._conn
             rows = conn.execute(
                 """
-                SELECT dialog_uuid,title,current_mode,created_at,updated_at
+                SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at
                 FROM web_dialogs
                 ORDER BY updated_at DESC
                 LIMIT ?
@@ -394,7 +331,7 @@ class WebStorage:
             conn = self._conn
             rows = conn.execute(
                 """
-                SELECT dialog_uuid,title,current_mode,created_at,updated_at
+                SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at
                 FROM web_dialogs
                 WHERE created_at>=? AND created_at<?
                 ORDER BY created_at DESC
@@ -403,8 +340,24 @@ class WebStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def count_dialogs_since(self, start_at: str) -> int:
+        """[start_at, ∞) 内创建的对话数（近 N 天活跃用）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM web_dialogs WHERE created_at >= ?",
+                (start_at,)).fetchone()
+        return int(row[0] or 0)
+
+    def count_messages_since(self, start_at: str) -> int:
+        """[start_at, ∞) 内创建的消息数。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM web_messages WHERE created_at >= ?",
+                (start_at,)).fetchone()
+        return int(row[0] or 0)
+
     def update_dialog(self, dialog_uuid: str, **fields) -> dict[str, Any] | None:
-        allowed = {"title", "current_mode", "updated_at"}
+        allowed = {"title", "current_mode", "title_auto", "updated_at"}
         updates = {key: value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = updates.get("updated_at") or utc_now()
         assignments = ", ".join(f"{key}=?" for key in updates)
@@ -551,24 +504,17 @@ class WebStorage:
         if not run_ids:
             return []
 
-        # 2) agent_trace.db：run 元信息 + steps 计数
-        tconn = get_trace_conn()
+        # 2) agent_trace 月库（分库路由）：run 元信息 + steps 计数
+        from utils.agent_trace.store import store
         runs: list[dict[str, Any]] = []
-        if tconn:
-            placeholders = ",".join("?" * len(run_ids))
-            run_rows = tconn.execute(
-                f"SELECT id, status, created_at, duration_ms, input "
-                f"FROM runs WHERE id IN ({placeholders})",
-                run_ids,
-            ).fetchall()
-            for rr in run_rows:
-                rid = rr["id"]
-                try:
-                    cnt = tconn.execute(
-                        "SELECT COUNT(*) AS c FROM steps WHERE run_id=?", (rid,)
-                    ).fetchone()["c"]
-                except Exception:
-                    cnt = 0
+        run_rows = store.get_runs_by_ids(run_ids)
+        if run_rows:
+            run_by_id = {r["id"]: r for r in run_rows}
+            for rid in run_ids:
+                rr = run_by_id.get(rid)
+                if not rr:
+                    continue
+                cnt = store.count_steps(rid)
                 runs.append({
                     "run_id": rid,
                     "status": rr["status"] or "unknown",
@@ -593,12 +539,13 @@ class WebStorage:
     def get_attribution(self, dialog_uuid: str, run_id: str) -> dict[str, Any]:
         """聚合某 run 的溯源数据（概览/来源/工具/轨迹/关联/日志）。
 
-        - run 与 steps 来自 agent_trace.db（get_trace_conn）
+        - run 与 steps 来自 agent_trace 月库（分库路由 store.conn_for_run）
         - support message 来自 web_messages（本对话中 trace_run_id == run_id 的 assistant 消息）
         - 关联（correlation）采用 ADR-002 v1「读时派生」：
           一个 run 默认对应其 assistant 消息（段级），全部 step 归因到该消息。
         """
-        tconn = get_trace_conn()
+        from utils.agent_trace.store import store
+        tconn = store.conn_for_run(run_id)
         run_meta = {
             "run_id": run_id, "status": "unknown", "started_at": None,
             "duration_ms": 0, "query": "", "agent_name": "",
@@ -709,6 +656,7 @@ class WebStorage:
             "trace_run_id",
             "error",
             "extra",
+            "created_at",  # 完成时重排（澄清问答先落库时，最终回答需排在其后）
             "updated_at",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
@@ -773,6 +721,7 @@ class WebStorage:
         if not dialog:
             return
         title = dialog["title"]
+        # 首条消息先写提问截断占位标题（title_auto 保持 0，等待 classify 的 LLM 标题回填）
         if title == "新对话" and content.strip():
             title = content.strip().replace("\n", " ")[:30]
         self.update_dialog(
@@ -908,3 +857,294 @@ class WatchlistStorage:
                 self._conn.execute(sql, self._row_values(s, now))
             self._conn.commit()
         return len(stocks)
+
+
+class PortfolioError(Exception):
+    """持仓账本业务校验错误（卖出超持仓、重算不一致等）。"""
+
+
+class PortfolioStorage:
+    """持仓账本：流水为 source of truth，持仓表为事务内重算快照。
+
+    成本口径（加权平均，用户确认 2026-09-06）：
+    - 买入：avg_cost = (avg_cost×qty_old + price×qty_new + fee) / (qty_old + qty_new)
+    - 卖出：realized_pnl += (price − avg_cost)×qty_sell − fee；avg_cost 不变
+    - 清仓：qty=0 保留行（opened_at 可查历史），下次买入从 0 重新加权
+    - 删流水：全量重算该股（从剩余流水按 trade_date,id 重放）
+    """
+
+    _TRADE_COLS = ("id,trade_uuid,stock_code,stock_name,market,side,qty,price,"
+                   "trade_date,fee,source,signal_id,dialog_uuid,remark,created_at")
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn = conn
+        self._lock = lock
+
+    # -- 记账 / 更正 --------------------------------------------------------
+
+    def add_trade(self, stock_code: str, side: str, qty: float, price: float,
+                  trade_date: str, stock_name: str | None = None,
+                  market: str = "cn", fee: float = 0.0, source: str = "manual",
+                  signal_id: int | None = None, dialog_uuid: str | None = None,
+                  remark: str | None = None) -> dict[str, Any]:
+        """记一笔交易：事务内插流水 + 全量重算持仓快照。"""
+        if side not in ("buy", "sell"):
+            raise PortfolioError(f"无效交易方向: {side}")
+        if qty <= 0 or price <= 0:
+            raise PortfolioError("数量和价格必须为正数")
+        trade_uuid = make_uuid("ptr")
+        now = utc_now()
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                if side == "sell":
+                    self._assert_sellable(stock_code, market, qty)
+                self._conn.execute(
+                    "INSERT INTO portfolio_trade(trade_uuid,stock_code,stock_name,market,"
+                    "side,qty,price,trade_date,fee,source,signal_id,dialog_uuid,remark,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (trade_uuid, stock_code, stock_name, market, side, qty, price,
+                     trade_date, fee, source, signal_id, dialog_uuid, remark, now),
+                )
+                self._recompute_position(stock_code, market)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {"trade_uuid": trade_uuid, "stock_code": stock_code, "side": side,
+                "qty": qty, "price": price, "trade_date": trade_date}
+
+    def remove_trade(self, trade_uuid: str) -> bool:
+        """删流水并全量重算该股持仓（记错单更正）。
+
+        重算失败（如删除后出现卖出超持仓）则整体回滚、拒绝删除。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT stock_code,market FROM portfolio_trade WHERE trade_uuid=?",
+                (trade_uuid,)).fetchone()
+            if row is None:
+                return False
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.execute(
+                    "DELETE FROM portfolio_trade WHERE trade_uuid=?", (trade_uuid,))
+                self._recompute_position(row["stock_code"], row["market"])
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            return True
+
+    def _assert_sellable(self, stock_code: str, market: str, qty_sell: float) -> None:
+        row = self._conn.execute(
+            "SELECT qty FROM portfolio_position WHERE stock_code=? AND market=?",
+            (stock_code, market)).fetchone()
+        held = row["qty"] if row else 0.0
+        if held < qty_sell:
+            raise PortfolioError(f"持仓不足：当前 {held} 股，卖出 {qty_sell} 股被拒")
+
+    # -- 持仓重算（source of truth → 快照） -----------------------------------
+
+    def _recompute_position(self, stock_code: str, market: str) -> None:
+        """按 (trade_date, id) 重放该股全部流水，UPSERT 持仓快照。
+
+        任何一步卖出超出累计买入量 → raise（调用方事务回滚）。
+        """
+        trades = self._conn.execute(
+            f"SELECT {self._TRADE_COLS} FROM portfolio_trade"
+            " WHERE stock_code=? AND market=? ORDER BY trade_date, id",
+            (stock_code, market)).fetchall()
+        if not trades:
+            self._conn.execute(
+                "DELETE FROM portfolio_position WHERE stock_code=? AND market=?",
+                (stock_code, market))
+            return
+
+        qty, avg_cost, realized = 0.0, 0.0, 0.0
+        stock_name, opened_at = None, None
+        for t in trades:
+            stock_name = stock_name or t["stock_name"]
+            opened_at = opened_at or t["trade_date"]
+            if t["side"] == "buy":
+                total = avg_cost * qty + t["price"] * t["qty"] + (t["fee"] or 0)
+                qty += t["qty"]
+                avg_cost = total / qty
+            else:
+                if qty < t["qty"]:
+                    raise PortfolioError(
+                        f"持仓不足：{t['trade_date']} 卖出 {t['qty']} 股超出可用量 {qty}")
+                realized += (t["price"] - avg_cost) * t["qty"] - (t["fee"] or 0)
+                qty -= t["qty"]
+
+        self._conn.execute(
+            """INSERT INTO portfolio_position
+               (stock_code,market,stock_name,qty,avg_cost,realized_pnl,opened_at,updated_at,
+                source,etf_flag,today_pnl)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(stock_code, market) DO UPDATE SET
+                   stock_name=excluded.stock_name, qty=excluded.qty,
+                   avg_cost=excluded.avg_cost, realized_pnl=excluded.realized_pnl,
+                   opened_at=excluded.opened_at, updated_at=excluded.updated_at,
+                   source=excluded.source,
+                   etf_flag=CASE
+                       WHEN portfolio_position.etf_flag = 1
+                       THEN portfolio_position.etf_flag
+                       ELSE excluded.etf_flag END,
+                   today_pnl=CASE
+                       WHEN excluded.today_pnl IS NULL
+                       THEN portfolio_position.today_pnl
+                       ELSE excluded.today_pnl END""",
+            (stock_code, market, stock_name, qty, avg_cost, realized,
+             opened_at, utc_now(),
+             # 手动流水重算：非东财行恢复 manual 标记；东财行保留标记
+             # （§3.7 券商为事实源；用户在东财行记交易 → 下次同步 diff 列为 updated）
+             self._row_source(stock_code, market), 0, None))
+
+    def _row_source(self, stock_code: str, market: str) -> str:
+        """读取既有行来源（无行/查询失败 → 'manual'）。"""
+        try:
+            row = self._conn.execute(
+                "SELECT source FROM portfolio_position WHERE stock_code=? AND market=?",
+                (stock_code, market)).fetchone()
+            return (row["source"] or "manual") if row else "manual"
+        except Exception:
+            return "manual"
+
+    # -- 查询 ----------------------------------------------------------------
+
+    def list_trades(self, stock_code: str | None = None, market: str = "cn",
+                    page: int = 1, size: int = 50) -> dict[str, Any]:
+        """流水分页查询（时间倒序），可按代码过滤。"""
+        where, params = "", []
+        if stock_code:
+            where = " WHERE stock_code=?"
+            params.append(stock_code)
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM portfolio_trade{where}", params).fetchone()[0]
+        offset = max(page - 1, 0) * size
+        rows = self._conn.execute(
+            f"SELECT {self._TRADE_COLS} FROM portfolio_trade{where}"
+            f" ORDER BY trade_date DESC, id DESC LIMIT ? OFFSET ?",
+            params + [size, offset]).fetchall()
+        return {"items": [dict(r) for r in rows], "total": total,
+                "page": page, "size": size}
+
+    def list_positions(self, market: str | None = None) -> list[dict[str, Any]]:
+        """持仓快照直读（含 qty=0 的清仓历史行）。"""
+        sql = ("SELECT stock_code,market,stock_name,qty,avg_cost,realized_pnl,"
+               "today_pnl,opened_at,updated_at,source,avail_qty,etf_flag"
+               " FROM portfolio_position")
+        params: list = []
+        if market:
+            sql += " WHERE market=?"
+            params.append(market)
+        sql += " ORDER BY updated_at DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def position_summary(self, latest_quotes: dict | None = None) -> dict[str, Any]:
+        """持仓汇总：成本侧必算；行情缺失时市值/浮盈为 None。
+
+        Args:
+            latest_quotes: {code: {"price": 现价}}，仅统计 qty>0 的持仓。
+        """
+        positions = [p for p in self.list_positions() if p["qty"] > 0]
+        quotes = latest_quotes or {}
+        total_cost = sum(p["avg_cost"] * p["qty"] for p in positions)
+        market_values, float_pnls = [], []
+        for p in positions:
+            q = quotes.get(p["stock_code"])
+            if q and q.get("price"):
+                market_values.append(q["price"] * p["qty"])
+                float_pnls.append((q["price"] - p["avg_cost"]) * p["qty"])
+        realized = sum(p["realized_pnl"] for p in self.list_positions())
+        return {
+            "position_count": len(positions),
+            "total_cost": total_cost,
+            "total_market_value": sum(market_values) if market_values else None,
+            "total_float_pnl": sum(float_pnls) if float_pnls else None,
+            "total_realized_pnl": realized,
+        }
+
+    # -- 东财同步（§3.7 快照对齐：覆盖式幂等，券商为事实源） -------------------
+
+    def import_eastmoney_snapshot(self, positions: list[dict],
+                                  removed_codes: list[str] | None = None) -> dict:
+        """东财快照覆盖式落库（幂等）。
+
+        - 快照行 UPSERT 为 source='eastmoney'（qty/avg_cost/avail_qty/etf_flag
+          以券商为准，§3.7）；unchanged 行数值相同时 SQLite 仍会更新 updated_at，
+          故由调用方传 unchanged 数量以便汇报"零差异零写入"语义。
+        - removed_codes：原 eastmoney 行从快照消失 → qty=0 标记清仓（保留历史，
+          设计决策点 2 已确认）。
+        Returns:
+            {"added": n, "updated": n, "removed": n, "unchanged": n}
+        """
+        now = utc_now()
+        removed_codes = removed_codes or []
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                for p in positions:
+                    self._conn.execute(
+                        """INSERT INTO portfolio_position
+                           (stock_code,market,stock_name,qty,avg_cost,realized_pnl,
+                            opened_at,updated_at,source,avail_qty,etf_flag,today_pnl)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(stock_code, market) DO UPDATE SET
+                               stock_name=excluded.stock_name,
+                               qty=excluded.qty,
+                               avg_cost=excluded.avg_cost,
+                               opened_at=CASE
+                                   WHEN portfolio_position.opened_at IS NULL
+                                    OR portfolio_position.opened_at = ''
+                                   THEN excluded.opened_at
+                                   ELSE portfolio_position.opened_at END,
+                               updated_at=excluded.updated_at,
+                               source='eastmoney',
+                               avail_qty=excluded.avail_qty,
+                               etf_flag=excluded.etf_flag,
+                               today_pnl=excluded.today_pnl""",
+                        (p["stock_code"], p.get("market", "cn"),
+                         p.get("stock_name") or "", p["qty"], p["avg_cost"],
+                         0, now, now, "eastmoney",
+                         p.get("avail_qty"), 1 if p.get("is_etf") else 0,
+                         p.get("today_pnl")))
+                for code in removed_codes:
+                    self._conn.execute(
+                        """UPDATE portfolio_position
+                           SET qty=0, avail_qty=0, updated_at=?
+                           WHERE stock_code=? AND market='cn' AND source='eastmoney'""",
+                        (now, code))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {
+            "added": len([p for p in positions if not p.get("_was_existing")]),
+            "updated": len([p for p in positions if p.get("_was_existing")]),
+            "removed": len(removed_codes),
+            "unchanged": len([p for p in positions if p.get("_was_unchanged")]),
+        }
+
+    def eastmoney_sync_meta(self) -> dict[str, Any]:
+        """上次同步信息（GET /eastmoney/session 用，无凭据）。"""
+        with self._lock:
+            em_rows = self._conn.execute(
+                "SELECT COUNT(*) AS c, MAX(updated_at) AS t FROM portfolio_position"
+                " WHERE source='eastmoney'").fetchone()
+            etf_rows = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM portfolio_position"
+                " WHERE source='eastmoney' AND etf_flag=1 AND qty>0").fetchone()
+        source_counts: dict[str, int] = {}
+        for row in self._conn.execute(
+                "SELECT source, COUNT(*) AS c FROM portfolio_position GROUP BY source"):
+            source_counts[row["source"] or "manual"] = row["c"]
+        return {
+            "last_synced_at": em_rows["t"] if em_rows else None,
+            "eastmoney_count": em_rows["c"] if em_rows else 0,
+            "eastmoney_etf_count": etf_rows["c"] if etf_rows else 0,
+            "source_counts": source_counts,
+        }

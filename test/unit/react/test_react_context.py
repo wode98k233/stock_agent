@@ -83,16 +83,29 @@ def test_context_builder_summarizes_pending_old_rounds_and_keeps_recent_window(m
     assert "q3" in captured["new_rounds_text"]
     assert "q4" not in captured["new_rounds_text"]
 
+    # 不变量（2026-09-27 改动）：非轮次消息必须按原序完整保留。
+    # 旧实现只留「头部连续 system + 单一 user_input」，会丢掉"重复的旧问题"与空 AI 消息。
     assert compact[0] == ("system", "系统提示")
-    assert compact[1] == ("user", "当前任务")
+    assert [m for m in compact if isinstance(m, tuple)] == [
+        ("system", "系统提示"),
+        ("user", "重复的旧问题"),
+        ("user", "当前任务"),
+    ]
+    blank_ai_msgs = [m for m in compact if isinstance(m, AIMessage) and not m.tool_calls and not m.content]
+    assert len(blank_ai_msgs) == 1, "空 AI 消息属于非轮次消息，不允许被压缩丢弃"
+
     # react_context_summary 放在原位置（替换被压缩的旧轮次，保留"历史 + 最近 N 轮"的自然形态）
     summary_msgs = [m for m in compact if isinstance(m, AIMessage) and "已压缩历史轮次摘要" in m.content]
     assert len(summary_msgs) == 1
     assert json.dumps(summary_payload, ensure_ascii=False) in summary_msgs[0].content
 
+    # 摘要插在被压缩轮次的首条位置：在所有 user 之后、第一个 ToolMessage（call_4）之前
+    summary_idx = compact.index(summary_msgs[0])
+    first_tool_idx = min(i for i, m in enumerate(compact) if isinstance(m, ToolMessage))
+    assert compact.index(("user", "当前任务")) < summary_idx < first_tool_idx
+
     recent_tool_ids = [msg.tool_call_id for msg in compact if isinstance(msg, ToolMessage)]
     assert recent_tool_ids == ["call_4", "call_5"]
-    assert all(not (isinstance(msg, AIMessage) and msg.content == "" and not msg.tool_calls) for msg in compact)
 
 
 def test_context_builder_keeps_pending_rounds_when_summary_fails(mock_logger):
@@ -632,3 +645,222 @@ def test_default_summarizer_static_system_dynamic_user(mock_logger):
 
     # 只有 2 条消息
     assert len(captured_messages) == 2
+
+
+def test_default_summarizer_uses_compress_llm(mock_logger):
+    """上下文压缩走 COMPRESS_LLM_*，忽略调用方传入的 agent llm。"""
+    from agents.react.context import default_summarizer
+    from unittest.mock import MagicMock, patch
+
+    passed_llm = MagicMock(name="agent_llm")
+    compress_llm = MagicMock(name="compress_llm")
+    captured = {}
+
+    def fake_json_with_retry(llm, messages, logger, **kwargs):
+        captured["llm"] = llm
+        return {"summary_version": 1, "summarized_rounds": []}
+
+    with patch("utils.llm_factory.get_compress_llm", return_value=compress_llm), \
+         patch("agents.react.context.llm_json_with_retry", side_effect=fake_json_with_retry):
+        default_summarizer(
+            previous_summary=None,
+            new_rounds_text="ROUNDS",
+            llm=passed_llm,
+            logger=mock_logger,
+        )
+
+    assert captured["llm"] is compress_llm
+
+
+def test_default_summarizer_falls_back_when_compress_llm_unavailable(mock_logger):
+    """拿不到压缩模型时静默回落调用方传入的 llm，压缩链路不因取模型而崩。"""
+    from agents.react.context import default_summarizer
+    from unittest.mock import MagicMock, patch
+
+    passed_llm = MagicMock(name="agent_llm")
+    captured = {}
+
+    def fake_json_with_retry(llm, messages, logger, **kwargs):
+        captured["llm"] = llm
+        return {"summary_version": 1, "summarized_rounds": []}
+
+    with patch("utils.llm_factory.get_compress_llm", side_effect=RuntimeError("no creds")), \
+         patch("agents.react.context.llm_json_with_retry", side_effect=fake_json_with_retry):
+        default_summarizer(
+            previous_summary=None,
+            new_rounds_text="ROUNDS",
+            llm=passed_llm,
+            logger=mock_logger,
+        )
+
+    assert captured["llm"] is passed_llm
+
+
+# ══════════════════════════════════════════════════════════════
+# 不变量测试（2026-09-27）：非轮次消息不允许被压缩丢弃
+#
+# 背景：旧 _compose 采用「白名单重建」（system + 单一 user_input + summaries + rounds），
+# 导致 plan/pdor/group 四个入口的 step instruction、对话历史、模板 guidance、
+# [用户约束] 全部丢失。2026-09-26 实测事故：子代理只看到一句 step_purpose →
+# 0 次工具调用 → 回「没有提供 ETF 代码」→ 步骤被记为成功 → 用户核心问题整轮被跳过。
+# ══════════════════════════════════════════════════════════════
+
+def _always_summarizer(**payload_overrides):
+    """返回一个恒定 payload 的假 summarizer，用于强制触发压缩路径。"""
+    payload = {
+        "summary_version": 1,
+        "summarized_rounds": [],
+        "rounds_summary": "",
+        "key_findings": "",
+        "data_coverage": [],
+        "failed_queries": [],
+    }
+    payload.update(payload_overrides)
+
+    def _fake(previous_summary, new_rounds_text, **kwargs):
+        return dict(payload)
+
+    return _fake
+
+
+def _builder(**kwargs):
+    from agents.react.context import ReactContextBuilder
+
+    params = {
+        "recent_rounds": 1,
+        "summary_trigger_rounds": 2,
+        "summary_pending_chars": 999999,
+        "summary_max_chars": 2500,
+    }
+    params.update(kwargs)
+    return ReactContextBuilder(**params)
+
+
+def _text_of(compact):
+    parts = []
+    for msg in compact:
+        if isinstance(msg, tuple):
+            parts.append(str(msg[1]))
+        else:
+            parts.append(str(getattr(msg, "content", "")))
+    return "\n".join(parts)
+
+
+def test_compaction_keeps_plan_executor_instruction(mock_logger):
+    """事故回归：plan executor 的 instruction 必须活过压缩。
+
+    复刻 agents/plan/node/executor.py 的消息装配：
+      [system(prompt), system(tools_detail), *history, user(instruction), system([用户约束])]
+    """
+    from agents.executor_callbacks import ExecutionState
+
+    instruction = "获取恒生科技ETF（513130）的日K线数据（period=daily，最近120个交易日），计算 MACD…"
+    base = [
+        ("system", "执行以下任务：验证用户提出的MACD底背离是否成立"),
+        ("system", "可用工具详情：\nget_etf_history: 获取 ETF 历史 K 线"),
+        ("human", "上一轮：分析下中国神华能买吗"),
+        ("ai", "上一轮结论：短期偏谨慎"),
+        ("user", instruction),
+        ("system", "[用户约束] 用户已持仓 513330，需区分已持仓与未持仓"),
+    ]
+
+    # ① 尚未产生任何 tool 轮次（= 事故当时的真实形态，before=4 after=2）
+    exec_state = ExecutionState()
+    compact = _builder(summarizer=_always_summarizer()).build(
+        messages=list(base), user_input="验证MACD底背离是否成立",
+        exec_state=exec_state, llm=None, logger=mock_logger,
+    )
+    assert "513130" in _text_of(compact), "instruction 必须进入 compact（事故根因）"
+    assert "513330" in _text_of(compact), "[用户约束] 必须进入 compact"
+    assert "中国神华" in _text_of(compact), "对话历史必须进入 compact"
+
+    # ② 产生 4 个 tool 轮次后再压缩（走真实压缩路径，旧轮次被摘要替换）
+    messages = list(base)
+    for i in range(1, 5):
+        messages.extend(_round("mx_data_query", f"q{i}", f"call_{i}", f"工具结果 {i}"))
+
+    exec_state2 = ExecutionState()
+    compact2 = _builder(summarizer=_always_summarizer()).build(
+        messages=messages, user_input="验证MACD底背离是否成立",
+        exec_state=exec_state2, llm=None, logger=mock_logger,
+    )
+    text2 = _text_of(compact2)
+    assert exec_state2.react_context_summarized_until >= 1, "应触发压缩"
+    assert "513130" in text2 and "513330" in text2 and "中国神华" in text2
+    # 旧轮次确实被压缩掉了（压缩能力未被削弱）
+    tool_ids = [m.tool_call_id for m in compact2 if isinstance(m, ToolMessage)]
+    assert tool_ids == ["call_4"], f"最近 1 轮应原样保留，其余被摘要替换，实际 {tool_ids}"
+
+
+def test_compaction_keeps_context_for_all_entry_points(mock_logger):
+    """plan/unified/pdor/group 四个入口的 step 上下文都必须活过压缩。"""
+    from agents.executor_callbacks import ExecutionState
+
+    cases = {
+        "plan_executor": (
+            [("system", "SYS"), ("system", "TOOLS"), ("user", "INSTR-513130"), ("system", "[用户约束] CONS")],
+            "INSTR-513130",
+        ),
+        "unified_executor": (
+            [("system", "SYS"), ("human", "HIST-上一轮"), ("system", "TOOLS"), ("user", "Q-用户原问题")],
+            "Q-用户原问题",
+        ),
+        "pdor_executor": (
+            [("system", "SYS"), ("system", "TOOLS"), ("system", "已完成步骤摘要-SUMMARY"), ("user", "P")],
+            "已完成步骤摘要-SUMMARY",
+        ),
+        "group_subagent": (
+            [("system", "SYS"), ("system", "数据底版-DOC"), ("user", "用户问题: Q-原文")],
+            "Q-原文",
+        ),
+    }
+
+    for name, (messages, must_keep) in cases.items():
+        exec_state = ExecutionState()
+        compact = _builder(summarizer=_always_summarizer()).build(
+            messages=list(messages), user_input="purpose",
+            exec_state=exec_state, llm=None, logger=mock_logger,
+        )
+        assert must_keep in _text_of(compact), f"{name}: 丢失了 {must_keep}"
+
+
+def test_non_round_messages_never_dropped_random_sequences(mock_logger):
+    """不变量 property：随机构造消息序列，非轮次消息必须按原序完整保留。
+
+    模拟真实场景里散布在轮次之间的 system/human 消息（去重提示、force summary、
+    缓存反馈、[用户约束] 等），它们是滑动窗口压缩的禁区。
+    """
+    import random
+    from agents.executor_callbacks import ExecutionState
+
+    rng = random.Random(20260927)
+    for case_idx in range(30):
+        messages = [("system", "SYS")]
+        expected_non_round = ["SYS"]
+        n_rounds = rng.randint(1, 7)
+        for i in range(1, n_rounds + 1):
+            if rng.random() < 0.6:
+                marker = f"MARKER-{case_idx}-{i}"
+                kind = rng.choice(["system", "human"])
+                messages.append((kind, marker))
+                expected_non_round.append(marker)
+            messages.extend(_round("mx_data_query", f"q{i}", f"call_{i}", f"工具结果 {i}"))
+        if rng.random() < 0.5:
+            tail = f"TAIL-{case_idx}"
+            messages.append(("system", tail))
+            expected_non_round.append(tail)
+
+        exec_state = ExecutionState()
+        compact = _builder(recent_rounds=rng.choice([0, 1]), summarizer=_always_summarizer()).build(
+            messages=list(messages), user_input="purpose",
+            exec_state=exec_state, llm=None, logger=mock_logger,
+        )
+        text = _text_of(compact)
+        for marker in expected_non_round:
+            assert marker in text, (
+                f"case {case_idx}: 非轮次消息 {marker} 被压缩丢弃；"
+                f"before={len(messages)} after={len(compact)}"
+            )
+        # 顺序保持：非轮次消息在 compact 中的出现顺序与输入一致
+        positions = [text.index(m) for m in expected_non_round]
+        assert positions == sorted(positions), f"case {case_idx}: 非轮次消息顺序被打乱"

@@ -5,6 +5,7 @@ import time
 import random
 import logging
 import functools
+import threading
 import contextvars
 import pandas as pd
 from typing import List, Optional
@@ -34,6 +35,45 @@ def _get_request_failed_sources() -> set:
     return sources
 
 logger = logging.getLogger("radar.fetcher")
+
+
+def run_with_timeout(func, timeout: float):
+    """在**守护线程**里执行 `func`，到点即抛 `TimeoutError`（不等待挂死的线程）。
+
+    为什么不用 `with ThreadPoolExecutor() as pool`：`with` 退出时 `shutdown(wait=True)`
+    会 join 那个可能永远挂住的被调线程 —— 即便 `future.result(timeout)` 已抛超时，
+    离开 `with` 仍会无限等待，把整个请求 / agent 轮次拖死（2026-09-23 实测：
+    `get_stock_history(002714, weekly)` 的 akshare 调用挂住 → 整轮 run 卡死）。
+    守护线程即使挂住也不阻塞请求返回与进程退出。
+
+    用 `contextvars.copy_context()` 把调用方上下文带进工作线程，保证 `_current_source`
+    等 ContextVar 在子线程可见（否则 `_get_source()` 会取不到当前数据源）。
+    """
+    box: dict = {}
+    ctx = contextvars.copy_context()
+
+    def _worker():
+        try:
+            box["value"] = ctx.run(func)
+        except BaseException as e:  # noqa: BLE001 — 原样透传给调用方
+            box["error"] = e
+
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError(f"调用超时（{timeout}秒）")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _source_timeout() -> float:
+    """单个数据源调用的超时秒数（由 FETCH_SOURCE_TIMEOUT 配置，默认 20s）。"""
+    try:
+        return float(Config.FETCH_SOURCE_TIMEOUT)
+    except Exception:
+        return 20.0
 
 
 def _validate_retry_result(func_name: str, result):
@@ -82,6 +122,18 @@ class DataSource:
     ]
     _fake_ua = None  # lazy-loaded fake_useragent 实例
     _last_request_time: float = 0.0
+
+    @classmethod
+    def call_timeout(cls, func_name: str, *args, **kwargs) -> float | None:
+        """该数据源对**本次调用**的预算（秒）；None = 用全局 FETCH_SOURCE_TIMEOUT。
+
+        为什么需要按调用给预算：retry 外层对每次尝试统一用 `_source_timeout()`
+        （默认 20s），但个别接口本身就要 20s 以上——金十 `macro_cons_gold`
+        （全球黄金 ETF 总库存，全量 2875 行）实测约 21s。统一超时的表现是
+        「每次尝试都超时 → 所有数据源失败」，看起来像「源没数据」，其实只是预算不够。
+        子类按参数声明（见 AkshareDataSource 对 _MACRO_APIS[*].timeout 的读取）。
+        """
+        return None
 
     @classmethod
     def _enforce_rate_limit(cls, min_seconds: float = 1.0, max_seconds: float = 3.0):
@@ -222,6 +274,25 @@ class DataSource:
 
     @classmethod
     def get_margin_trading(cls, market: str = "sh", start_date: str = "", end_date: str = "") -> pd.DataFrame:
+        raise NotImplementedError
+
+    # ── 宏观数据 ──
+
+    @classmethod
+    def get_macro_indicator(cls, indicator: str) -> pd.DataFrame:
+        """宏观指标时序（统一列 report_date/value，升序）。未实现的源跳过不熔断。"""
+        raise NotImplementedError
+
+    # ── 指数估值与中证指数日线 ──
+
+    @classmethod
+    def get_index_valuation(cls, code: str) -> pd.DataFrame:
+        """中证指数公司指数估值时序（股息率/市盈率，升序）。未实现的源跳过不熔断。"""
+        raise NotImplementedError
+
+    @classmethod
+    def get_index_hist_csindex(cls, code: str, start: str = "", end: str = "") -> pd.DataFrame:
+        """中证指数公司指数日线（点位，含滚动市盈率）。未实现的源跳过不熔断。"""
         raise NotImplementedError
 
     @classmethod
@@ -398,11 +469,92 @@ class DataSourceManager:
     _ETF_PREFIXES_SH = ("51", "52", "56", "58")
     _ETF_PREFIXES_SZ = ("15", "16", "18")
 
+    # 能力 → 数据源优先顺序（未列出的源保持相对顺序，排在其后）
+    #
+    # 动机（2026-09-21 实测）：历史K线原先按全局优先级先撞 mx_data（priority 110）。
+    # 但 mx_data 的 get_stock_hist 实质是「AI 查询表格」：慢（每次含 1~3s 限流），
+    # 且对 ETF 只返回当日 1 行快照 → 被行数守卫拒绝后继续换源，
+    # 取一次 159570 历史耗 15.6s、3 次尝试里 2 次纯浪费。
+    # 专用K线接口（同花顺/亿牛/akshare/baostock）应优先；mx_data 保留在最后兜底
+    # （指数等专用源不支持的标的仍可由它取到）。
+    _CAPABILITY_SOURCE_ORDER: dict[str, list[str]] = {
+        "hist": ["hithink", "efinance", "akshare", "baostock", "sina_direct", "mx_data"],
+    }
+
+    @classmethod
+    def order_sources(cls, sources, capability: str):
+        """按能力偏好重排数据源；未列入该能力的源保持原有相对顺序并排在其后。
+
+        若用户已在「系统配置 → 数据源优先级」自定义了顺序，则**以用户顺序为准**，
+        不再施加能力级重排（用户的显式意志优先，避免两套规则互相打架）。
+        """
+        if cls._user_order:
+            return list(sources)
+        order = cls._CAPABILITY_SOURCE_ORDER.get(capability)
+        if not order:
+            return list(sources)
+        rank = {name: idx for idx, name in enumerate(order)}
+        return sorted(sources, key=lambda s: rank.get(s.name, len(order)))
+
+    # ── 用户自定义优先级（系统配置面板可拖拽调整）─────────────
+
+    _user_order: List[str] = []
+
+    @classmethod
+    def _load_user_order(cls) -> List[str]:
+        """从 Config.DATASOURCE_PRIORITY_ORDER 读取（逗号分隔源名）。异常返回空。"""
+        try:
+            from config import Config
+            raw = (getattr(Config, "DATASOURCE_PRIORITY_ORDER", "") or "").strip()
+            return [x.strip() for x in raw.split(",") if x.strip()]
+        except Exception:
+            return []
+
+    @classmethod
+    def _resort_sources(cls) -> None:
+        """排序：有用户自定义顺序时优先按它（未列出的按内置 priority 排其后）。"""
+        if cls._user_order:
+            rank = {n: i for i, n in enumerate(cls._user_order)}
+            cls._sources.sort(key=lambda x: (rank.get(x.name, len(rank)), -x.priority))
+        else:
+            cls._sources.sort(key=lambda x: x.priority, reverse=True)
+
+    @classmethod
+    def set_order(cls, names) -> List[str]:
+        """设置用户自定义优先级（运行时生效，不负责持久化）。返回生效后的顺序。
+
+        对传入名字做去重保序（防御性：调用方可能带上重复项）。
+        """
+        ordered: List[str] = []
+        for n in (names or []):
+            s = str(n).strip()
+            if s and s not in ordered:
+                ordered.append(s)
+        cls._user_order = ordered
+        cls._resort_sources()
+        return [s.name for s in cls._sources]
+
+    @classmethod
+    def clear_order(cls) -> List[str]:
+        """清除自定义顺序，回到内置 priority。返回生效后的顺序。"""
+        return cls.set_order([])
+
+    @classmethod
+    def get_order(cls) -> List[str]:
+        """返回当前生效的数据源顺序。"""
+        return [s.name for s in cls._sources]
+
+    @classmethod
+    def order_is_customized(cls) -> bool:
+        return bool(cls._user_order)
+
     @classmethod
     def register_source(cls, source_class):
         if source_class not in cls._sources:
             cls._sources.append(source_class)
-            cls._sources.sort(key=lambda x: x.priority, reverse=True)
+            if not cls._user_order:
+                cls._user_order = cls._load_user_order()
+            cls._resort_sources()
             logger.info(f"注册数据源: {source_class.name} (优先级: {source_class.priority})")
 
     @classmethod
@@ -442,6 +594,10 @@ class DataSourceManager:
         if not available:
             logger.error("没有可用的数据源")
             return False
+        # 可用源列表可能比上次切换时更短（熔断/顺序变更）→ 越界则回退到 0，
+        # 与 get_current_source 同款防护（否则 IndexError 直接崩）。
+        if cls._current_source_index >= len(available):
+            cls._current_source_index = 0
         old = available[cls._current_source_index].name if available else "none"
         cls._current_source_index = (cls._current_source_index + 1) % len(available)
         new = available[cls._current_source_index].name
@@ -620,12 +776,19 @@ def _fetch_tencent_kline(code: str, period: str = "daily",
 #  重试装饰器
 # ═══════════════════════════════════════════════════════════
 
-def retry(max_retries=5, base_delay=2.0, max_delay=30.0, switch_on_fail=True):
+def retry(max_retries=5, base_delay=2.0, max_delay=30.0, switch_on_fail=True, capability=None):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             had_request_failed_context = _request_failed_sources.get() is not None
             try:
+                # 惰性初始化修复：数据源注册发生在被包装函数内的 _ensure_initialized()，
+                # 但下方 get_available_sources() 在调用 func 之前执行——进程内首次调用
+                # 任何 fetcher API 时 _sources 为空，直接 raise「没有可用的数据源」（必现 bug）。
+                # 此处运行时 import（此时 tools.fetcher 模块已加载完毕，无循环导入）。
+                import tools.fetcher as _pkg
+                _pkg._ensure_initialized()
+
                 last_exc = None
                 # 本次调用中已尝试的数据源（独立于其他线程/进程的调用）
                 sources_tried = set()
@@ -644,6 +807,11 @@ def retry(max_retries=5, base_delay=2.0, max_delay=30.0, switch_on_fail=True):
 
                 # 每次调用都严格按注册优先级顺序尝试，不保留上次的切换状态
                 source_list = available_sources.copy()
+                # 按能力偏好重排（例：hist 不该优先走 mx_data——它是「AI 查询表格」，
+                # 慢（每次 1~3s 限流）且对 ETF 可能只返回当日 1 行快照。实测
+                # 取 159570 历史 15.6s / 3 次尝试，其中 2 次白跑。）
+                if capability:
+                    source_list = DataSourceManager.order_sources(source_list, capability)
 
                 # 开始尝试，每个尝试都独立统计
                 for attempt in range(max_retries):
@@ -668,7 +836,18 @@ def retry(max_retries=5, base_delay=2.0, max_delay=30.0, switch_on_fail=True):
                         pass
 
                     try:
-                        result = func(*args, **kwargs)
+                        # 按调用给预算：慢接口（金十黄金ETF等）由数据源自报，
+                        # 未声明则回落全局 FETCH_SOURCE_TIMEOUT。
+                        attempt_timeout = None
+                        try:
+                            attempt_timeout = source.call_timeout(
+                                func.__name__, *args, **kwargs)
+                        except Exception:
+                            attempt_timeout = None
+                        result = run_with_timeout(
+                            lambda: func(*args, **kwargs),
+                            attempt_timeout or _source_timeout()
+                        )
                         result = _validate_retry_result(func.__name__, result)
                         DataSourceManager.mark_source_success(source.name)
                         _current_source.set(None)
@@ -699,7 +878,8 @@ def retry(max_retries=5, base_delay=2.0, max_delay=30.0, switch_on_fail=True):
                                 delay += random.uniform(0, delay * 0.3)
                                 time.sleep(delay)
 
-                logger.error(f"[{func.__name__}] 所有数据源({sources_tried})均失败: {last_exc}")
+                logger.error(f"[{func.__name__}] 所有数据源({sources_tried})均失败: {last_exc}",
+                             exc_info=last_exc)
                 _current_source.set(None)
                 raise last_exc
             finally:

@@ -13,6 +13,7 @@ import os
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from time import monotonic, time as _time
 
 from fastapi import APIRouter, Request
@@ -63,10 +64,14 @@ def _resolve_db_paths():
         except Exception:
             pass
     try:
-        from utils.agent_trace.db import resolve_trace_db
-        trace_p = resolve_trace_db()
-        if trace_p and os.path.exists(trace_p):
-            paths["trace"] = trace_p
+        from utils.agent_trace.store import store
+        # 分库布局：主库（reviews）+ db/agent_trace/ 下的月库，逐文件纳入统计
+        if os.path.exists(store.main_db_path()):
+            paths["trace"] = store.main_db_path()
+        for p in store.list_month_dbs():
+            if os.path.exists(p):
+                ym = Path(p).stem.replace("agent_trace_", "")
+                paths[f"trace_{ym}"] = p
     except Exception:
         pass
     return paths

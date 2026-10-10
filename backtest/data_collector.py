@@ -6,6 +6,7 @@
 - 日K线批量采集（增量）
 - 指数日K线采集
 - 复权因子采集
+- 标的补尾（持仓∪自选 / 指定 codes，含 ETF 冷启动）
 - 任务进度跟踪（data_tasks 表）
 - pause / resume / cancel 控制
 """
@@ -37,7 +38,7 @@ class DataCollector:
         """创建任务并在后台线程中执行
 
         Args:
-            task_type: stock_list / daily_kline / index_kline / adjust_factor / full_sync
+            task_type: stock_list / daily_kline / index_kline / adjust_factor / full_sync / tail_fill
             config: 任务配置
             callback: 完成回调 (task_id, result)
 
@@ -136,8 +137,22 @@ class DataCollector:
                 self._collect_daily_kline(task_id, config)
                 self._check_flags(task_id)
                 self._collect_index_kline(task_id, config)
+                # P6 第二步：板块三件套为行业基准供数（成员/K线只需行业板块）
+                self._check_flags(task_id)
+                self._collect_board_list(task_id, config)
+                self._check_flags(task_id)
+                board_cfg = {**config, 'board_type': 'industry'}
+                self._collect_board_member(task_id, board_cfg)
+                self._check_flags(task_id)
+                self._collect_board_kline(task_id, board_cfg)
             elif task_type == 'hithink_sync':
                 self._collect_hithink_sync(task_id, config)
+            elif task_type == 'hithink_dump':
+                self._collect_hithink_dump(task_id, config)
+            elif task_type == 'etf_list':
+                self._collect_etf_list(task_id, config)
+            elif task_type == 'tail_fill':
+                self._collect_tail_fill(task_id, config)
             else:
                 raise ValueError(f'未知任务类型: {task_type}')
 
@@ -268,6 +283,209 @@ class DataCollector:
         else:
             append_task_log(task_id, '[INFO] 未指定 codes，仅执行快照灌库')
 
+    def _collect_hithink_dump(self, task_id: str, config: Dict[str, Any]):
+        """同花顺全市场 Parquet 灌库：官方批量通道（3 次请求替代数千次逐只拉取）。
+
+        dump_kind: daily-k（全量 ~10 年）/ daily-k-10d（近 10 交易日增量）。
+        写入 stock_daily（source='hithink_dump'），(code, trade_date) 幂等。
+        本地数据落后 > 7 个交易日时应选 daily-k 全量（10 日增量覆盖不了缺口）。
+        需要 pyarrow（pip install pyarrow）。
+        """
+        kind = (config.get('dump_kind') or 'daily-k-10d').strip()
+        append_task_log(task_id, f'[INFO] 开始全市场 Parquet 灌库（{kind}）...')
+
+        try:
+            from backtest.hithink_marketdb import sync_dump_stock_daily
+        except Exception as e:
+            append_task_log(task_id, f'[ERROR] 导入灌库模块失败: {e}')
+            raise
+
+        def _progress(done: int, total: int):
+            update_data_task(task_id, processed_count=done, total_count=total)
+
+        try:
+            n = sync_dump_stock_daily(kind, progress_cb=_progress)
+            append_task_log(task_id, f'[OK] 全市场 {kind} 灌库完成: {n} 条 (source=hithink_dump)')
+        except Exception as e:
+            append_task_log(task_id, f'[ERROR] 全市场灌库失败: {e}')
+            raise
+
+    def _collect_etf_list(self, task_id: str, config: Dict[str, Any]):
+        """全市场 ETF 目录灌库：写入 stock_info（market='ETF'）。
+
+        供信号评测标的识别（signal_eval）与基金工具使用；
+        数据源走 tools/fund_data.list_etf_catalog（新浪主 + 东财备）。
+        """
+        append_task_log(task_id, '[INFO] 开始全市场 ETF 目录灌库（etf_list）...')
+        try:
+            from tools.fund_data import list_etf_catalog
+            catalog = list_etf_catalog()
+        except Exception as e:
+            append_task_log(task_id, f'[ERROR] ETF 目录获取失败: {e}')
+            raise
+
+        if not catalog:
+            append_task_log(task_id, '[WARN] ETF 目录为空（所有数据源均不可用）')
+            return
+
+        total = len(catalog)
+        update_data_task(task_id, total_count=total, processed_count=0)
+        append_task_log(task_id, f'[INFO] 共 {total} 只 ETF')
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        replaced = 0
+        with get_market_data_db() as conn:
+            for i, it in enumerate(catalog):
+                self._check_flags(task_id)
+                code, name = it["code"], it["name"]
+                if not name:
+                    continue
+                cur = conn.execute('''INSERT INTO stock_info
+                    (code, name, market, exchange, source, updated_at)
+                    VALUES (?, ?, 'ETF', ?, 'sina_etf', ?)
+                    ON CONFLICT(code) DO UPDATE SET
+                        name=excluded.name, market='ETF',
+                        source=excluded.source, updated_at=excluded.updated_at
+                        WHERE stock_info.name != excluded.name
+                           OR stock_info.market != 'ETF'
+                           OR stock_info.source NOT IN ('sina_etf')''',
+                    (code, name, it.get("market"), now))
+                replaced += cur.rowcount
+                if (i + 1) % 200 == 0:
+                    update_data_task(task_id, processed_count=i + 1,
+                                     current_code=code, current_name=name)
+            conn.commit()
+
+        update_data_task(task_id, processed_count=total, success_count=total)
+        append_task_log(task_id, f'[OK] ETF 目录灌库完成: {total} 只（更新/新增 {replaced} 行）')
+
+    def _collect_tail_fill(self, task_id: str, config: Dict[str, Any]):
+        """标的补尾：按 code 列表补齐 K 线尾部（全市场 dump 不含 ETF 的兜底通道）。
+
+        - 代码集：config['codes'] 非空优先；否则读 db/stock_radar.db 的
+          持仓（portfolio_position.qty>0）∪ 自选（watchlist），均限 market='cn'
+          且 6 位数字，去重保序；config['max_codes'] 默认 300 截断。
+        - 逐码串行、失败隔离，每码 pause/cancel 检查：
+          1) 冷启动（stock_daily 无该码记录）：fetch_and_store_daily(code, days=config.get('days', 250))。
+             实测（宽基/行业/主题 ETF 各取样）：该入口对 ETF 同样生效——akshare 源按
+             代码段识别 market='etf' 走 fund_etf_hist_em 基金端点，个股走
+             stock_zh_a_hist，故无需回退 backtest.data_adapter._load_stock_daily
+             的 ETF/指数兜底路径。
+          2) 陈旧（本地最新 < 最近已完成交易日）：refresh_stale_tail(code)（带节流，静默失败）。
+          3) 否则跳过。
+        - 计数：updated（补尾成功）/ cold_started（冷启动成功）/ skipped / error。
+        """
+        codes = self._resolve_tail_fill_codes(task_id, config)
+        if not codes:
+            append_task_log(task_id, '[WARN] 无补尾代码（codes 为空且持仓/自选为空）')
+            return
+
+        from utils.cache.market_data_db import (
+            get_latest_trade_date, fetch_and_store_daily, refresh_stale_tail,
+        )
+        from utils.trading_calendar import get_effective_trading_date
+
+        days = int(config.get('days', 250) or 250)
+        effective = get_effective_trading_date('cn').isoformat()
+        total = len(codes)
+        update_data_task(task_id, total_count=total, processed_count=0)
+        append_task_log(task_id, f'[INFO] 开始标的补尾，共 {total} 只（冷启动拉取 {days} 天，目标 {effective}）')
+
+        updated = cold_started = skipped = errors = 0
+        for i, code in enumerate(codes):
+            self._check_flags(task_id)
+            update_data_task(task_id, processed_count=i, current_code=code)
+            try:
+                latest = get_latest_trade_date(code)
+                if not latest:
+                    count = fetch_and_store_daily(code, days=days)
+                    if count > 0:
+                        cold_started += 1
+                    else:
+                        errors += 1
+                        append_task_log(task_id, f'[WARN] {code} 冷启动无数据')
+                elif str(latest) < effective:
+                    if refresh_stale_tail(code, latest=str(latest)):
+                        updated += 1
+                    else:
+                        errors += 1
+                        append_task_log(task_id, f'[WARN] {code} 补尾未生效（数据源失败/节流）')
+                else:
+                    skipped += 1
+            except Exception as e:
+                errors += 1
+                append_task_log(task_id, f'[WARN] {code} 失败: {e}')
+
+            if (i + 1) % 20 == 0:
+                append_task_log(
+                    task_id,
+                    f'[OK] 进度 {i+1}/{total}：更新 {updated} / 冷启动 {cold_started} / 跳过 {skipped} / 失败 {errors}')
+            update_data_task(task_id, success_count=updated + cold_started, failed_count=errors)
+
+        update_data_task(task_id, processed_count=total)
+        append_task_log(
+            task_id,
+            f'[OK] 标的补尾完成：共 {total} 只，更新 {updated}，冷启动 {cold_started}，跳过 {skipped}，失败 {errors}')
+
+    def _resolve_tail_fill_codes(self, task_id: str, config: Dict[str, Any]) -> List[str]:
+        """确定补尾代码集：显式 codes 优先（去重保序），否则持仓 ∪ 自选；max_codes 截断。"""
+        raw = config.get('codes') or []
+        explicit = [str(c).strip() for c in raw if str(c or '').strip()]
+        if explicit:
+            codes: List[str] = []
+            seen = set()
+            for code in explicit:
+                if code not in seen:
+                    seen.add(code)
+                    codes.append(code)
+        else:
+            codes = self._load_holding_watch_codes(task_id)
+
+        max_codes = int(config.get('max_codes', 300) or 300)
+        if len(codes) > max_codes:
+            append_task_log(task_id, f'[INFO] 代码数 {len(codes)} 超过 max_codes={max_codes}，截断')
+            codes = codes[:max_codes]
+        return codes
+
+    @staticmethod
+    def _load_holding_watch_codes(task_id: str) -> List[str]:
+        """读 db/stock_radar.db 的持仓（qty>0）∪ 自选，限 market='cn' 且 6 位数字，去重保序。"""
+        import os
+        import re
+        import sqlite3
+        from utils.app_paths import get_db_path
+
+        codes: List[str] = []
+        seen = set()
+
+        def _add(raw_code):
+            code = str(raw_code or '').strip()
+            if re.fullmatch(r'\d{6}', code) and code not in seen:
+                seen.add(code)
+                codes.append(code)
+
+        db_path = get_db_path()
+        if not os.path.exists(db_path):
+            append_task_log(task_id, f'[WARN] stock_radar.db 不存在: {db_path}')
+            return codes
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                for r in conn.execute(
+                        "SELECT stock_code FROM portfolio_position "
+                        "WHERE qty > 0 AND market = 'cn' ORDER BY rowid"):
+                    _add(r['stock_code'])
+                for r in conn.execute(
+                        "SELECT stock_code FROM watchlist "
+                        "WHERE market = 'cn' ORDER BY id"):
+                    _add(r['stock_code'])
+            finally:
+                conn.close()
+        except Exception as e:
+            append_task_log(task_id, f'[WARN] 读取持仓/自选失败: {e}')
+        return codes
+
     def _collect_daily_kline(self, task_id: str, config: Dict[str, Any]):
         """采集日K线数据"""
         codes = config.get('codes', [])
@@ -316,6 +534,9 @@ class DataCollector:
             ('000300', '沪深300'), ('000905', '中证500'), ('000016', '上证50'),
             ('000852', '中证1000'), ('000688', '科创50'), ('399005', '中小100'),
             ('000015', '红利指数'), ('000038', '上证180'), ('000134', '上证综指'),
+            # 红利策略指数（中证指数公司编制，H + 数字，走 stock_zh_index_hist_csindex；
+            # 不要填进交易所指数分支——stock_zh_index_daily_em 不认 H 开头代码）
+            ('H30269', '中证红利低波动'),
             # 消费/白酒
             ('000932', '中证消费'), ('399997', '中证白酒'),
             # 医药/创新药
@@ -540,8 +761,13 @@ class DataCollector:
         tlog = self._tlog(task_id)
         board_names = config.get('boards', [])
         if not board_names:
+            board_type_filter = config.get('board_type')
             with get_market_data_db() as conn:
-                rows = conn.execute('SELECT board_name, board_type FROM stock_board').fetchall()
+                if board_type_filter and board_type_filter != 'all':
+                    rows = conn.execute('SELECT board_name, board_type FROM stock_board WHERE board_type = ?',
+                                        (board_type_filter,)).fetchall()
+                else:
+                    rows = conn.execute('SELECT board_name, board_type FROM stock_board').fetchall()
                 board_names = [(r['board_name'], r['board_type']) for r in rows]
 
         if not board_names:
@@ -716,7 +942,8 @@ class DataCollector:
                 if not method:
                     continue
                 try:
-                    df = method(symbol=board_name, period='daily')
+                    # period 须为东财接口的合法值 {'日k','周k','月k'}（'daily' 会导致空响应报错）
+                    df = method(symbol=board_name, period='日k')
                     if df is None or df.empty:
                         continue
                     df = self._normalize_board_kline(df)
