@@ -71,8 +71,15 @@ async def list_positions(request: Request, source: str = "sina"):
     「某来源 · 刷新时间」，避免用户误以为行情未更新。
     """
     portfolio = _get_portfolio(request)
-    return await asyncio.to_thread(
+    view = await asyncio.to_thread(
         build_positions_view, portfolio, source or "sina", _fetch_quotes_sync)
+    # 打开即记一天（ADR-008）：登录东财要交易密码、不能自动同步，
+    # 所以靠用户真正在看的时候顺带落库。写失败不阻断持仓页。
+    try:
+        await asyncio.to_thread(portfolio.save_daily_snapshot, view, "open")
+    except Exception:  # noqa: BLE001 - 快照是增强信息，不该挡住主流程
+        logger.warning("[持仓] 当日快照写入失败", exc_info=True)
+    return view
 
 
 @router.get("/summary")
@@ -336,7 +343,42 @@ async def eastmoney_import(request: Request, payload: EastmoneyImportRequest):
         account.setdefault("synced_at", None)
         await asyncio.to_thread(em.set_account_cache, account)
     await asyncio.to_thread(_sync_profile_holdings, portfolio)
+    # 同步成功后再记一次当日快照（与"打开持仓页"同一份 upsert，一天一行）
+    try:
+        view = await asyncio.to_thread(
+            build_positions_view, portfolio, "sina", _fetch_quotes_sync)
+        await asyncio.to_thread(portfolio.save_daily_snapshot, view, "sync")
+    except Exception:  # noqa: BLE001 - 快照失败不影响导入结果
+        logger.warning("[东财同步] 当日快照写入失败", exc_info=True)
     return _em_ok(counts)
+
+
+# ── 账户历史快照（ADR-008）─────────────────────────────────────────────────
+
+@router.get("/snapshots")
+async def list_snapshots(request: Request, days: int = 90):
+    """按日期升序的账户快照，供日历热力/构成流使用。"""
+    portfolio = _get_portfolio(request)
+    rows = await asyncio.to_thread(portfolio.list_snapshots, days)
+    return {"items": rows, "count": len(rows)}
+
+
+@router.get("/snapshots/positions")
+async def snapshot_positions_range(request: Request, days: int = 90):
+    """区间内的持仓明细（构成流用）。一次拿完，避免前端逐天请求。"""
+    portfolio = _get_portfolio(request)
+    rows = await asyncio.to_thread(portfolio.snapshot_positions_range, days)
+    return {"items": rows, "count": len(rows)}
+
+
+@router.get("/snapshots/{day}/positions")
+async def snapshot_positions(request: Request, day: str):
+    """某一天的持仓明细（构成流用）。"""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day or ""):
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    portfolio = _get_portfolio(request)
+    rows = await asyncio.to_thread(portfolio.snapshot_positions, day)
+    return {"date": day, "items": rows}
 
 
 @router.get("/eastmoney/session")

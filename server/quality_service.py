@@ -156,9 +156,12 @@ def _beijing_week_start(now: datetime) -> datetime:
 
 
 def _run_token_stats(trace_conn: sqlite3.Connection | None, run_ids: list[str]) -> dict[str, dict[str, int]]:
-    """按 run_id 聚合 steps.extra JSON 内 token_usage（LLM 步骤才有）。
+    """按 run_id 聚合 steps.extra JSON 内 token_usage 与 cost（LLM 步骤才有）。
 
-    返回 {run_id: {llm_calls, input_tokens, output_tokens, total_tokens, ...}}。
+    返回 {run_id: {llm_calls, input_tokens, output_tokens, total_tokens, cost, cost_provider, ...}}。
+
+    ⚠️ cost 是**记录时算好**的（含峰谷与价目快照），这里只做 SUM —— 不能拿当前价目重算，
+    否则调价会改写历史账单（设计文档 §5.1）。
     """
     if trace_conn is None or not run_ids:
         return {}
@@ -184,12 +187,23 @@ def _run_token_stats(trace_conn: sqlite3.Connection | None, run_ids: list[str]) 
                 continue
             if run_id not in stats:
                 stats[run_id] = {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0,
-                                 "cached_tokens": 0, "total_tokens": 0}
+                                 "cached_tokens": 0, "total_tokens": 0, "cost": 0.0,
+                                 "cost_unpriced": 0, "cost_by_provider": {}}
             stats[run_id]["llm_calls"] += 1
             stats[run_id]["input_tokens"] += usage.get("input_tokens", 0)
             stats[run_id]["output_tokens"] += usage.get("output_tokens", 0)
             stats[run_id]["cached_tokens"] += usage.get("cached_tokens", 0)
             stats[run_id]["total_tokens"] += usage.get("total_tokens", 0)
+            cost = data.get("cost")
+            if isinstance(cost, dict):
+                amount = cost.get("total")
+                if amount is None:
+                    stats[run_id]["cost_unpriced"] += 1
+                else:
+                    stats[run_id]["cost"] += float(amount)
+                    prov = str(cost.get("provider") or "unknown")
+                    bucket = stats[run_id]["cost_by_provider"]
+                    bucket[prov] = bucket.get(prov, 0.0) + float(amount)
     return stats
 
 
@@ -301,10 +315,10 @@ def build_overview(dbs: QualityDBs, *, now: datetime | None = None,
     - verifiable_conclusions：A2 上线后 = 当周 confidence 非空的 signal 条数；
       之前 = 当周 signal 条数（verifiable_basis 如实标注口径）；
     - win_rate_after_cost：signal_overview 提供（signal-eval 费后收益统计）时接入
-      value=buy_winrate（0-1）、wilson=buy_ci，coverage 标注口径；未提供时 value=null；
-      n 恒为 buy 类可统计样本数；
-    - avg_cost_per_report：近 28 天 assistant 报告的 run 级 token 聚合均值（unit=tokens，
-      无单价配置时按 token 展示）；无数据 → null；
+      value=buy_winrate_5d（0-1，固定 5 日）、wilson=buy_ci_5d，coverage 标注口径；
+      未提供时 value=null；n 优先 buy_n_5d（5 日 ok 桶），缺失时回退 buy 类可统计样本数；
+    - avg_cost_per_report：近 28 天 assistant 报告的平均花费（unit=CNY，元），只统计已计价
+      的 run（未计价单列 unpriced_runs）；avg_tokens_per_report 保留原 token 口径；无数据 → null；
     - cache_hit_rate：A8 语义缓存命中率（0-1）；A8 未上线 → null；
     - token_cache_hit_rate：本轮 trace token 聚合的 cached/total（0-1），无数据 → null。
     """
@@ -365,19 +379,31 @@ def build_overview(dbs: QualityDBs, *, now: datetime | None = None,
     ]
     token_map = _run_token_stats(dbs.trace, recent_run_ids)
     totals = [v["total_tokens"] for v in token_map.values() if v.get("total_tokens")]
-    avg_cost = round(sum(totals) / len(totals)) if totals else None
+    avg_tokens = round(sum(totals) / len(totals)) if totals else None
+    # 单份报告平均花费（元）：只统计「已计价」的 run（cost > 0 或明确免费），
+    # 未计价的 run 单列计数 —— 把未计价当 0 会把平均值拉低成假象。
+    priced = [v["cost"] for v in token_map.values() if v.get("llm_calls") and not v.get("cost_unpriced")]
+    avg_cost = round(sum(priced) / len(priced), 4) if priced else None
+    unpriced_runs = sum(1 for v in token_map.values() if v.get("cost_unpriced"))
+    cost_by_provider: dict[str, float] = {}
+    for v in token_map.values():
+        for prov, amount in (v.get("cost_by_provider") or {}).items():
+            cost_by_provider[prov] = cost_by_provider.get(prov, 0.0) + float(amount)
     cached_sum = sum(v.get("cached_tokens", 0) for v in token_map.values())
     token_sum = sum(v.get("total_tokens", 0) for v in token_map.values())
     token_cache_hit_rate = round(cached_sum / token_sum, 4) if token_sum > 0 else None
 
-    # 费后胜率：signal-eval 费后收益统计接入（未提供 → 保持占位口径）
+    # 费后胜率：signal-eval 费后收益统计接入（顶部固定 5 日口径；未提供 → 保持占位口径）
+    # 不再读旧「至今」字段 buy_winrate/buy_ci：持有时长混在一起，和 5 日不是同一口径。
     if signal_overview:
-        win_value = signal_overview.get("buy_winrate")
-        win_wilson = signal_overview.get("buy_ci")
-        win_coverage = "口径：signal-eval 费后收益统计（单边成本 0）"
+        win_value = signal_overview.get("buy_winrate_5d")
+        win_wilson = signal_overview.get("buy_ci_5d")
+        win_n = signal_overview.get("buy_n_5d")
+        win_coverage = "口径：signal-eval 固定 5 日费后收益（单边成本 0）；不可评估样本不计入"
     else:
         win_value = None
         win_wilson = None
+        win_n = None
         win_coverage = "待接入收益口径：已跟踪 buy 类信号样本，费后胜率随 signal-eval 统计开启"
 
     return {
@@ -388,18 +414,112 @@ def build_overview(dbs: QualityDBs, *, now: datetime | None = None,
         "prev_week_count": prev_week,
         "win_rate_after_cost": {
             "value": win_value,
-            "n": len(win_pool),
+            # 分母与胜率同口径：5 日 ok 桶样本数；旧调用/无 overview 时回退 buy 池长度
+            "n": win_n if win_n is not None else len(win_pool),
             "wilson": win_wilson,
             "coverage": win_coverage,
         },
+        # 单份报告平均花费：unit=元（成本 / 计价 §8③）；token 口径保留为 avg_tokens_per_report
         "avg_cost_per_report": {
             "value": avg_cost,
+            "unit": "CNY",
+            "n": len(priced),
+            "unpriced_runs": unpriced_runs,
+            "by_provider": sorted(cost_by_provider.items(), key=lambda kv: -kv[1]),
+        },
+        "avg_tokens_per_report": {
+            "value": avg_tokens,
             "unit": "tokens",
             "n": len(totals),
         },
         "cache_hit_rate": _cache_hit_rate(),
         "token_cache_hit_rate": token_cache_hit_rate,
+        "fork_breakdown": build_fork_breakdown(dbs),
         "trend": trend if dbs.signal is not None else [],
+    }
+
+
+# ── fork 分组看板（PRD-A11 FR-7）────────────────────────────────────
+
+# 主循环 vs 副调用。归因优先取 steps.extra.purpose（细分用途），回落 node
+# （PRD-A11 FR-7 拆开的两个字段）。purpose==node 的老数据天然归到副调用，
+# 不影响主循环口径（主循环只认 agent / react-sub 两个值）。
+_MAIN_LOOP_PURPOSES = {"agent", "react-sub", "react-sub-fallback"}
+
+
+def _is_main_loop(purpose: str) -> bool:
+    return purpose in _MAIN_LOOP_PURPOSES
+
+
+def build_fork_breakdown(dbs: QualityDBs, *, days: int = 28) -> dict:
+    """按「主循环 / 副调用」分组汇总缓存命中与思考占比（纯函数，只读）。
+
+    为什么要有这个（PRD-A10 §2.2 踩过的坑）：整体命中率把主循环和副调用混在一起，
+    副调用改没改 fork 在总数里几乎看不出来。拆成两组后，
+    「副调用命中率」才是一个能被验收的指标（AC-2 / AC-3 的判定口径）。
+
+    - input 命中口径 = Σcached_tokens / Σinput_tokens；
+    - reasoning 占比 = Σreasoning_tokens / Σoutput_tokens —— 只观测不优化
+      （PRD-A11 非目标：reasoning 是效果关键，不砍）；
+    - fork 占比 = fork_kind=='llm_fork' 的调用数 / 总调用数（埋点上线后才非零）。
+    """
+    empty = {"unit": "ratio", "days": days, "main_loop": None, "side_calls": None}
+    if dbs.trace is None:
+        return empty
+    try:
+        rows = _fetch_rows(
+            dbs.trace,
+            "SELECT extra FROM steps WHERE step_type='llm' "
+            f"AND started_at >= datetime('now','-{int(days)} days')",
+        )
+    except sqlite3.Error:
+        return empty
+
+    buckets: dict[str, dict[str, float]] = {
+        "main_loop": _blank_bucket(), "side_calls": _blank_bucket()}
+
+    for r in rows:
+        try:
+            extra = json.loads(r.get("extra") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not extra or extra.get("cache_hit"):
+            continue  # A8 语义缓存命中不是真实 LLM 调用
+        tu = extra.get("token_usage") or {}
+        inp = int(tu.get("input_tokens") or 0)
+        out = int(tu.get("output_tokens") or 0)
+        if not inp and not out:
+            continue
+        purpose = str(extra.get("purpose") or extra.get("node") or "(none)")
+        b = buckets["main_loop" if _is_main_loop(purpose) else "side_calls"]
+        b["calls"] += 1
+        b["input"] += inp
+        b["cached"] += int(tu.get("cached_tokens") or 0)
+        b["output"] += out
+        b["reasoning"] += int(tu.get("reasoning_tokens") or 0)
+        if extra.get("fork_kind") == "llm_fork":
+            b["fork_calls"] += 1
+
+    return {"unit": "ratio", "days": days,
+            "main_loop": _finish_bucket(buckets["main_loop"]),
+            "side_calls": _finish_bucket(buckets["side_calls"])}
+
+
+def _blank_bucket() -> dict[str, float]:
+    return {"calls": 0.0, "input": 0.0, "cached": 0.0, "output": 0.0,
+            "reasoning": 0.0, "fork_calls": 0.0}
+
+
+def _finish_bucket(b: dict[str, float]) -> dict[str, Any] | None:
+    if not b["calls"]:
+        return None
+    return {
+        "calls": int(b["calls"]),
+        "input_tokens": int(b["input"]),
+        "hit_rate": round(b["cached"] / b["input"], 4) if b["input"] else None,
+        "output_tokens": int(b["output"]),
+        "reasoning_ratio": round(b["reasoning"] / b["output"], 4) if b["output"] else None,
+        "fork_ratio": round(b["fork_calls"] / b["calls"], 4),
     }
 
 

@@ -8,6 +8,7 @@
 （v1 Web 优先，TUI 后续补 Textual 模态）。
 """
 import json
+import re
 import time
 
 # 澄清等待超时哨兵：到点没人作答时由决策通道回传，语义是「按推荐选项继续」；
@@ -153,8 +154,24 @@ async def maybe_clarify(user_input: str, memory, llm, logger, budget=None,
             lines.append(f"- {q['question']}：{a}")
     if not lines:
         return {}
-    enriched = f"{user_input}\n\n【用户补充信息（澄清回答）】\n" + "\n".join(lines)
+    task_spec = None
+    try:
+        from agents.shared.raw_input_ctx import get_raw_input
+        from agents.shared.task_spec import maybe_extract_task_spec
+        task_spec = await maybe_extract_task_spec(
+            get_raw_input(user_input), "\n".join(lines), llm,
+            budget=budget, metadata=metadata, run_config=run_config)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"task_spec 抽取跳过: {e}")
+    from agents.base import get_lean_input, register_lean_input
+    answers_block = "\n\n【用户补充信息（澄清回答）】\n" + "\n".join(lines)
+    enriched = user_input + answers_block
+    # 澄清回答要拼回**完整块**（它接着喂 agent 主链的 state["input"]）；同时登记它的精简孪生，
+    # 否则用户澄清过的那一轮，planner 又会被换回带 [相关记忆片段] 的完整块（见 agents/base.py 取舍登记）。
+    register_lean_input(enriched, get_lean_input(user_input) + answers_block)
     out = {"answers": answers, "enriched_input": enriched}
+    if task_spec:
+        out["task_spec"] = task_spec
     if timed_out:
         out["timed_out"] = True
     return out
@@ -209,6 +226,29 @@ def _exclude_wait(budget, seconds: float) -> None:
         pass
 
 
+def _latest_question(user_input: str) -> str:
+    """取「本轮」用户问题，供澄清指令在 history 之后再次强调。
+
+    Web 侧由 ``raw_input_ctx`` 注入用户原话；CLI/测试没有该 ContextVar 时，
+    从 enrich 块的 ``[用户问题]`` 段回退。只取问题本身，不带画像/记忆。
+
+    ⚠️ 尾部长度的取舍：完整问题已在 system 共享块（前缀缓存命中区），这里只做
+    “最后再提醒一次”的短文本；限 500 字，避免把 clarify 的 miss 段拉长、
+    拉低缓存命中率（实测 clarify 命中 94%~97%，tail 原 miss 仅几百 token）。
+    """
+    from agents.shared.raw_input_ctx import get_raw_input
+    raw = str(get_raw_input("") or "").strip()
+    if raw:
+        return raw[:500]
+    try:
+        from agents.base import get_lean_input
+        text = get_lean_input(user_input) or str(user_input or "")
+    except Exception:
+        text = str(user_input or "")
+    m = re.search(r"\[用户问题\]\s*(.*?)(?=\n\s*\[|\n##|$)", text, re.S)
+    return ((m.group(1) if m else text).strip())[:500]
+
+
 def _generate_questions(llm, memory, logger, user_input, budget, metadata, run_config) -> list:
     from config import Config
     from langchain_core.prompts import ChatPromptTemplate
@@ -220,20 +260,60 @@ def _generate_questions(llm, memory, logger, user_input, budget, metadata, run_c
         history = memory.get_history() if memory else []
     except Exception:
         history = []
+    # 精简输入：澄清只问「不补充就问不清楚」的信息，判据是用户问题 + *history；
+    # [相关记忆片段] 占输入 95% 且 CLARIFY_PROMPT 明确禁止问「背景信息里已有的信息」——
+    # 去掉它反而避免模型拿记忆里的旧结论当已有信息而少问关键问题。
+    from agents.base import get_lean_input
+    shared_input = get_lean_input(user_input)
+    # 2026-10-21 修复：同一会话第二问时，模型把 history 里上一轮的旧任务当成
+    # 当前任务，澄清问题问的是第一问的意图（实测 dialog 492→510：第二问问收盘
+    # 总结，clarify 却问“科技要不要建仓、恒生互联要不要减”）。把本轮问题放到
+    # history 之后的最后一条 human，并在 CLARIFY_PROMPT 里声明“只针对当前问题”。
+    # ⚠️ 走 {current_question} 变量而不是 f-string：用户原话可能含花括号。
+    current_question = _latest_question(user_input)
     try:
         # 注意：CLARIFY_PROMPT 直接交给 LangChain 模板渲染（JSON 花括号已用 {{ }} 转义），
         # 绝不能再手动 .format() —— 双重解析会把 JSON 当嵌套变量（历史 bug：静默跳过澄清）
+        #
+        # ── 前缀对齐：共享块进 messages[0]，调用指令留在 human ──
+        # 与 agents/common.py::classify_input 同形：同一 run 内两者拿到同一份**精简块**
+        # （get_lean_input 去掉 [相关记忆片段]），共享块排第 0 条才能让本次调用命中 classify
+        # 写热的前缀（无 tools → 前缀从 messages[0] 起比）。改前指令压第 0 条 → 共享块恒被
+        # 挡住、0% 命中。共享块仍只出现一次；clarify 只是在 tail 多带一份“本轮问题”
+        # （classify 不重复），system + history 的共同前缀不变。
+        # ⚠️ 共享块必须仍走 {input} 变量：它是用户文本（含花括号），写成字面量会被
+        #    LangChain 当模板占位符解析而报错。
+        # 语义缓存键防护（与上面的前缀对齐同因）：改后本调用**最后一条 human 是固定澄清
+        # 指令**，而网关语义缓存（utils/llm/gateway.py::_last_user_text）取最后一条 human
+        # 当键的 query → 键里丢掉真实问题维度，同 scenario / inject_hash 下不同问题可能撞同
+        # 一个键、把上一个问题的澄清问题回放给新问题。改前 query 含逐分钟的 [背景信息] 时间、
+        # 实际恒 miss，所以这里显式关闭该调用的语义缓存**零损失**（前缀缓存不受影响）。
+        # 透传链与键名已核对：metadata → _build_llm_config 的 config["metadata"]
+        # → gateway._sr_context → cache_policy.build_key 判 sr_cacheable。
+        # ⚠️ 仅走网关（gateway.chat）的模型消费该键；本调用今天用 get_llm()，标记是给迁移后兜底。
+        # 归因：clarify 的 LLM 调用发生在 classifier 步骤内，若不显式标记，
+        # trace 会把它记成第二次“问题分类”（实测 step 4966：21,788 in / 922 out，
+        # 实际上 922 是澄清 JSON）。purpose/label 只进 LangChain config.metadata，
+        # 不进 prompt、不影响缓存；用于缓存命中率与耗时的正确归因。
+        call_metadata = {
+            **(metadata or {}),
+            "sr_cacheable": False,
+            "purpose": "clarify",
+            "label": "澄清反问",
+        }
         result = llm_json_with_retry(
             llm,
             ChatPromptTemplate.from_messages([
-                ("system", CLARIFY_PROMPT),
+                ("system", "{input}"),
                 *history,
-                ("user", "{input}"),
-            ]).format_messages(input=user_input, max_q=max_q),
+                ("user", "【当前用户问题（只针对它澄清）】\n{current_question}\n\n" + CLARIFY_PROMPT),
+            ]).format_messages(
+                input=shared_input, max_q=max_q, current_question=current_question,
+            ),
             logger,
             label="clarify",
             budget=budget,
-            metadata=metadata,
+            metadata=call_metadata,
             run_config=run_config,
             skip_cache_prefix=True,
         )

@@ -305,3 +305,8 @@ def test_select_skills_keeps_web_search_for_us_stock(mock_logger):
         assert result["active_skill"] == "web_search"
 
     asyncio.run(run_case())
+
+@pytest.fixture(autouse=True)
+def _pin_strict_tool_surface(strict_surface):
+    """本文件锁的是 strict 档语义，pin 住形态使其不随全局默认漂移。"""
+    return strict_surface

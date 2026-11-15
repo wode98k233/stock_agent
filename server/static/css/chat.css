@@ -566,6 +566,32 @@
   transform: scale(0.96) translateY(0);
 }
 
+/* 单次对话成本 chip（成本 / 计价 §8②）：一条消息只挂一次，悬浮看按供应商拆分 */
+/* ⚠️ chip 直接 append 在 .message 元素上，而 .message 是 grid（34px 头像列 + 内容列）。
+   不显式定列时它会被自动排到第 2 行第 1 列（34px 宽的头像列）里，文字被挤成竖条；
+   必须占第 2 列 + justify-self: start 收缩到内容宽度，且 nowrap 防换行。
+   （原 margin-left: 44px 是手工缩进，在 grid 下只会把 34px 的盒子右移，救不了宽度。） */
+.cost-chip {
+  grid-column: 2;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--detail-bg);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: default;
+}
+.cost-chip:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
 /* 模板路由预览（输入时 TOP5，TOP1 高亮 + 命中词 tooltip） */
 .template-preview {
   display: flex;
@@ -580,6 +606,24 @@
   color: var(--muted);
   flex-shrink: 0;
 }
+/* 策略会话预览（R1）：与模板 chips 区分，颜色走 variables.css */
+.tp-strategy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid var(--strategy-accent-border);
+  border-radius: 11px;
+  background: var(--strategy-accent-light);
+  color: var(--strategy-accent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+.tp-strategy::before { content: "⚑"; font-size: 11px; }
+.tp-hint { font-size: 12px; color: var(--strategy-accent); opacity: .85; white-space: nowrap; }
 .tp-chip {
   display: inline-flex;
   align-items: center;
@@ -1300,6 +1344,13 @@
 }
 .chat-chart-frag[data-state="loading"] { border-style: dashed; }
 .chat-chart-frag[data-state="error"] { border-style: dashed; color: #dc2626; }
+/* 渲染完成后必须切成块级布局：这个卡片基类是 flex 横排（用来居中「加载中/失败」文字），
+   图表卡片如果沿用横排，标题会被挤成左边一窄列、正文被压扁（2026-11-03 用户实测截图）。 */
+.chat-chart-frag[data-state="ok"] {
+  display: block;
+  color: #1e293b;
+  font-size: 13px;
+}
 .chat-chart-frag .ccf-title { font-weight: 700; color: #1e293b; font-size: 13px; margin-bottom: 6px; }
 .chat-chart-frag .ccf-body { width: 100%; height: 300px; }
 
@@ -1330,6 +1381,49 @@
 .chat-chart-frag .tech-panel-tabs { margin-bottom: 8px; }
 .chat-chart-frag .tech-panel-body { width: 100%; height: 420px; }
 .chat-chart-frag .tech-panel-foot { margin-top: 8px; font-size: 11px; color: #94a3b8; line-height: 1.5; }
+
+/* 图板工具栏：周期 / 技术面图层 / 信号布局（对齐独立 K 线弹窗的能力） */
+.chat-chart-frag .tech-panel-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  margin: 0 0 8px;
+}
+.chat-chart-frag .tech-panel-toolbar .tpt-group {
+  display: inline-flex; gap: 2px;
+  border: 1px solid #e2e8f0; border-radius: 8px; padding: 2px; background: #fff;
+}
+.chat-chart-frag .tech-panel-toolbar .tpt-btn {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 12px; color: #475569; padding: 3px 9px; border-radius: 6px;
+  line-height: 1.4;
+}
+.chat-chart-frag .tech-panel-toolbar .tpt-btn:hover { background: #f1f5f9; }
+.chat-chart-frag .tech-panel-toolbar .tpt-btn.active {
+  background: #176b5b; color: #fff;
+}
+.chat-chart-frag .tech-panel-toolbar .tpt-select {
+  font-size: 12px; color: #334155; padding: 4px 6px;
+  border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
+  max-width: 190px;
+}
+
+/* 技术指标读数条：把已加载的指标压成一行结论（个股/指数通用） */
+.chat-chart-frag .tech-panel-readout {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  margin: 0 0 6px; padding: 6px 10px;
+  background: #f8fafc; border: 1px solid #eef2f7; border-radius: 8px;
+  font-size: 12px; color: #475569; line-height: 1.6;
+}
+.chat-chart-frag .tech-panel-readout[hidden] { display: none; }
+.chat-chart-frag .tech-panel-readout .tpr-item { white-space: nowrap; }
+.chat-chart-frag .tech-panel-readout .tpr-item b {
+  font-weight: 600; color: #1e293b; margin-right: 4px;
+}
+.chat-chart-frag .tech-panel-readout .tpr-up { color: #dc2626; }    /* A股口径：红涨 */
+.chat-chart-frag .tech-panel-readout .tpr-down { color: #176b5b; }  /* 绿跌 */
+.chat-chart-frag .tech-panel-readout .tpr-muted { color: #64748b; }
+.chat-chart-frag .tech-panel-readout .tpr-sum {
+  flex-basis: 100%; padding-top: 2px; color: #334155; font-weight: 500;
+}
 
 /* 策略扫描行 */
 .chat-chart-frag .tech-panel-scan {
@@ -1487,3 +1581,34 @@ mark.msg-src-mark {
   padding: 0 2px;
   border-radius: 3px;
 }
+
+/* ── 深度报告卡片（对话内） ── */
+.dr-chat-card { border:1px solid var(--border-main); border-left:3px solid var(--brand);
+  border-radius:10px; background:#fff; padding:12px 14px; margin:8px 0; }
+.dr-chat-card .dr-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dr-chat-card .dr-title { font-weight:700; font-size:14px; }
+.dr-chat-card .dr-meta { font-size:12px; color:var(--muted); margin-left:auto; }
+.dr-chat-card .dr-badge { font-size:11px; padding:2px 8px; border-radius:999px;
+  background:var(--brand-light); color:var(--brand-strong); }
+.dr-chat-card .dr-badge.done { background:var(--success-bg); color:var(--success); }
+.dr-chat-card .dr-badge.warn { background:#fff7e6; color:#9a6700; }
+.dr-chat-card .dr-badge.err { background:var(--danger-bg); color:var(--danger); }
+.dr-chat-card .dr-badge.run { background:var(--active); color:var(--brand); }
+.dr-chat-card .dr-actions { display:flex; align-items:center; gap:8px; margin-top:10px; }
+.dr-chat-card .dr-btn { border:1px solid var(--border-main); background:#fff; color:var(--text);
+  border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; text-decoration:none; }
+.dr-chat-card .dr-btn.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+.dr-chat-card .dr-hint { font-size:11px; color:var(--muted); }
+.dr-chat-card .dr-hint.err { color:var(--danger); }
+
+/* ── 图片输入（v1：图片转文字进对话） ─────────────────────────── */
+.composer-image-btn { flex: 0 0 auto; width: 34px; height: 34px; border: 1px solid var(--border, #e5e7eb); border-radius: 8px; background: #fff; color: var(--muted, #6b7280); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; margin-right: 6px; align-self: flex-end; }
+.composer-image-btn:hover { color: var(--brand, #176b5b); border-color: var(--brand, #176b5b); }
+.composer-image-preview { display: flex; gap: 8px; padding: 6px 10px 0; flex-wrap: wrap; }
+.composer-image-preview[hidden] { display: none; }
+.composer-image-item { position: relative; width: 64px; height: 64px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border, #e5e7eb); }
+.composer-image-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.composer-image-remove { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border: 0; border-radius: 50%; background: rgba(15, 23, 42, .6); color: #fff; font-size: 12px; line-height: 18px; padding: 0; cursor: pointer; }
+.msg-images { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-images img { max-width: 220px; max-height: 160px; border-radius: 8px; border: 1px solid var(--border, #e5e7eb); display: block; }
+.msg-images img.msg-image-expired { width: 120px; height: 60px; background: #f1f5f9; }

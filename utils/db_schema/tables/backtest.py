@@ -1,4 +1,4 @@
-"""backtest.db 表定义（12 表 + 索引）。
+"""backtest.db 表定义（14 表 + 索引）。
 
 DDL 逐字复制自 utils/cache/backtest_db.py::init_backtest_tables。
 内置策略种子注册（backtest_db._register_builtin_strategies）由 registry 的 seeds 承接。
@@ -24,11 +24,14 @@ TABLES = [
         retry_count INTEGER DEFAULT 0,
         log_text TEXT,
         source TEXT,
+        origin TEXT DEFAULT 'manual',
+        ref_id TEXT DEFAULT '',
         duration_seconds REAL,
         updated_at TEXT
     )""",
              indexes=["CREATE INDEX IF NOT EXISTS idx_data_tasks_status ON data_tasks(status)",
-                      "CREATE INDEX IF NOT EXISTS idx_data_tasks_created ON data_tasks(created_at DESC)"]),
+                      "CREATE INDEX IF NOT EXISTS idx_data_tasks_created ON data_tasks(created_at DESC)",
+                      "CREATE INDEX IF NOT EXISTS idx_data_tasks_ref ON data_tasks(ref_id)"]),
 
     TableDef(name="strategies", ddl="""CREATE TABLE IF NOT EXISTS strategies (
         strategy_id TEXT PRIMARY KEY,
@@ -42,6 +45,7 @@ TABLES = [
         engine_version TEXT DEFAULT 'v1.0',
         author TEXT,
         tags TEXT,
+        strategy_hash TEXT DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT
     )"""),
@@ -77,6 +81,14 @@ TABLES = [
         duration_seconds REAL,
         error_message TEXT,
         engine_version TEXT DEFAULT 'v1.0',
+        origin TEXT DEFAULT 'manual',
+        ref_id TEXT DEFAULT '',
+        entry_timing TEXT DEFAULT 'next_open',
+        exit_timing TEXT DEFAULT '',
+        -- P0 撮合保真：涨跌停拦截口径快照。⚠️ 刻意不给 DEFAULT——旧行必须是 NULL
+        -- （= 口径未记录），给了 DEFAULT 会把历史 run 伪装成新口径、新旧不可区分。
+        -- 新 run 由 create_backtest_run 显式写 'enforce'（engine_version 同步升 v1.1）。
+        price_limit_mode TEXT,
         updated_at TEXT,
         FOREIGN KEY (strategy_id) REFERENCES strategies(strategy_id)
     )""",
@@ -109,9 +121,23 @@ TABLES = [
         max_consecutive_losses INTEGER,
         final_equity REAL,
         peak_equity REAL,
+        health TEXT DEFAULT 'ok',
+        health_detail TEXT DEFAULT '',
+        data_bars INTEGER DEFAULT 0,
+        expected_bars INTEGER DEFAULT 0,
+        coverage_pct REAL DEFAULT 0,
+        gaps_json TEXT DEFAULT '[]',
+        trade_sample_ok INTEGER DEFAULT 0,
         equity_curve_json TEXT,
         drawdown_curve_json TEXT,
         monthly_returns_json TEXT,
+        -- P1 统计严谨（2026-10-15）：日频统计（PSR/DSR 输入）+ 分年拆解 + 多重检验校正
+        sr_daily REAL,
+        skewness REAL,
+        kurtosis REAL,
+        yearly_stats_json TEXT,
+        deflated_sharpe REAL,
+        trial_count INTEGER,
         engine_version TEXT DEFAULT 'v1.0',
         created_at TEXT NOT NULL,
         FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
@@ -254,6 +280,21 @@ TABLES = [
         total_iters INTEGER DEFAULT 0,
         source TEXT NOT NULL DEFAULT 'panel',
         dialog_uuid TEXT,
+        -- C 批：策略研发自建的 agent_trace run_id。
+        -- 之前策略轮不进 LangGraph 图 → 没有 trace run → 研发期 8 轮 LLM 调用在
+        -- 月历/token 统计里凭空消失，只能靠「猜最近一条 run」兜底（分库跨月回退
+        -- 会命中文档性陈旧 running 行 → 过程流显示上周的周报）。显式落库即根除。
+        trace_run_id TEXT DEFAULT '',
+        -- 年化/指标口径版本：2026-10-18 起年化由「rnorm100（按 bar 数 252/年）」
+        -- 改为「自然日 CAGR + 非日线判空」。不标记的话，同一策略在口径切换前后的
+        -- 年化不可比，用户会以为结论变了。老记录为空串 = 旧口径。
+        engine_version TEXT NOT NULL DEFAULT '',
+        -- 买卖**各自**的成交口径（之前只在 strategy_session 里存，面板/技能起的任务
+        -- 落不了库 → 续跑与结果卡只能靠猜）。三档枚举同 strategy_session：
+        -- next_open 次一 bar 开盘 / same_close 同 bar 收盘（尾盘）/ next_close 次一 bar 收盘。
+        -- exit_timing 空串 = 跟随 entry_timing（最常见默认，不写死成 next_open）
+        entry_timing TEXT NOT NULL DEFAULT 'next_open',
+        exit_timing TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         completed_at TEXT
     )""",
@@ -279,4 +320,84 @@ TABLES = [
     )""",
              indexes=["CREATE INDEX IF NOT EXISTS idx_iter_run ON strategy_iter(run_id, round)",
                       "CREATE INDEX IF NOT EXISTS idx_iter_hash ON strategy_iter(strategy_hash)"]),
+
+    # strategy_session（对话式策略研发会话，Plan 2）
+    # 字段口径：
+    # - status：pending_confirm（槽位已按推荐值补全，一行回测都没跑）/ active（用户已确认，允许创建 strategy_run）
+    #           / archived（会话结束）
+    # - opened_by：explicit（前端显式入口）/ rule（白盒词表命中）/ llm（LLM 兜底）
+    # - entry_timing / exit_timing：买/卖**各自**的成交口径。三档枚举：
+    #   next_open（次一 bar 开盘）/ same_close（同 bar 收盘，即「尾盘」）/ next_close（次一 bar 收盘）。
+    #   两者分开是「尾盘买入、次日卖出」这类需求能被真实表达的前提
+    # - slots_json：{"universe": {"value": "...", "source": "user|recommended|default"}, ...}
+    #               记住每个槽位是用户给的还是系统补的（结果卡要如实标注）
+    TableDef(name="strategy_session", ddl="""CREATE TABLE IF NOT EXISTS strategy_session (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_uuid TEXT UNIQUE NOT NULL,
+        dialog_uuid TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending_confirm',
+        src_text TEXT DEFAULT '',
+        idea TEXT DEFAULT '',
+        universe TEXT DEFAULT '',
+        period_start TEXT DEFAULT '',
+        period_end TEXT DEFAULT '',
+        entry_text TEXT DEFAULT '',
+        exit_text TEXT DEFAULT '',
+        entry_timing TEXT DEFAULT 'next_open',
+        exit_timing TEXT DEFAULT '',
+        slots_json TEXT DEFAULT '{}',
+        plan_json TEXT DEFAULT '{}',
+        opened_by TEXT DEFAULT '',
+        intent_confidence REAL DEFAULT 0,
+        intent_signals TEXT DEFAULT '{}',
+        run_uuid TEXT DEFAULT '',
+        turn_count INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+             indexes=["CREATE INDEX IF NOT EXISTS idx_ss_dialog ON strategy_session(dialog_uuid, status, updated_at DESC)",
+                      "CREATE INDEX IF NOT EXISTS idx_ss_status ON strategy_session(status)"]),
+
+    # backtest_eval（样本内外评判，Plan 3 任务 2）
+    # verdict 取值：ok（样本内外一致）/ overfit_suspect（IS/OOS 夏普比 > 1.3）
+    #              / insufficient_sample（两段中较少的那段成交 < 10 笔）
+    #              / oos_negative（OOS 夏普 < 0）/ failed（评判本身失败，错误文本进 error_message）
+    # ⚠️ 与 backtest_results.health 是两件事：health 看数据够不够，verdict 看结论经不经得起样本外检验
+    TableDef(name="backtest_eval", ddl="""CREATE TABLE IF NOT EXISTS backtest_eval (
+        run_id TEXT PRIMARY KEY,
+        is_metrics_json TEXT,
+        oos_metrics_json TEXT,
+        split_date TEXT,
+        is_sharpe REAL,
+        oos_sharpe REAL,
+        sharpe_ratio_io REAL,
+        overfit_flag INTEGER NOT NULL DEFAULT 0,
+        verdict TEXT NOT NULL DEFAULT '',
+        eval_run_ids_json TEXT DEFAULT '[]',
+        error_message TEXT DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )""",
+             indexes=["CREATE INDEX IF NOT EXISTS idx_bt_eval_verdict ON backtest_eval(verdict, overfit_flag)"]),
+
+    # ── 因子评估报告（工作台 v3 · F1 持久化）─────────────────────────
+    # payload（3~12MB JSON）不进库，落 output/factor_reports/<uuid>.json；
+    # 库里只存摘要（kpi_json）与路径，列表页只读摘要，详情页按需读文件。
+    # 缓存版结果（_CACHE TTL 30min 重启即丢）的教训：评估结果必须可回看。
+    TableDef(name="factor_report", ddl="""CREATE TABLE IF NOT EXISTS factor_report (
+        report_uuid TEXT PRIMARY KEY,
+        title TEXT,
+        index_code TEXT NOT NULL,
+        start_date TEXT,
+        end_date TEXT,
+        params_json TEXT NOT NULL,
+        kpi_json TEXT,
+        payload_path TEXT,
+        html_path TEXT,
+        n_factors INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'done',
+        created_at TEXT NOT NULL
+    )""",
+             indexes=["CREATE INDEX IF NOT EXISTS idx_factor_report_created "
+                      "ON factor_report(created_at DESC)"]),
 ]

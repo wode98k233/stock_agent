@@ -43,7 +43,9 @@ class StatusCommand(CommandHandler):
         # 最近日志
         recent_logs = _get_recent_logs(3)
 
-        if "json" in args or "--json" in str(args):
+        # --json 被 parser 收进 flags（cli/parser.py：`--key value` 进 flags，裸 token 进 args），
+        # 只查 args 会静默忽略该标志、退回人读表格（2026-11-15 修）。
+        if "json" in (flags or {}) or "json" in args:
             data = {
                 "mode": mode,
                 "model": model,

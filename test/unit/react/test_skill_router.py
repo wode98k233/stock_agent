@@ -69,6 +69,16 @@ def _ok_msg(call_id="c0"):
 
 
 def _state(**kw):
+    """默认表示**非首轮**（``iteration_count=1``）。
+
+    ⚠️ 默认**不要**设 ``iteration_count``：``make_route_after_tools`` 会用
+    ``it % REACT_SKILL_RESELECT_EVERY == 0`` 判周期性换批（默认 every=1），
+    设 1 会让它误判成 reselect，污染无关用例的分支。
+
+    需要走 router 的 LLM 路径的用例（Ver验的是"非首轮"行为）请**各自显式**传
+    ``iteration_count=1``：``SubGoalRouterNode`` 首轮会被跳过（PRD-A11 FR-7.1），
+    首轮行为由 ``test_router_skips_llm_on_first_round`` 单独覆盖。
+    """
     base = {"user_input": "分析茅台", "active_skill": "a", "candidate_skills": ["a", "b"],
             "sub_goals": [], "skill_gap_count": 0, "messages": []}
     base.update(kw)
@@ -92,7 +102,7 @@ def test_router_switches_via_llm(monkeypatch):
                              logger=logging.getLogger("t"))
     monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry",
                         lambda *a, **k: {"active_skill": "b", "sub_goals": ["拿技术指标"]})
-    out = asyncio.run(node(_state()))
+    out = asyncio.run(node(_state(iteration_count=1)))
     assert out["active_skill"] == "b"
     assert out["sub_goals"] == ["拿技术指标"]
     assert [t.name for t in ref] == ["b_tool"]
@@ -103,7 +113,7 @@ def test_router_invalid_output_keeps_active(monkeypatch):
     node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
                              logger=logging.getLogger("t"))
     monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry", lambda *a, **k: None)
-    out = asyncio.run(node(_state()))
+    out = asyncio.run(node(_state(iteration_count=1)))
     assert out["active_skill"] == "a"
 
 
@@ -309,7 +319,7 @@ def test_router_catalog_fallback_adds_skill_outside_pool(monkeypatch):
     ref = [_Tool("a_tool")]
     node = SubGoalRouterNode(llm=object(), skill_registry=_RegWithC(), tools_ref=ref,
                              logger=logging.getLogger("t"), allow_catalog_fallback=True)
-    state = _state(active_skill="a", candidate_skills=["a", "b"], loaded_skills=["a"])
+    state = _state(active_skill="a", candidate_skills=["a", "b"], loaded_skills=["a"], iteration_count=1)
     out = asyncio.run(node(state))
 
     assert "c" in out["candidate_skills"]          # 补入候选池
@@ -326,7 +336,86 @@ def test_router_rejects_skill_outside_catalog_without_fallback(monkeypatch):
     ref = [_Tool("a_tool")]
     node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
                              logger=logging.getLogger("t"))
-    state = _state(active_skill="a", candidate_skills=["a", "b"], loaded_skills=["a"])
+    state = _state(active_skill="a", candidate_skills=["a", "b"], loaded_skills=["a"], iteration_count=1)
     out = asyncio.run(node(state))
     assert out["active_skill"] == "a"
     assert "ghost" not in out["candidate_skills"]
+
+@pytest.fixture(autouse=True)
+def _pin_strict_tool_surface(strict_surface):
+    """本文件锁的是 strict 档语义，pin 住形态使其不随全局默认漂移。"""
+    return strict_surface
+
+
+def test_router_skips_llm_on_first_round(monkeypatch):
+    """首轮（无工具结果 / iteration_count=0）不调用 LLM，直接用 select_skills 的批次。
+
+    省掉的是一次 in≈5,000~15,000 tok、命中率 <5% 的调用 —— 这是纯结构收益，
+    不依赖任何缓存命中。
+    """
+    ref = []
+    node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
+                             logger=logging.getLogger("t"))
+    monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("首轮不应调用 LLM")))
+    st = _state(iteration_count=0, loaded_skills=["a", "b"],
+                candidate_skills=["a", "b"], messages=[])
+    out = asyncio.run(node(st))
+    assert out["active_skill"] == "a"          # 保持 select_skills 的排序
+    # ⚠️ 本文件 autouse fixture _batch_one 把 BATCH_SIZE 钉成 1，故批次裁到主技能；
+    # 生产默认 5，select_skills 给的批次（≤5）不会被裁。
+    assert out["loaded_skills"] == ["a"]
+
+
+def test_router_does_not_skip_on_skill_gap(monkeypatch):
+    """工具连续失败后的兜底重选**必须**调用 LLM（那是 router 的主职）。"""
+    ref = []
+    node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
+                             logger=logging.getLogger("t"))
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return {"active_skill": "b", "sub_goals": [], "loaded_skills": ["b"]}
+
+    monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry", fake)
+    st = _state(iteration_count=0, skill_gap_count=1, loaded_skills=["a"],
+                candidate_skills=["a", "b"], messages=[])
+    out = asyncio.run(node(st))
+    assert called["n"] == 1, "skill_gap 兜底重选被误跳过"
+    assert out["active_skill"] == "b"
+
+
+def test_router_does_not_skip_when_tool_results_present(monkeypatch):
+    """已有工具结果（后续轮次）不跳 —— router 此时才有信息可依据。"""
+    ref = []
+    node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
+                             logger=logging.getLogger("t"))
+    called = {"n": 0}
+
+    def fake(*a, **k):
+        called["n"] += 1
+        return {"active_skill": "b", "sub_goals": [], "loaded_skills": ["b"]}
+
+    monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry", fake)
+    st = _state(iteration_count=0, loaded_skills=["a"], candidate_skills=["a", "b"],
+                messages=[_ok_msg("call_1")])
+    out = asyncio.run(node(st))
+    assert called["n"] == 1, "有工具结果时不应跳过"
+    assert out["active_skill"] == "b"
+
+
+def test_router_does_not_skip_when_sub_goals_exist(monkeypatch):
+    """已有子目标（checkpoint 恢复等）不跳。"""
+    ref = []
+    node = SubGoalRouterNode(llm=object(), skill_registry=_Registry(), tools_ref=ref,
+                             logger=logging.getLogger("t"))
+    called = {"n": 0}
+    monkeypatch.setattr("agents.react.skill_nodes.llm_json_with_retry",
+                        lambda *a, **k: (called.__setitem__("n", called["n"] + 1)
+                                         or {"active_skill": "a", "sub_goals": ["x"],
+                                             "loaded_skills": ["a"]}))
+    st = _state(iteration_count=0, sub_goals=["已有目标"], loaded_skills=["a"],
+                candidate_skills=["a", "b"])
+    asyncio.run(node(st))
+    assert called["n"] == 1

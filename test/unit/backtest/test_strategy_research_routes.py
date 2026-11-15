@@ -169,6 +169,56 @@ class TestStartRunValidation:
             start_strategy_run('abc', '600519')
 
 
+class TestIndexUniverse:
+    """指数不能当单标的（真机事故 2026-10-18：000300 被当股票，只拿到 24 根月线）。"""
+
+    @staticmethod
+    def _make_index_db(tmp_path, codes):
+        import sqlite3
+        db = str(tmp_path / 'market_data.db')
+        conn = sqlite3.connect(db)
+        conn.execute('CREATE TABLE index_info (code TEXT PRIMARY KEY, name TEXT)')
+        conn.executemany('INSERT INTO index_info(code, name) VALUES (?, ?)',
+                         [(c, c) for c in codes])
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_index_code_judged_by_index_info_not_prefix(self, tmp_path):
+        """000001 既可能是上证指数也可能是平安银行 —— 只能查表，不能按前缀猜。"""
+        from config import Config
+        from server.routes.strategy_research import _is_index_code
+
+        db = self._make_index_db(tmp_path, ['000300', '000905', '000001'])
+        with patch.object(Config, 'get_market_data_db_path', return_value=db):
+            assert _is_index_code('000300') is True
+            assert _is_index_code('000905') is True
+            assert _is_index_code('000001') is True     # 在本库里登记为指数
+            assert _is_index_code('600519') is False
+
+    def test_unknown_table_fails_open(self, tmp_path):
+        """元数据表缺失时放行（由研发前的数据闸门兜底），不能把所有任务拦死。"""
+        import sqlite3
+        from config import Config
+        from server.routes.strategy_research import _is_index_code
+
+        db = str(tmp_path / 'empty.db')
+        sqlite3.connect(db).close()
+        with patch.object(Config, 'get_market_data_db_path', return_value=db):
+            assert _is_index_code('000300') is False
+
+    def test_index_universe_rejected_with_actionable_message(self, isolated_dbs, monkeypatch):
+        from server.routes import strategy_research as mod
+        monkeypatch.setattr(mod, '_is_index_code', lambda code: True)
+        with pytest.raises(ValueError) as ei:
+            mod.start_strategy_run('一个正常的想法描述', '000300')
+        msg = str(ei.value)
+        assert '000300 是指数' in msg
+        assert '不能作为单标的交易' in msg
+        assert '600519' in msg and 'ETF' in msg
+        assert '基准对比' in msg
+
+
 # ============================================================
 # SSE events 端点回归（QA 对抗脚本 A3-g 节：漏 import asyncio 修复固化）
 # ============================================================
@@ -256,3 +306,137 @@ class TestSseEvents:
         assert 'event: final' in text
         assert 'db_fallback' in text
         assert 'converged' in text
+
+
+class TestLegacyAnnualHidden:
+    """旧口径年化不得从 API 漏出去（轮次表/详情页直接读 metrics JSON）。"""
+
+    def test_legacy_metrics_cagr_nulled(self):
+        from server.routes.strategy_research import _normalize_iters_annual
+
+        iters = [
+            {'is_metrics': {'cagr': 3.83, 'sharpe': 5.0},
+             'oos_metrics': {'cagr': 0.53, 'sharpe': 4.7}},
+            {'is_metrics': {'cagr': 0.12, 'sharpe': 1.0,
+                            'annual_method': 'calendar_days'},
+             'oos_metrics': {'cagr': 0.09, 'annual_method': 'calendar_days'}},
+        ]
+        _normalize_iters_annual(iters)
+        assert iters[0]['is_metrics']['cagr'] is None      # 旧口径：隐藏
+        assert iters[0]['oos_metrics']['cagr'] is None
+        assert iters[1]['is_metrics']['cagr'] == 0.12      # 新口径：保留
+        assert iters[1]['oos_metrics']['cagr'] == 0.09
+
+
+# ============================================================
+# 净值曲线频率标注（2026-10-18：000300 月线 run 的曲线只有 16+8 个点，
+# 前端不标注会被读成「曲线没渲染全」）
+# ============================================================
+
+
+class TestCurveFrequency:
+
+    def test_daily_curve_is_daily(self):
+        from server.routes.strategy_research import _curve_freq
+        f = _curve_freq([{'date': '2024-01-02'}, {'date': '2024-01-03'},
+                         {'date': '2024-01-04'}])
+        assert f['bars'] == 3 and f['is_daily'] is True and f['gap_days'] == 1.0
+
+    def test_month_end_curve_not_daily(self):
+        from server.routes.strategy_research import _curve_freq
+        f = _curve_freq([{'date': '2024-01-31'}, {'date': '2024-02-29'},
+                         {'date': '2024-03-29'}])
+        assert f['bars'] == 3 and f['is_daily'] is False and f['gap_days'] > 5
+
+    def test_empty_curve_defaults_to_daily(self):
+        from server.routes.strategy_research import _curve_freq
+        f = _curve_freq([])
+        assert f == {'bars': 0, 'gap_days': None, 'is_daily': True}
+
+    def test_bad_date_strings_tolerated(self):
+        from server.routes.strategy_research import _curve_freq
+        f = _curve_freq([{'date': None}, {'date': 'oops'}, {'date': '2024-01-02'}])
+        assert f['is_daily'] is True
+
+
+class TestCurvePayloadDegraded:
+
+    @staticmethod
+    def _patch_iter(monkeypatch, curve):
+        import server.routes.strategy_research as mod
+        monkeypatch.setattr(mod, 'get_strategy_iters', lambda _u: [
+            {'round': 1, 'compile_ok': 1, 'strategy_hash': 'abc'}])
+        monkeypatch.setattr('utils.cache.backtest_db.get_backtest_result',
+                            lambda rid: {'equity_curve_json': json.dumps(curve),
+                                         'drawdown_curve_json': '[]',
+                                         'health': 'ok', 'trade_count': 2})
+
+    def test_monthly_curve_marked_degraded(self, monkeypatch):
+        """月线快照必须在 payload 上标 degraded，并给出可读原因。"""
+        import server.routes.strategy_research as mod
+        curve = [{'date': d, 'equity': 1000000} for d in
+                 ('2024-01-31', '2024-02-29', '2024-03-29')]
+        self._patch_iter(monkeypatch, curve)
+        p = mod._iter_curve_payload('SR-X', 1)
+        assert p['exists'] is True
+        assert p['degraded'] is True
+        assert p['is']['freq']['is_daily'] is False
+        assert '不是日线' in p['degraded_reason']
+        assert '16' not in p['degraded_reason'] or True   # 文案随 bar 数变化，不做硬断言
+
+    def test_daily_curve_not_degraded(self, monkeypatch):
+        import server.routes.strategy_research as mod
+        curve = [{'date': d, 'equity': 1000000} for d in
+                 ('2024-01-02', '2024-01-03', '2024-01-04')]
+        self._patch_iter(monkeypatch, curve)
+        p = mod._iter_curve_payload('SR-X', 1)
+        assert p['exists'] is True
+        assert p['degraded'] is False
+        assert p['degraded_reason'] == ''
+        assert p['is']['freq']['is_daily'] is True
+
+
+# ============================================================
+# 因子先验摘要（原型 ④ 顶部 banner）
+# ============================================================
+
+
+class TestFactorPriorSummary:
+
+    def test_missing_prior_with_source_reports_script(self, monkeypatch):
+        import backtest.factor_prior as fp
+        import server.routes.strategy_research as mod
+        monkeypatch.setattr(fp, 'load_prior', lambda path=None: None)
+        monkeypatch.setattr(fp, 'has_prior_source', lambda: True)
+        out = mod._factor_prior_summary()
+        assert out['exists'] is False
+        assert 'build_factor_prior' in out['missing_reason']
+
+    def test_no_source_no_reason(self, monkeypatch):
+        import backtest.factor_prior as fp
+        import server.routes.strategy_research as mod
+        monkeypatch.setattr(fp, 'load_prior', lambda path=None: None)
+        monkeypatch.setattr(fp, 'has_prior_source', lambda: False)
+        out = mod._factor_prior_summary()
+        assert out['exists'] is False and out['missing_reason'] == ''
+
+    def test_present_prior_maps_names(self, monkeypatch):
+        import backtest.factor_prior as fp
+        import server.routes.strategy_research as mod
+        prior = {
+            'written_at': '2026-10-17 16:00:00',
+            'source': {'pools': ['000300'], 'cross_pool': True},
+            'summary': {'robust': ['dmi_adx'], 'fragile': ['rsi_24'],
+                        'reverse': ['atr_pct'], 'n': 36, 'caveat': '弱先验'},
+            'factors': {'dmi_adx': {'name': 'ADX(14)'},
+                        'rsi_24': {'name': 'RSI24'},
+                        'atr_pct': {'name': 'ATR 占比'}},
+        }
+        monkeypatch.setattr(fp, 'load_prior', lambda path=None: prior)
+        out = mod._factor_prior_summary()
+        assert out['exists'] is True
+        assert out['robust'] == ['ADX(14)']
+        assert out['fragile'] == ['RSI24']
+        assert out['reverse'] == ['ATR 占比']
+        assert out['cross_pool'] is True and out['n'] == 36
+

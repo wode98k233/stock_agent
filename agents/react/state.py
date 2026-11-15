@@ -27,6 +27,7 @@ class ReactAgentState(TypedDict):
     classify_response: Optional[str]
     selected_template_id: str
     selected_template: Optional[dict]
+    task_spec: Optional[dict]  # 澄清后固化的任务结构（无则缺省）
     selected_skills: list[str]
     all_tool_names: list[str]  # 可序列化：只存工具名，实际对象通过闭包传递
     limit_reason: Optional[str]

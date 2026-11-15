@@ -178,6 +178,24 @@ class TestSnapshot:
         assert [h["trade_date"] for h in hist] == ["2026-09-15", "2026-09-17"]
         assert hist[-1]["scores"]["premium"] == 0
 
+    def test_history_carries_per_factor_values_and_meta(self, store):
+        """逐因子读数/分位/单位/状态必须随历史返回。
+
+        只给分数不够解释「总分为什么涨」：同样 +1 分，读数从 1.58% 到 1.60%
+        与从 2.9% 到 1.5% 的含义完全不同。缺字段时给 None/空串而不是省略键，
+        前端才能稳定地按 key 取值（省略会让 `values[k]` 变成 undefined）。
+        """
+        store.save_snapshot(_result(total=3), trade_date="2026-09-17")
+        hist = store.get_history("t_env")
+        point = hist[-1]
+        assert point["values"]["premium"] == 2.59
+        assert point["values"]["cn10_y"] == 1.6862
+        assert point["units"]["premium"] == "pp"
+        assert point["statuses"]["premium"] == "中性"
+        # 未采集分位：键在、值为 None（数据缺失 ≠ 0）
+        assert point["pct_ranks"]["premium"] is None
+        assert point["data_asof"] == "2026-09-17"
+
     def test_history_limit_keeps_newest(self, store):
         for d in ("2026-09-13", "2026-09-14", "2026-09-15"):
             store.save_snapshot(_result(total=int(d[-2:])), trade_date=d)

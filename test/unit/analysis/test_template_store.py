@@ -845,8 +845,39 @@ def test_quick_lookup_does_not_hijack_analysis_requests():
     assert select_template_for_input("机器人题材炒作到什么阶段了") == "theme_trading"
     assert select_template_for_input("今天大盘怎么样") == "market_daily"
     assert select_template_for_input(_ACCIDENT_QUERY) == "market_daily"
-    # 没有极简词就不该命中速览：「给我今世缘最新的股价」
-    assert select_template_for_input("给我今世缘最新的股价") != "quick_lookup"
+    # 需求变更（2026-10-15）：自然说法（无显式「只需要」声明）纳入速览 ——
+    # 「给我今世缘最新的股价」原为窄口径时期的保守反例，现按用户要求走
+    # quick_lookup（简单问题不再被兜底 standard 扩写）。反向防线不放松：
+    # 带分析/归因/决策词的同类句仍不得命中（见 test_quick_lookup_natural_routing）。
+    assert select_template_for_input("给我今世缘最新的股价") == "quick_lookup"
+    assert select_template_for_input("帮我分析下今世缘最新股价走势") != "quick_lookup"
+
+
+def test_quick_lookup_natural_routing():
+    """2026-10-15：自然说法极简取数（宽动作词 + 窄取数词 + 强否决词）。
+
+    修复背景：用户「给我获取xxx的股价和一条新闻」实测误路由 ——
+    hot_news（凭单个「新闻」16 分）/ standard（0 分兜底 → 报告过短触发扩写）/
+    ipo_analysis（「最新股价」子串含「新股」误中 24 分）。
+    """
+    from agents.analysis.template_store import select_template_for_input
+    # 正例：自然说法直达速览（不扩写、400 字内）
+    for q in (
+        "给我获取平安银行的股价和一条新闻",
+        "获取贵州茅台今天的股价",
+        "中际旭创最新股价和一条新闻",
+        "茅台现在多少钱",
+        "看下隆基绿能的行情",
+    ):
+        assert select_template_for_input(q) == "quick_lookup", q
+    # 否决词矩阵：归因/分析/决策类不得被抢
+    assert select_template_for_input("宁德时代股价为什么跌") != "quick_lookup"
+    assert select_template_for_input("获取茅台的深度分析") != "quick_lookup"
+    assert select_template_for_input("帮我选几只股价低的股票") != "quick_lookup"
+    assert select_template_for_input("贵州茅台股价走势解读") != "quick_lookup"
+    # 新闻综述类仍归 hot_news（窄取数词用「条新闻」，防抢「财经新闻」）
+    assert select_template_for_input("看看今天的财经新闻") == "hot_news"
+    assert select_template_for_input("今天有什么新闻") == "hot_news"
 
 
 def test_quick_lookup_boost_applied_in_every_scoring_pass():

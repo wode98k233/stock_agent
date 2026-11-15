@@ -6,8 +6,6 @@ import pytest
 
 from server import market_dashboard_service as svc
 
-_orig_update_prev_amount = svc._update_prev_amount
-
 
 def _breadth_payload():
     return {
@@ -33,7 +31,6 @@ def _reset_state(monkeypatch):
         "enabled": True, "alert_limit": 30, "news_limit": 20, "refresh_s": 10,
     })
     monkeypatch.setattr(svc, "_fetch_breadth", lambda: _breadth_payload())
-    monkeypatch.setattr(svc, "_update_prev_amount", lambda amount: 1.71e12)
     yield
 
 
@@ -242,32 +239,14 @@ class TestComputeBreadth:
 
 
 class TestPrevAmount:
-    def test_rollover_moves_prev(self, monkeypatch):
-        monkeypatch.setattr(svc, "_update_prev_amount", _orig_update_prev_amount)
-        store = {}
+    """上一交易日成交额由 tools/market_snapshot 统一计算（面板仅透传）。
 
-        def fake_get(table, key):
-            return store.get(f"{table}:{key}")
+    滚动/校验逻辑的测试见 test/unit/tools/test_market_snapshot.py。
+    """
 
-        def fake_set(table, key, data, ttl):
-            store[f"{table}:{key}"] = data
-
-        monkeypatch.setattr("utils.cache.core._get", fake_get)
-        monkeypatch.setattr("utils.cache.core._set", fake_set)
-
-        # 第一天：无 last → prev None
-        assert svc._update_prev_amount(1.0) is None
-        assert store["market_dashboard:last_amount"]["amount"] == 1.0
-
-        # 同日第二次：prev 仍 None
-        assert svc._update_prev_amount(1.5) is None
-
-        # 模拟跨日：把 last 改成昨天的日期
-        from datetime import datetime, timedelta, timezone
-        yesterday = (datetime.now(timezone(timedelta(hours=8))) - timedelta(days=1)).strftime("%Y-%m-%d")
-        store["market_dashboard:last_amount"] = {"date": yesterday, "amount": 1.6}
-        assert svc._update_prev_amount(2.0) == 1.6
-        assert store["market_dashboard:prev_close_amount"]["amount"] == 1.6
+    def test_breadth_prev_passthrough(self):
+        data = svc.build_snapshot()
+        assert data["breadth"]["prev_amount"] == 1.71e12
 
 
 class TestSingleFlight:

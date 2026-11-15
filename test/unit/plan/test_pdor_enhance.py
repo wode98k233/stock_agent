@@ -504,7 +504,7 @@ class TestPlannerReplan:
 # ── Planner Message Order Tests ──────────────────────────────
 
 class TestPlannerMessageOrder:
-    """planner_node 消息顺序: 稳定 system 在前，动态 evidence 在独立 system 中"""
+    """planner_node 消息顺序: 共享块在 messages[0]，动态 evidence 在独立 system，固定指令在末尾 human"""
 
     def test_evidence_not_in_first_system(self):
         """重规划时证据不在首个 system，而是在独立 system 消息中。"""
@@ -538,9 +538,9 @@ class TestPlannerMessageOrder:
             asyncio.run(planner_node(state, ctx))
 
         messages = captured_messages["messages"]
-        # 首个 system 不含证据
+        # 新形态（前缀对齐）：共享块（state["input"]）挪到 messages[0]，固定规划指令落到最后一条 human
         assert messages[0][0] == "system"
-        assert "已完成步骤" not in messages[0][1]
+        assert messages[0][1] == "分析股票"
 
         # 证据在独立的 system 消息中（第二个 system）
         system_msgs = [m for m in messages if m[0] == "system"]
@@ -548,9 +548,13 @@ class TestPlannerMessageOrder:
         assert "已完成步骤" in system_msgs[1][1]
         assert "请勿重复" in system_msgs[1][1]
 
-        # 用户输入在末尾
+        # 固定指令在末尾（human），共享块不再压在这里
         assert messages[-1][0] == "user"
-        assert "分析股票" in messages[-1][1]
+        assert "你是选股雷达的规划器" in messages[-1][1]
+
+        # 负例防退化：不能只断言「messages[0] 不含证据」——改后 messages[0] 是共享块，该断言恒真。
+        # 改为全消息扫描：证据只允许出现在那一条独立 system 里（钉住「别处都没有」）。
+        assert [i for i, m in enumerate(messages) if "已完成步骤" in m[1]] == [1]
 
     def test_no_empty_evidence_message_on_first_plan(self):
         """首次规划空 completed_summary 不产生空 system 消息。"""
@@ -582,9 +586,12 @@ class TestPlannerMessageOrder:
             asyncio.run(planner_node(state, ctx))
 
         messages = captured_messages["messages"]
-        # 只有 1 条 system + 1 条 user
+        # 只有 1 条 system + 1 条 user；system 是共享块（前缀对齐），不是指令
+        assert messages[0][0] == "system"
+        assert messages[0][1] == "分析股票"
         system_msgs = [m for m in messages if m[0] == "system"]
         assert len(system_msgs) == 1
+        assert "已完成步骤" not in "".join(m[1] for m in messages)
 
 
 def test_pdor_report_prefers_accumulated_evidence_after_replan():

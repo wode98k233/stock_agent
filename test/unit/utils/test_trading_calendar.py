@@ -262,6 +262,37 @@ class TestGetNextTradingDate:
         assert result == date(2026, 6, 1)
 
 
+class TestGetPreviousTradingDate:
+    """get_previous_trading_date 场景（严格早于 from_date）。"""
+
+    def test_normal_previous_day(self):
+        with _patch_xcals():
+            from utils.trading_calendar import get_previous_trading_date
+            result = get_previous_trading_date("cn", date(2026, 5, 29))
+            assert result == date(2026, 5, 28)
+
+    def test_skip_holiday(self):
+        with _patch_xcals():
+            from utils.trading_calendar import get_previous_trading_date
+            # 6/1 的上一个是 5/29（跳过端午+周末）
+            result = get_previous_trading_date("cn", date(2026, 6, 1))
+            assert result == date(2026, 5, 29)
+
+    def test_non_session_input_returns_last_session(self):
+        with _patch_xcals():
+            from utils.trading_calendar import get_previous_trading_date
+            # 5/30 端午、5/31 周日 → 都是 5/29
+            assert get_previous_trading_date("cn", date(2026, 5, 30)) == date(2026, 5, 29)
+            assert get_previous_trading_date("cn", date(2026, 5, 31)) == date(2026, 5, 29)
+
+    @patch("utils.trading_calendar._XCALS_AVAILABLE", False)
+    def test_fallback_skip_weekend(self):
+        from utils.trading_calendar import get_previous_trading_date
+        # 周一 → 跳过周末 → 周五
+        result = get_previous_trading_date("cn", date(2026, 6, 1))
+        assert result == date(2026, 5, 29)
+
+
 class TestIsTradingHours:
     """is_trading_hours 盘中时段判断（A股 9:30-11:30 / 13:00-15:00）。
 

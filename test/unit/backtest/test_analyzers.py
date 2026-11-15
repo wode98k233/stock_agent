@@ -82,4 +82,51 @@ class TestNeutralBandAnalyzer:
         analysis = strategy.analyzers.neutral_band.get_analysis()
         assert analysis['neutral_count'] == 0
         assert analysis['effective_total'] == 0
-        assert analysis['win_rate'] == 0
+        # 没有有效样本时胜率必须是 None，不是 0（2026-10-18 事故：0 会把
+        # 「全部交易落在 ±2% 中性带内、无从判断」冒充成「胜率 0%」）
+        assert analysis['win_rate'] is None
+
+class TestNeutralBandRealTrades:
+    """回归护栏（2026-10-18 事故）：平仓时 trade.size 已经是 0，
+    旧实现用 trade.price * abs(trade.size) 作分母 → pnl_pct 恒为 0 → 所有交易判成「中性」
+    → 胜率永远算不出来。把带宽从 2% 收到 0.1% 都没变化，才暴露出来。
+    这里跑一笔真实买卖，锁死「中性带真的是按收益率算的」。"""
+
+    def test_closed_trade_has_real_pnl_pct(self):
+        import backtrader as bt
+        import pandas as pd
+
+        class OneTrade(bt.Strategy):
+            def __init__(self):
+                self.done = False
+
+            def next(self):
+                if self.done:
+                    return
+                if len(self) == 1:
+                    self.buy(size=100)
+                elif len(self) == 6:
+                    self.close()
+                    self.done = True
+
+        dates = pd.date_range('2025-01-01', periods=10, freq='B')
+        # 第 1 天买、第 6 天卖，收盘价 100 → 110（+10%）
+        close = [100, 101, 102, 104, 106, 110, 108, 107, 106, 105]
+        df = pd.DataFrame({
+            'open': close, 'high': [c + 1 for c in close],
+            'low': [c - 1 for c in close], 'close': close,
+            'volume': [10000] * 10,
+        }, index=dates)
+
+        cerebro = bt.Cerebro()
+        cerebro.adddata(bt.feeds.PandasData(dataname=df))
+        cerebro.addstrategy(OneTrade)
+        cerebro.addanalyzer(NeutralBandAnalyzer, _name='nb')
+        cerebro.broker.setcash(100000)
+        cerebro.broker.setcommission(commission=0.0)
+        strat = cerebro.run()[0]
+        a = strat.analyzers.nb.get_analysis()
+
+        assert a['neutral_count'] == 0, '一笔 +10% 的交易不该被判成中性（旧 bug 会全判中性）'
+        assert a['effective_total'] == 1
+        assert a['win_rate'] == 1.0

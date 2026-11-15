@@ -3,11 +3,13 @@
   "display_name": "板块决策仪表盘",
   "description": "板块阶段、龙头辨识、资金流向",
   "scenario_tag": "板块决策仪表盘",
+  "derive_decision_from_groups": true,
   "checklist_dimensions": ["板块趋势", "龙头表现", "资金流向", "板块情绪"],
   "sections": [
     {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},
     {"id": "core_verdict", "renderer": "verdict_text", "required": true, "fields": ["core_verdict"]},
     {"id": "key_points", "renderer": "key_points", "fields": ["key_points"]},
+    {"id": "groups", "renderer": "group_cards", "fields": ["groups"]},
     {"id": "action_items", "renderer": "action_items", "fields": ["action_items"]},
     {"id": "sector_stage", "renderer": "stage_bar", "fields": ["sector_stage", "trend_prediction"]},
     {"id": "leading_stocks", "renderer": "leader_cards", "fields": ["leading_stocks"]},

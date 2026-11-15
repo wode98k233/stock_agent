@@ -3,6 +3,8 @@ from langchain_core.runnables import RunnableConfig
 
 from agents.prompts import SKILL_GAP_PROMPT, SKILL_ROUTER_PROMPT
 from agents.shared.tool_utils import activate_skills
+from agents.shared.usage_guide import build_guide_text
+from config import Config
 from utils.agent_trace.core import get_active_recorder
 from utils.llm_factory import llm_json_with_retry
 from utils.logger import ensure_radar
@@ -65,15 +67,90 @@ def _market_for(state: dict) -> str:
     return infer_market_from_text(state.get("user_input", ""))
 
 
+# ──── 主前缀对齐（PRD-A11 同族口径）────────────────────────────────
+# provider 的前缀缓存从 payload 位置 0（tools 数组）开始逐字节比对：只要副调用发出的
+# 头部与 agent 主调**完全一致**，就能以命中价拿到那段已热的工具 schema + REACT system
+# + history + guidance + user。技能路由/gap 重选过去是 `[("system", 指令)]` 单条，
+# 与 agent 族零字节重叠 → 实测命中 1.7%~5%（CODE_WIKI §11.19）。
+#
+# 这里**不重新拼装**主前缀，而是直接截取 `state["messages"]` 中「本轮 user 及其之前」
+# 的那一段：它就是 PrepareNode 上次产出的同一批对象/同一批字符串，下一次 prepare 会
+# 从 memory 重建出逐字节相同的版本。重新拼一遍反而多一个分叉源（history 清洗规则、
+# guidance 生成时点、消息条数合并），且本节点没有 memory 句柄。
+
+
+def _role_content(msg) -> tuple[str, str]:
+    """归一 role/content：兼容元组装配与 LangChain 消息对象。"""
+    if isinstance(msg, tuple) and len(msg) == 2:
+        return str(msg[0]), str(msg[1])
+    role = str(getattr(msg, "type", "") or "")
+    role = {"human": "user", "ai": "assistant"}.get(role, role)
+    return role, str(getattr(msg, "content", "") or "")
+
+
+def _main_prefix_from_state(state: dict) -> list | None:
+    """截到「本轮 user」为止的主前缀；找不到则返回 None（调用方回落单条 system）。
+
+    不变量：``[REACT system][*history][guidance][user]`` —— 与
+    ``agents/shared/prompt_prefix.py::build_main_prefix_messages`` 的输出等价
+    （prepare 的 messages 就是它产出的），只是复用现成对象而不重建。
+    """
+    user_input = state.get("user_input") or ""
+    msgs = list(state.get("messages") or [])
+    if not msgs or not user_input:
+        return None
+    # 取最后一条与当前输入相同的 user：历史里的同题消息已被 clean_history_messages 剔除，
+    # 这里取最后一条是为了兼容 checkpoint 恢复等非常规恢复路径。
+    idx = None
+    for i, m in enumerate(msgs):
+        role, content = _role_content(m)
+        if role == "user" and content == user_input:
+            idx = i
+    return msgs[: idx + 1] if idx is not None else None
+
+
+def _prefixed_instruction(state: dict, instruction: str) -> list:
+    """主前缀 + 尾部指令（只允许尾部追加，中间插入会让前缀从该点归零）。"""
+    prefix = _main_prefix_from_state(state)
+    if prefix is None:
+        return [("system", instruction)]
+    from agents.shared.prompt_prefix import append_tail_system
+    return append_tail_system(prefix, instruction)
+
+
+def _bind_same_tools(llm, tools_ref, logger):
+    """绑与 agent 主调**同一份**工具数组（位置 0，换数组即前缀作废）。
+
+    与 ``agents/react/nodes.py`` 的 ``self.llm.bind_tools(all_tools)`` 同源：
+    容器把同一个 list 对象传给 agent / router / gap，这里只做快照拷贝，内容与顺序不变。
+    绑失败时回落无工具调用（路由仍可跑，只是不共享前缀）——不让缓存优化打断主流程。
+    """
+    if not tools_ref:
+        return llm
+    try:
+        return llm.bind_tools(list(tools_ref))
+    except Exception as e:  # noqa: BLE001 - 优化失败必须回落
+        logger.warning("R", f"router/gap 绑 tools 失败，改用无工具: {e}")
+        return llm
+
+
 class SubGoalRouterNode:
     """每轮判断当前子目标需要哪些技能（可中途换批）；变化时原子替换 tools_ref。
 
     append_usage=True（中途换批节点）：批次变化时把**新增技能**的 L1 用法作为一条
     system 消息追加进上下文（初始批次的用法由 prepare 注入，此处只补增量）。
+
+    full_surface=True（PRD-A9 §2）：tools 已由 DI 容器一次性全量装载，
+    此节点**不再改写 tools_ref**。口径投递方式由 ``activate_mode`` 决定：
+      ``router`` —— 本节点把新批技能的 usage_guide 追加到上下文尾部；
+      ``model``  —— 不投递，由模型自己调 ``activate_skill`` 取（避免重复投递
+                    并把「加载哪个技能」的决策权留给模型）。
+    不论哪种。原因都是：tools 是缓存前缀的位置 0，换绑即前缀作废。
     """
 
     def __init__(self, llm, skill_registry, tools_ref=None, budget=None, logger=None,
-                 append_usage: bool = False, allow_catalog_fallback: bool = False):
+                 append_usage: bool = False, allow_catalog_fallback: bool = False,
+                 full_surface: bool = False, activate_mode: str = "model"):
         self.llm = llm
         self.skill_registry = skill_registry
         self.tools_ref = tools_ref if tools_ref is not None else []
@@ -82,6 +159,8 @@ class SubGoalRouterNode:
         self.append_usage = append_usage
         # 候选池不够时，允许 router 从全量技能目录里补一个（并并入候选池）
         self.allow_catalog_fallback = allow_catalog_fallback
+        self.full_surface = full_surface
+        self.activate_mode = activate_mode
 
     async def __call__(self, state: dict, config: RunnableConfig | None = None) -> dict:
         candidates = [s for s in (state.get("candidate_skills") or []) if s]
@@ -95,7 +174,7 @@ class SubGoalRouterNode:
             new_active, desired = active, []
         elif len(candidates) == 1 and active != candidates[0]:
             new_active, desired = candidates[0], [candidates[0]]
-        elif active and active in candidates:
+        elif active and active in candidates and not self._skip_first_round(state, sub_goals):
             new_active, sub_goals, desired = await self._route_with_llm(
                 state, active, candidates, sub_goals, loaded, config)
         else:
@@ -112,10 +191,15 @@ class SubGoalRouterNode:
         desired = self._trim(desired, candidates, new_active)
 
         changed = desired != loaded
+        # 全量常驻形态：tools 一次性装载完毕，切批绝不能动 tools_ref
+        # （位置 0 一变，已建立的缓存前缀整条作废）。改为把新批技能的业务口径
+        # 以 system 消息追加到 messages **尾部**——尾部变化不影响前缀。
+        mutate = not self.full_surface
         if changed:
             names = activate_skills(self.skill_registry, self.tools_ref, desired,
                                     selected_skills=candidates, logger=self.logger,
-                                    market=_market_for(state), allow_all_fallback=False)
+                                    market=_market_for(state), allow_all_fallback=False,
+                                    mutate_tools=mutate)
             # 初次激活 / 主技能切换 / 仅换批
             kind = "activate" if not active else ("switch" if new_active != active else "reselect")
             self._record(kind, {"active_skill": new_active, "from": active,
@@ -126,12 +210,26 @@ class SubGoalRouterNode:
         elif new_active and not self.tools_ref:
             activate_skills(self.skill_registry, self.tools_ref, desired,
                             selected_skills=candidates, logger=self.logger,
-                            market=_market_for(state), allow_all_fallback=False)
+                            market=_market_for(state), allow_all_fallback=False,
+                            mutate_tools=mutate)
 
         out = {"active_skill": new_active, "sub_goals": sub_goals,
                "loaded_skills": desired, "candidate_skills": candidates}
-        # 中途换批：把新增技能的 L1 用法追加为一条 system 消息（初始批由 prepare 注入）
-        if self.append_usage and changed and active:
+
+        # 口径投递：
+        #   full + model  —— 由模型自己调 activate_skill 取，router 只管换批记账，
+        #                     不再替模型投递（否则与模型自激活重复、且抢走它的决策权）
+        #   full + router —— router 决定追加哪条口径（不换 tools）
+        #   full + off    —— 配置非法组合（Config 加载时已拦截）
+        #   strict        —— prepare 注入初始批 + append_usage 的 L1 增量
+        if self.full_surface:
+            if self.activate_mode == "router":
+                fresh = [s for s in desired if s not in loaded]
+                if fresh:
+                    delivery = build_guide_text(self.skill_registry, fresh, delivered=loaded)
+                    if delivery:
+                        out["messages"] = [("system", delivery)]
+        elif self.append_usage and changed and active:
             delta = self._usage_delta([s for s in desired if s not in loaded])
             if delta:
                 out["messages"] = [("system", delta)]
@@ -170,6 +268,46 @@ class SubGoalRouterNode:
             return ""
         return "【本轮新增技能用法（中途换批）】\n\n" + "\n\n".join(parts)
 
+    @staticmethod
+    def _skip_first_round(state: dict, sub_goals: list) -> bool:
+        """首轮跳过后台路由的 LLM 重选（PRD-A11 FR-7.1）。
+
+        **为什么该跳**：图是 ``select_skills → sub_goal_router → prepare → agent``。
+        ``select_skills`` 刚用一次 LLM 挑完技能并定好批次（``loaded_skills``），
+        紧接着 router 又用一次 LLM 重挑同样的候选池 —— 而**此时还没有任何工具结果**，
+        router 的判断依据与 select_skills 完全相同，属于纯重复。
+
+        实测代价：``skill-router`` 是 run 内第三贵的调用（in≈5,000~15,000 tok、
+        命中率 1.7%~5%），且跑在 agent 之前、前缀尚未写热 —— 每 run 白付一次全价大调用。
+
+        **只在「确实没有新信息」时才跳**，任一条件成立就不跳：
+        · ``sub_goals`` 非空（checkpoint 恢复/已有规划）→ 交给 LLM 重新规划
+        · ``skill_gap_count > 0``（工具连续失败后的兜底重选）→ 这正是 router 的主职
+        · 已有工具结果 / ``iteration_count > 0``（后续轮次）→ 有观察可依据
+        """
+        if not getattr(Config, "SKILL_ROUTER_SKIP_FIRST", True):
+            return False
+        if sub_goals:
+            return False
+        if int(state.get("skill_gap_count") or 0) > 0:
+            return False
+        if int(state.get("iteration_count") or 0) > 0:
+            return False
+        # 有工具结果 → 有观察可依据，不跳。
+        # ⚠️ 不能只用 `_collect_executed_tool_sigs`：它**只认带 tool_calls 的 AIMessage**，
+        # 对孤立的 ToolMessage 直接 pass（见其实现）。checkpoint 恢复等场景下
+        # 可能只剩 ToolMessage，那时会误判成"首轮"而跳过本该跑的路由。
+        for m in (state.get("messages") or []):
+            if getattr(m, "tool_call_id", None):
+                return False
+        try:
+            from agents.react.utils import _collect_executed_tool_sigs
+            if _collect_executed_tool_sigs(state.get("messages") or []):
+                return False
+        except Exception:
+            pass
+        return True
+
     async def _route_with_llm(self, state, active, candidates, sub_goals, loaded, config):
         n = _batch_size()
         allowed = set(candidates)
@@ -190,7 +328,8 @@ class SubGoalRouterNode:
         )
         try:
             result = llm_json_with_retry(
-                self.llm, [("system", prompt)], self.logger,
+                _bind_same_tools(self.llm, self.tools_ref, self.logger),
+                _prefixed_instruction(state, prompt), self.logger,
                 label="skill-router", budget=self.budget,
                 metadata={"node": "skill-router"},
             )
@@ -216,16 +355,23 @@ class SubGoalRouterNode:
 
 
 class SkillGapNode:
-    """工具连续失败后的兜底重选：候选池优先，其次用全目录交给 LLM。"""
+    """工具连续失败后的兜底重选：候选池优先，其次用全目录交给 LLM。
+
+    ``full_surface``：tools 已全量常驻时，重选只补口径、不改 tools_ref
+    （否则位置 0 一变，已建立的缓存前缀作废）。
+    """
 
     MAX_GAPS = 2
 
-    def __init__(self, llm, skill_registry, tools_ref=None, budget=None, logger=None):
+    def __init__(self, llm, skill_registry, tools_ref=None, budget=None, logger=None,
+                 full_surface: bool = False, activate_mode: str = "model"):
         self.llm = llm
         self.skill_registry = skill_registry
         self.tools_ref = tools_ref if tools_ref is not None else []
         self.budget = budget
         self.logger = ensure_radar(logger)
+        self.full_surface = full_surface
+        self.activate_mode = activate_mode
 
     async def __call__(self, state: dict, config: RunnableConfig | None = None) -> dict:
         count = int(state.get("skill_gap_count") or 0)
@@ -258,12 +404,21 @@ class SkillGapNode:
         batch = _compose_batch(new_active, state.get("candidate_skills"), _batch_size())
         names = activate_skills(self.skill_registry, self.tools_ref, batch,
                                 selected_skills=state.get("candidate_skills"), logger=self.logger,
-                                market=_market_for(state), allow_all_fallback=False)
+                                market=_market_for(state), allow_all_fallback=False,
+                                mutate_tools=not self.full_surface)
         self._record({"active_skill": new_active, "from": active, "to": new_active,
                       "trigger": "工具连续失败", "reason": reason, "tools": names,
                       "loaded_skills": batch})
         self.logger.info("R", f"技能重选: {active or '-'} → {new_active}（{reason}，批 {batch}）")
-        return {"active_skill": new_active, "skill_gap_count": count + 1, "loaded_skills": batch}
+        out = {"active_skill": new_active, "skill_gap_count": count + 1, "loaded_skills": batch}
+        # 全量常驻形态：工具早已全量在位，gap 重选只需补业务口径，不能动 tools_ref。
+        # model 态由模型自己调 activate_skill，gap 不重复投递。
+        if self.full_surface and self.activate_mode == "router":
+            delivery = build_guide_text(self.skill_registry, batch,
+                                         delivered=state.get("loaded_skills") or [])
+            if delivery:
+                out["messages"] = [("system", delivery)]
+        return out
 
     async def _pick_from_catalog(self, state, active):
         try:
@@ -281,7 +436,8 @@ class SkillGapNode:
                   f"用户问题：{state.get('user_input', '')}\n{catalog}")
         try:
             result = llm_json_with_retry(
-                self.llm, [("system", prompt)], self.logger,
+                _bind_same_tools(self.llm, self.tools_ref, self.logger),
+                _prefixed_instruction(state, prompt), self.logger,
                 label="skill-gap", budget=self.budget, metadata={"node": "skill-gap"},
             )
         except Exception:

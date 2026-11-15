@@ -14,44 +14,60 @@ from .base import DataSource, DataSourceManager, retry
 
 # ── 延迟注册：首次调用 API 时才导入数据源（避免 akshare 3.4s 导入拖慢测试启动）──
 _initialized = False
+_initializing = False
+
 
 def _ensure_initialized():
-    global _initialized
-    if _initialized:
+    """幂等的数据源注册。
+
+    ⚠️ 两个坑（2026-10-19 修）：
+    1. **`_initialized` 必须等注册成功后才置 True**。原先第 22 行先置 True 再导入 12 个
+       数据源 —— 只要其中一个导入抛异常（测试里 `sys.modules` 被 stub 时很常见），
+       进程内数据源注册就永久残缺，且后续所有调用静默 no-op（`_ensure_initialized`
+       直接 return），表现为"数据源全掉、没有任何报错"。生产上同理：启动期一次
+       瞬时 ImportError 会让整个进程再也拿不到数据源。
+    2. **允许重入**：导入数据源的过程中可能有回调再进来，用 `_initializing` 挡递归，
+       避免因为"延迟置位"而无限递归。
+    """
+    global _initialized, _initializing
+    if _initialized or _initializing:
         return
-    _initialized = True
+    _initializing = True
+    try:
+        from .rate_limiter import init_default_rate_limiters
 
-    from .rate_limiter import init_default_rate_limiters
+        # 导入所有数据源
+        from .akshare_ds import AkshareDataSource
+        from .baostock_ds import BaostockDataSource
+        from .efinance_ds import EfinanceDataSource
+        from .tushare_ds import TushareDataSource
+        from .sina_ds import SinaDirectDataSource
+        from .qq_ds import QQFinanceDataSource
+        from .mx_data_ds import MXDataDataSource
+        from .yfinance_ds import YFinanceDataSource
+        from .finnhub_ds import FinnhubDataSource
+        from .longbridge_ds import LongbridgeDataSource
+        from .pytdx_ds import PytdxDataSource
+        from .hithink_ds import HithinkDataSource
 
-    # 导入所有数据源
-    from .akshare_ds import AkshareDataSource
-    from .baostock_ds import BaostockDataSource
-    from .efinance_ds import EfinanceDataSource
-    from .tushare_ds import TushareDataSource
-    from .sina_ds import SinaDirectDataSource
-    from .qq_ds import QQFinanceDataSource
-    from .mx_data_ds import MXDataDataSource
-    from .yfinance_ds import YFinanceDataSource
-    from .finnhub_ds import FinnhubDataSource
-    from .longbridge_ds import LongbridgeDataSource
-    from .pytdx_ds import PytdxDataSource
-    from .hithink_ds import HithinkDataSource
+        # 按优先级从高到低注册
+        DataSourceManager.register_source(MXDataDataSource)         # 110
+        DataSourceManager.register_source(SinaDirectDataSource)     # 100
+        DataSourceManager.register_source(HithinkDataSource)        # 95（需 HITHINK_FINANCE_API_KEY）
+        DataSourceManager.register_source(AkshareDataSource)        # 90
+        DataSourceManager.register_source(EfinanceDataSource)       # 80
+        DataSourceManager.register_source(PytdxDataSource)          # 75
+        DataSourceManager.register_source(BaostockDataSource)       # 70
+        DataSourceManager.register_source(TushareDataSource)        # 60
+        DataSourceManager.register_source(QQFinanceDataSource)      # 50
+        DataSourceManager.register_source(FinnhubDataSource)        # 48
+        DataSourceManager.register_source(YFinanceDataSource)       # 45
 
-    # 按优先级从高到低注册
-    DataSourceManager.register_source(MXDataDataSource)         # 110
-    DataSourceManager.register_source(SinaDirectDataSource)     # 100
-    DataSourceManager.register_source(HithinkDataSource)        # 95（需 HITHINK_FINANCE_API_KEY）
-    DataSourceManager.register_source(AkshareDataSource)        # 90
-    DataSourceManager.register_source(EfinanceDataSource)       # 80
-    DataSourceManager.register_source(PytdxDataSource)          # 75
-    DataSourceManager.register_source(BaostockDataSource)       # 70
-    DataSourceManager.register_source(TushareDataSource)        # 60
-    DataSourceManager.register_source(QQFinanceDataSource)      # 50
-    DataSourceManager.register_source(FinnhubDataSource)        # 48
-    DataSourceManager.register_source(YFinanceDataSource)       # 45
-
-    # 初始化限流器
-    init_default_rate_limiters()
+        # 初始化限流器
+        init_default_rate_limiters()
+        _initialized = True
+    finally:
+        _initializing = False
 
 
 # ═══════════════════════════════════════════════════════════

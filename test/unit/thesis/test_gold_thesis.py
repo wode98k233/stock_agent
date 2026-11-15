@@ -551,8 +551,12 @@ def _gold_stub_series():
                         ("2026-05", "2026-05-31", 7496.0), ("2026-06", "2026-06-30", 7530.0),
                         ("2026-07", "2026-07-31", 7600.0), (M1, "2026-08-31", 7673.0)])
 
+    # ③ 于 v1.1 换成 TIPS 前瞻口径（FRED DFII10）：末端 10 日下行 15bp → 落在 [+1] 档。
+    # us10/us_cpi 仍提供：定义里仍声明着这两条 data（历史对照用），缺了会多一条取数 warning。
+    tips = _daily([2.78] * 20 + [2.63])
+
     return {
-        "dxy": dxy, "us2_y": us2, "us10_y": us10, "us_cpi_yoy": cpi,
+        "dxy": dxy, "us2_y": us2, "us10_y": us10, "us_cpi_yoy": cpi, "tips_10y": tips,
         "gold_etf_holdings": etf, "cn_gold_reserve": cn_gold,
         "au_sge": au_rows, "ag_sge": ag_rows,
     }
@@ -619,9 +623,9 @@ class TestGoldFullDefinitionOffline:
             assert rule["text"]
             assert rule["current"] is not None, rule
         # 关键原始读数都进了 metrics（信号与情景要靠它们判断）
-        for k in ("dxy_chg_bp", "us2_chg_bp", "real_chg_pp", "etf_chg_pct",
+        for k in ("dxy_chg_bp", "us2_chg_bp", "tips_chg_bp", "etf_chg_pct",
                   "agratio_chg_pct", "cn_gold_chg_pct", "position_rank",
-                  "agratio", "etf_level", "real_level"):
+                  "agratio", "etf_level"):
             assert k in metrics, k
 
     def test_scenarios_and_transmission_evaluated(self, result):

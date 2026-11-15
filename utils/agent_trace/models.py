@@ -175,6 +175,10 @@ _GRAPH_NODE_LABELS = {
     "react-context-summary": "上下文压缩",
     "react-tool-compress": "工具输出压缩",
     "sentiment-extract": "舆情分析",
+    # PRD-A9 M-4：报告链路三条 LLM 调用此前未注入 node，导致 trace 无法按 label 归因
+    "report-fast": "生成报告",
+    "report-select": "证据下钻",
+    "report-expand": "报告扩写",
 }
 
 _TYPE_ICONS = {

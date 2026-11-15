@@ -29,8 +29,15 @@ class ConfigRequest(BaseModel):
 
 @router.get('/overview')
 async def overview():
-    """最近一次扫描汇总"""
-    return dbm.overview()
+    """最近一次扫描汇总 + 回测覆盖率巡检（设计文档 §12）"""
+    data = dbm.overview() or {}
+    try:
+        from utils.data_monitor.backtest_coverage import collect_coverage_check
+        data['backtest_coverage'] = collect_coverage_check()
+    except Exception as e:  # noqa: BLE001
+        logger.warning('[data-monitor] 回测覆盖率巡检失败: %s', e)
+        data['backtest_coverage'] = {}
+    return data
 
 
 @router.post('/scan')

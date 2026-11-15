@@ -308,7 +308,7 @@ class TestManualDerive:
         w = []
         d = self._defn(manual)
         factor, updates = ThesisEngine._factor_manual(
-            ThesisEngine(), d["factors"][0],
+            StubEngine({}), d["factors"][0],
             {"series": {}, "frames": {}, "stale_days": {}}, d, {}, d["thresholds"], w)
         assert factor["stale"] is True
         assert updates["sow_stale"] == 1
@@ -317,7 +317,7 @@ class TestManualDerive:
     def test_fresh_manual_is_not_stale(self):
         d = self._defn()
         factor, updates = ThesisEngine._factor_manual(
-            ThesisEngine(), d["factors"][0],
+            StubEngine({}), d["factors"][0],
             {"series": {}, "frames": {}, "stale_days": {}}, d, {}, d["thresholds"], [])
         assert factor["stale"] is False
         assert updates["sow_stale"] == 0
@@ -326,7 +326,7 @@ class TestManualDerive:
         d = _defn(_SOW_FACTOR, {}, _SOW_TH, manual={"sow": {}})
         w = []
         factor, updates = ThesisEngine._factor_manual(
-            ThesisEngine(), d["factors"][0],
+            StubEngine({}), d["factors"][0],
             {"series": {}, "frames": {}, "stale_days": {}}, d, {}, d["thresholds"], w)
         assert factor["score"] is None and factor["value"] is None
         assert updates["sow_stale"] == 1
@@ -337,7 +337,7 @@ class TestManualDerive:
         d = _defn(_SOW_FACTOR, {}, _SOW_TH,
                   manual={"sow": {"value": 3780, "updated_at": "2026-09-20"}})
         factor, updates = ThesisEngine._factor_manual(
-            ThesisEngine(), d["factors"][0],
+            StubEngine({}), d["factors"][0],
             {"series": {}, "frames": {}, "stale_days": {}}, d, {}, d["thresholds"], [])
         assert factor["value"] == 3780
         assert updates["sow_dev_pct"] is None
@@ -618,9 +618,12 @@ class TestHogFullDefinitionOffline:
     def test_sow_factor_is_manual_and_scored_on_deviation(self, result):
         f = [x for x in result["factors"] if x["key"] == "sow"][0]
         assert f["manual"] is True
-        assert 7 < f["value"] < 8          # 较高点 4080 去化约 7.35%
+        assert 11 < f["value"] < 13         # 3602 较高点 4080 去化约 11.72%（2026Q3）
         assert f["score"] == 2
-        assert result["metric_values"]["sow_level"] == 3780
+        # 手动值随官方季度数据更新（Q2 3780 → Q3 3602），断言取定义文件而非写死数字，
+        # 否则每次更新农业农村部数据都要改测试。
+        defn = json.loads(HOG_DEF.read_text(encoding="utf-8"))
+        assert result["metric_values"]["sow_level"] == defn["manual"]["sow"]["value"]
         assert result["metric_values"]["sow_stale"] == 0
 
     def test_signals_and_invalidation_reference_known_metrics(self, result):

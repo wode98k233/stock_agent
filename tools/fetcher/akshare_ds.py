@@ -8,12 +8,14 @@
 5. 实时行情缓存（使用 data_cache 模块）
 6. 单股实时行情优先使用新浪接口（较快）
 """
+import io
 import logging
 import os
 import random
 import time
 from typing import Dict, Any, Optional
 
+import httpx
 import pandas as pd
 from .base import DataSource, DataSourceManager, _fetch_tencent_kline, _standardize_stock_code, run_with_timeout
 from .cache import get_akshare_cache
@@ -208,12 +210,153 @@ def _calc_sina_future_main(symbol: str) -> pd.DataFrame:
     return out.sort_values("report_date").reset_index(drop=True)
 
 
+def _calc_fred_series(series_id: str) -> pd.DataFrame:
+    """从 FRED 拉单序列（免 API Key，`fredgraph.csv` 端点），输出 [report_date, value]。
+
+    为什么需要这条通道：美国 10Y **实际**收益率（TIPS，FRED 代号 DFII10）是市场定价的
+    前瞻口径，国内所有源都没有。而黄金台账原先只能用「10Y 名义 − CPI 同比」这一**事后**
+    口径代替——它在转折期与 TIPS 严重背离（2022 年 CPI 同比 9%、事后实际利率深度为负，
+    而 TIPS 已转正上行），实测与金价相关性 +0.153，符号与理论相反。
+
+    ⚠️ 三个坑：
+    ① FRED 用 `.` 表示非交易日/无数据，必须 to_numeric 后 dropna，否则字符串会
+       一路传到因子计算里、把整条序列判成「数据缺失」。
+    ② 该端点是纯文本 CSV、无分页，DFII10 一次返回 2003 年至今约 6200 行，
+       增量落库靠 macro_db 的去重，本地不做窗口裁剪。
+    ③ **必须直连**：本机 HTTP(S)_PROXY 指向本地代理时，FRED 会在 TLS 层
+       「Server disconnected without sending a response」（curl 能通、httpx/urllib 走代理都不通）。
+       故默认 trust_env=False 直连，仅在直连失败时回退到系统代理——两者都试过仍失败才抛错。
+    """
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s" % series_id
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    raw, last_err = None, None
+    for trust_env in (False, True):
+        try:
+            with httpx.Client(timeout=30, follow_redirects=True, trust_env=trust_env) as client:
+                resp = client.get(url, headers=headers)
+                resp.raise_for_status()
+                raw = resp.text
+            break
+        except Exception as e:  # 换一条通道再试，不立即失败
+            last_err = e
+    if raw is None:
+        raise RuntimeError("FRED 拉取失败(%s): %s" % (series_id, last_err))
+    if not raw or raw.lstrip().startswith("<"):
+        # 偶发反爬会返回 HTML 而不是 CSV，这类响应不能当「空数据」静默吞掉
+        raise RuntimeError("FRED 返回非 CSV 内容（疑似被拦截）: %s" % series_id)
+    df = pd.read_csv(io.StringIO(raw))
+    if df.shape[1] < 2:
+        raise RuntimeError("FRED 返回列数异常: %s" % series_id)
+    df = df.iloc[:, :2]
+    df.columns = ["report_date", "value"]
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["value", "report_date"])
+    df["report_date"] = pd.to_datetime(df["report_date"]).dt.strftime("%Y-%m-%d")
+    return df[["report_date", "value"]].sort_values("report_date").reset_index(drop=True)
+
+
+def _calc_csindex_dy(index_code: str) -> pd.DataFrame:
+    """中证指数**股息率估算序列**（长历史），供红利台账 ① 号因子使用。
+
+    为什么必须估算：官方只给最近 20 个交易日的精确股息率（静态 xls，
+    `stock_zh_index_value_csindex` 实测 20 行），长历史无从建立——红利台账的
+    「股息率 − 10Y」因子因此长期卡在「样本不足」。而中证官网的 `indexCsiDsPe`
+    端点能给出 2015 年起的**日频 PE**，这就够了：
+
+        支付率 = 当前股息率 × 当日PE / 100      （假设中期内分红率稳定）
+        历史股息率 = 支付率 / 当日PE × 100
+
+    PE 与股息率必须**同源同口径**才算得自洽：`indexCsiDsPe` 的 PE（H30269 最新 8.65）
+    与官网 xls 的「市盈率1」（8.88）不同，与「市盈率2」（8.14）也不同——所以支付率
+    必须用 `indexCsiDsPe` 自己的 PE 来算，否则会引入 2~3% 的系统偏差。
+
+    精度校验（2026-11-01，H30269，与开源项目 DividendIndexLearning 的 1653 个交易日对照）：
+        r = 0.997、绝对偏差中位 0.42pp。该偏差是**口径差**（对方为「股息率2／计算用股本」，
+    本函数为「股息率1／总股本」）而非方法误差；序列内部口径一致，做分位判断不受影响。
+
+    ⚠️ 已知偏差：分红率若在中期变化，越早期的点偏差越大；除权除息日 PE 跳变会带来单点噪声。
+    """
+    from datetime import date as _date
+
+    import httpx
+    from tools.fetcher import ak_index_valuation
+
+    code = str(index_code).strip().upper()
+    url = "https://www.csindex.com.cn/csindex-home/perf/indexCsiDsPe"
+    resp = httpx.get(url, params={"indexCode": code, "startDate": "20150101",
+                                  "endDate": _date.today().strftime("%Y%m%d")},
+                     timeout=40, follow_redirects=True,
+                     headers={"User-Agent": "Mozilla/5.0"})
+    payload = resp.json()
+    rows = payload.get("data") or []
+    if not rows:
+        raise RuntimeError("中证 indexCsiDsPe 无数据: %s" % code)
+    pe = pd.DataFrame(rows)
+    pe["report_date"] = pd.to_datetime(pe["tradeDate"], format="%Y%m%d")
+    pe["pe"] = pd.to_numeric(pe["peg"], errors="coerce")
+    pe = pe.dropna(subset=["pe"]).set_index("report_date")["pe"].sort_index()
+    pe = pe[pe > 0]
+    if pe.empty:
+        raise RuntimeError("中证 PE 序列为空: %s" % code)
+
+    # 当前精确股息率（近 20 个交易日）+ 同源 PE → 支付率
+    val = ak_index_valuation(code)
+    dy_now = pd.to_numeric(val["dy"], errors="coerce").dropna()
+    if dy_now.empty:
+        raise RuntimeError("中证估值无股息率读数: %s" % code)
+    pay_ratio = float(dy_now.iloc[-1]) * float(pe.iloc[-1]) / 100.0
+    if not (0 < pay_ratio < 1):
+        raise RuntimeError("支付率异常(%.4f)，拒绝生成估算序列: %s" % (pay_ratio, code))
+
+    out = pd.DataFrame({
+        "report_date": pe.index.strftime("%Y-%m-%d"),
+        "value": (pay_ratio / pe.values * 100.0),
+    })
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    # 股息率 >20% 或 <0.1% 必是 PE 异常（如成分股调整导致的跳变），丢弃
+    out = out.dropna(subset=["value"])
+    out = out[(out["value"] > 0.1) & (out["value"] < 20)]
+    return out.sort_values("report_date").reset_index(drop=True)
+
+
+def _calc_idx800_ey() -> pd.DataFrame:
+    """中证800 盈利收益率（E/P，%）= 100 ÷ 滚动市盈率，月度。
+
+    为什么需要它：中证官网的估值只有静态 xls，`stock_zh_index_value_csindex` 实测**只返回
+    最近 20 个交易日**，股息率序列只能靠每次运行落一条、逐期累积（一年才 250 期）。
+    而乐咕（`stock_index_pe_lg`）给出中证800 自 2007-01 起完整月度 PE（238 期、无缺失）。
+
+    E/P 与股息率同属「估值倒数」口径：前者涵盖全部盈利，后者只含分红部分。
+    作为「股票相对债券贵不贵」的度量两者可互换，且 E/P 更标准——E/P − 10Y 就是股权风险溢价 ERP。
+    注意它是**月频**（乐咕每月末一个点），与日频利率相减时取各自最新一期。
+    """
+    import akshare as ak
+    df = ak.stock_index_pe_lg(symbol="中证800")
+    if df is None or df.empty:
+        raise RuntimeError("乐咕中证800 PE 无数据")
+    out = pd.DataFrame({
+        "report_date": pd.to_datetime(df["日期"]).dt.strftime("%Y-%m-%d"),
+        "value": 100.0 / pd.to_numeric(df["滚动市盈率"], errors="coerce"),
+    })
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["value", "report_date"])
+    # 极端 PE（<1 或 >200）必然是源数据异常，E/P 会炸成 100 或 0.5，直接丢弃
+    out = out[(out["value"] > 0.5) & (out["value"] < 30)]
+    return out.sort_values("report_date").reset_index(drop=True)
+
+
 # 本地计算型指标的实现表（`_MACRO_APIS` 用 "calc" 引用）。
 # 与直取型的区别：源站给的是多列原始材料，需要本地换算成单一 report_date/value 序列。
 _MACRO_CALCS = {
     "_calc_dxy": _calc_dxy,
     "_calc_cu_main": lambda: _calc_sina_future_main("CU0"),
     "_calc_rb_main": lambda: _calc_sina_future_main("RB0"),
+    # 美国 10Y 实际利率（TIPS）：黄金台账 ③ 的前瞻口径数据源
+    "_calc_tips_10y": lambda: _calc_fred_series("DFII10"),
+    # 中证800 盈利收益率：A股台账 ② 的长历史估值口径（股息率只有 20 天，无法做分位）
+    "_calc_idx800_ey": _calc_idx800_ey,
+    # 红利低波股息率估算序列：红利台账 ① 用（官网只给 20 个交易日，靠 PE 反推长历史）
+    "_calc_h30269_dy": lambda: _calc_csindex_dy("H30269"),
 }
 
 
@@ -976,17 +1119,24 @@ class AkshareDataSource(DataSource):
         "lpr_5y":  {"fn": "macro_china_lpr", "date": ["TRADE_DATE"], "value": ["LPR5Y"], "period": "daily"},
         # 金十系（滞后约 1 年，历史区间分析仍有价值；前端标注最后数据期）
         "cpi_yoy": {"fn": "macro_china_cpi_yearly", "date": ["日期"], "value": ["今值"], "period": "monthly"},
+        # 社零同比（消费/白酒模板的需求侧主指标）：东财口径，月度，覆盖 2008 至今
+        "cn_retail_yoy": {"fn": "macro_china_consumer_goods_retail", "date": ["月份"],
+                          "value": ["同比增长", "社零同比"], "period": "monthly"},
         "gdp_yoy": {"fn": "macro_china_gdp_yearly", "date": ["日期"], "value": ["今值"], "period": "quarterly"},
         "pmi_mfg": {"fn": "macro_china_pmi_yearly", "date": ["日期"], "value": ["今值"], "period": "monthly"},
         # 中债/美债收益率曲线（东财 bond_zh_us_rate，日频，实测新鲜到当日）。
         # 该接口无参调用会从 1990 年拉起全量，必须用 lookback_days 限定窗口。
         # 注意：同一接口一次返回中美多条曲线，逐指标各拉一次（可接受，日频数据量小）。
+        # ⚠️ lookback_days 原为 400（约 1.6 年）：做「当前读数」够用，但台账要算
+        #    **历史分位**与**因子有效性相关性**时，400 个观测连月度 24 期下限都过不了
+        #    （2026-11-01 审计实测：cn10_y/usdcny 月度样本不足，相关性无法验证）。
+        #    统一放大到 4000（约 16 年，覆盖 2010 以来两轮完整周期）。
         "cn10_y": {"fn": "bond_zh_us_rate", "date": ["日期"], "value": ["中国国债收益率10年"],
-                   "period": "daily", "start_param": "start_date", "lookback_days": 400},
+                   "period": "daily", "start_param": "start_date", "lookback_days": 4000},
         "cn30_y": {"fn": "bond_zh_us_rate", "date": ["日期"], "value": ["中国国债收益率30年"],
-                   "period": "daily", "start_param": "start_date", "lookback_days": 400},
+                   "period": "daily", "start_param": "start_date", "lookback_days": 4000},
         "us10_y": {"fn": "bond_zh_us_rate", "date": ["日期"], "value": ["美国国债收益率10年"],
-                   "period": "daily", "start_param": "start_date", "lookback_days": 400},
+                   "period": "daily", "start_param": "start_date", "lookback_days": 4000},
         # 银行间资金面（债基台账的流动性锚）。该源只覆盖同业拆借市场，**不含 DR007/R007**
         # （质押式回购），故用 Shibor 1W 作资金面宽松度代理；接口无日期参数，返回全量历史。
         "shibor_1w": {"fn": "rate_interbank", "date": ["报告日", "日期"],
@@ -999,7 +1149,7 @@ class AkshareDataSource(DataSource):
         # 单位是「分」（6.7459 报 674.59），故声明 value_scale=0.01。
         "usdcny": {"fn": "currency_boc_sina", "date": ["日期"],
                    "value": ["央行中间价"], "period": "daily",
-                   "start_param": "start_date", "lookback_days": 400,
+                   "start_param": "start_date", "lookback_days": 4000,
                    "end_param": "end_date", "kwargs": {"symbol": "美元"},
                    "value_scale": 0.01},
         # 港元 HIBOR 一周定价（香港银行公会，日频）。恒生科技台账分母端的流动性锚：
@@ -1017,16 +1167,29 @@ class AkshareDataSource(DataSource):
         # （后者无公开日频源），note 里必须写清。
         "cn_term_spread": {"fn": "bond_zh_us_rate", "date": ["日期"],
                            "value": ["中国国债收益率10年-2年"], "period": "daily",
-                           "start_param": "start_date", "lookback_days": 2200},
+                           "start_param": "start_date", "lookback_days": 4000},
         # 美债 2Y（黄金台账①的姊妹因子）。2Y 比 10Y 更贴近货币政策路径，
         # 黄金实证里它对金价的负相关（−0.305）确实强于 10Y（−0.261）。
         "us2_y": {"fn": "bond_zh_us_rate", "date": ["日期"], "value": ["美国国债收益率2年"],
-                  "period": "daily", "start_param": "start_date", "lookback_days": 400},
+                  "period": "daily", "start_param": "start_date", "lookback_days": 4000},
         # 美国 CPI 同比（黄金台账③「实际利率代理」的另一条腿）。
         # ⚠️ 该源最新一期「现值」常为 NaN（发布日期未到），必须靠 dropna 丢弃，
         # 否则会拿 NaN 去算实际利率、把整条因子判成数据缺失。
         "us_cpi_yoy": {"fn": "macro_usa_cpi_yoy", "date": ["时间"], "value": ["现值"],
                        "period": "monthly"},
+        # 美国 10Y 实际收益率（TIPS，FRED DFII10）。黄金台账 ③ 由「10Y 名义 − CPI 同比」
+        # 这一**事后**口径升级而来（原 note 已实证代理口径与金价 +0.153，符号与理论相反）。
+        # 走 calc 而非 fn：FRED 不是 akshare 函数，实现见 _calc_fred_series。
+        # timeout 给 40s——外层再 +10s，覆盖 6200 行 CSV 的慢网络情形。
+        "tips_10y": {"calc": "_calc_tips_10y", "period": "daily", "timeout": 40},
+        # 中证800 盈利收益率（E/P，月频，2007 起 238 期）。A股台账 ② 的长历史估值锚：
+        # 中证官网估值只有最近 20 个交易日，股息率无法做分位；E/P 与股息率同属估值倒数口径，
+        # E/P − 10Y 即股权风险溢价 ERP。实现见 _calc_idx800_ey。
+        "idx800_ey": {"calc": "_calc_idx800_ey", "period": "monthly", "timeout": 60},
+        # 红利低波股息率（估算，2015 起日频）。红利台账 ① 的长历史口径：
+        # 官网精确值只保留 20 个交易日，故用「支付率 ÷ 当日PE」反推，
+        # 实测与开源项目精确值 r=0.997、绝对偏差中位 0.42pp（口径差非方法误差）。
+        "h30269_dy": {"calc": "_calc_h30269_dy", "period": "daily", "timeout": 60},
         # 全球黄金 ETF 总库存（黄金台账④）。快变量、与金价同步/滞后正相关（r=+0.468），
         # 只能做同步确认，不能当领先指标——台账 note 里必须写明。
         # 该接口实测约 21s（金十全量 2875 行），超过全局 AKSHARE_CALL_TIMEOUT(20s)，

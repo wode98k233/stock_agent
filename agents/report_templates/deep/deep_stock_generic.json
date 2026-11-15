@@ -1,0 +1,244 @@
+{
+  "template_id": "deep_stock_generic",
+  "variant": "stock",
+  "name": "个股深度 · 通用",
+  "asset_type": "stock",
+  "total_words_target": [
+    10000,
+    13000
+  ],
+  "charts_target": [
+    8,
+    20
+  ],
+  "estimate_anchors": [
+    "营收增速",
+    "ROE",
+    "PE分位",
+    "机构评级"
+  ],
+  "note": "个股深度看业务、财务质量、估值、筹码与催化；每个结论都要有可验证数字。",
+  "slots": {
+    "snapshot": {
+      "desc": "点位/价格、涨跌、成交、估值分位",
+      "priority": 0
+    },
+    "valuation": {
+      "desc": "PE/PB/股息率及历史分位",
+      "priority": 0
+    },
+    "series_history": {
+      "desc": "指数/个股历史序列",
+      "priority": 0
+    },
+    "capital_flow": {
+      "desc": "主力净流入、北向、两融",
+      "priority": 0
+    },
+    "consensus_poll": {
+      "desc": "近 90 天机构观点与评级",
+      "priority": 1,
+      "tool_hint": "iwc_search(report)"
+    },
+    "financials": {
+      "desc": "营收/净利/毛利率/现金流",
+      "priority": 1
+    },
+    "news": {
+      "desc": "政策、价格、渠道相关新闻",
+      "priority": 2
+    },
+    "chip": {
+      "desc": "获利比例、成本区间、集中度",
+      "priority": 1
+    },
+    "risk": {
+      "desc": "波动、回撤、夏普、Beta",
+      "priority": 1
+    }
+  },
+  "sections": [
+    {
+      "id": "summary",
+      "title": "投资摘要",
+      "target_words": [
+        600,
+        800
+      ],
+      "required": true,
+      "data_slots": [
+        "snapshot",
+        "valuation"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "一句话给结论、时间框架与信号强度；列 3–5 条「判断 + 数字」；最后写最大风险。"
+    },
+    {
+      "id": "catalog",
+      "title": "目录与图表目录",
+      "target_words": [
+        0,
+        0
+      ],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": [
+        "program"
+      ],
+      "prompt": "由程序生成，不要手写正文。"
+    },
+    {
+      "id": "consensus",
+      "title": "与市场不同之处",
+      "target_words": [
+        800,
+        1000
+      ],
+      "required": true,
+      "data_slots": [
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "先写市场共识（机构 + 日期），再写我们的反证（自有数据），最后给验证条件。"
+    },
+    {
+      "id": "business",
+      "title": "公司与业务",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "financials"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "业务结构、收入拆分、客户与产能；数字必须来自财报并注明年份。"
+    },
+    {
+      "id": "fundamentals",
+      "title": "财务质量",
+      "target_words": [
+        1400,
+        1800
+      ],
+      "required": true,
+      "data_slots": [
+        "financials",
+        "series_history"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "营收/利润/毛利率/现金流/负债；同比与三年趋势。"
+    },
+    {
+      "id": "valuation",
+      "title": "估值与分位",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "valuation"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "PE/PB/PS 分位与同业对比；不给目标价就明说「未覆盖」。"
+    },
+    {
+      "id": "chips",
+      "title": "筹码与资金",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "chip",
+        "capital_flow"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "获利比例、成本区间、主力/北向资金；筹码数据缺失就写「数据缺失：筹码」。"
+    },
+    {
+      "id": "catalysts",
+      "title": "催化剂与风险",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "news",
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "事件催化（业绩/政策/产品）与风险；每条带时间与来源。"
+    },
+    {
+      "id": "advice",
+      "title": "投资建议",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "valuation",
+        "financials"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "给出买入区间/观察条件；不构成投资建议需注明。"
+    },
+    {
+      "id": "risk",
+      "title": "风险提示",
+      "target_words": [
+        400,
+        600
+      ],
+      "required": true,
+      "data_slots": [
+        "risk",
+        "news"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "经营、财务、估值、政策风险；可引用波动/回撤数字。"
+    }
+  ],
+  "qa_rules": [
+    "任何外部数字必须带（来源，日期）；无来源数字不得出现",
+    "数据缺失必须显式写「数据缺失：<字段>」，禁止用 0 或「约」代替",
+    "图表必须带 source 与 asof，无源图不得出现",
+    "个股结论必须区分「事实」与「判断」"
+  ]
+}

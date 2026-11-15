@@ -21,10 +21,13 @@ from signal_eval.stats import (
     CYCLES, win_rate, wilson_ci, pair_signals, paired_return, portfolio_equity,
 )
 from server.signal_eval_service import (
-    _bench_code_for, _bench_returns, _kline_cached, _kline_for,
-    _load_signals, _pair_returns, _returns_cache, _signal_returns, _symbol_code,
+    _bench_code_for, _bench_returns, _bump_cache_epoch, _kline_cached, _kline_for,
+    _load_signals, _pair_returns, _returns_cache, _signal_returns,
+    _symbol_code, cached_result, result_cache_key,
     build_calibration as _calibration_sync,
+    build_conditional as _conditional_sync,
     build_overview as _overview_sync,
+    classify_returns_status,
 )
 
 router = APIRouter(prefix="/api/signal-eval", tags=["signal-eval"])
@@ -81,7 +84,8 @@ def _unrecognized_sync(page: int = 1, size: int = 50) -> dict:
     """未识别信号列表（symbol_key 为空且未标记大盘类），含对话上下文片段。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM signal WHERE symbol_key IS NULL AND is_market_wide=0 ORDER BY signal_time DESC"
+        "SELECT * FROM signal WHERE symbol_key IS NULL AND is_market_wide=0 "
+        "AND IFNULL(scope,'symbol')='symbol' ORDER BY signal_time DESC"
     ).fetchall()
     items = []
     for r in rows:
@@ -105,8 +109,9 @@ def _mark_symbol_sync(sig_id: int, symbol_key: str, symbol_name: str | None) -> 
     conn.commit()
     if cur.rowcount == 0:
         raise ValueError(f"信号不存在: {sig_id}")
-    # 补标后统计口径变化，清该模块级缓存
+    # 补标后统计口径变化：清该信号收益缓存，并 bump epoch 让结果级缓存整体失效
     _returns_cache.pop(sig_id, None)
+    _bump_cache_epoch()
 
 
 def _mark_market_wide_sync(sig_id: int, is_market_wide: bool = True) -> None:
@@ -116,12 +121,16 @@ def _mark_market_wide_sync(sig_id: int, is_market_wide: bool = True) -> None:
     conn.commit()
     if cur.rowcount == 0:
         raise ValueError(f"信号不存在: {sig_id}")
+    # 主样本变化 → 结果级缓存失效（返回的统计不再包含/重新包含该信号）
+    _bump_cache_epoch()
 
 
 def start_rescan() -> str:
     """异步启动扫描，返回 task_id（后台线程，不阻塞请求）。"""
     task_id = uuid.uuid4().hex[:12]
     _rescan_progress[task_id] = {"pct": 0, "status": "running", "added": 0}
+    # 重扫会改主样本：开始与结束各失效一次（期间算出的结果也不能留到扫完后）
+    _bump_cache_epoch()
 
     def _run():
         try:
@@ -129,6 +138,8 @@ def start_rescan() -> str:
             _rescan_progress[task_id] = {"pct": 1.0, "status": "completed", "added": added}
         except Exception as e:  # noqa: BLE001
             _rescan_progress[task_id] = {"pct": 1.0, "status": "failed", "error": str(e)}
+        finally:
+            _bump_cache_epoch()
 
     threading.Thread(target=_run, daemon=True).start()
     return task_id
@@ -142,6 +153,15 @@ async def overview(cost: float = Query(default=0.0, ge=0, le=1, description="单
     return {"code": 0, "data": data, "msg": "ok"}
 
 
+@router.get("/conditional")
+async def conditional(cost: float = Query(default=0.0, ge=0, le=1,
+                                          description="单边交易成本%")):
+    """条件单桶：类型分布 + 触发率（不计入主胜率）。"""
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, _conditional_sync, cost)
+    return {"code": 0, "data": data, "msg": "ok"}
+
+
 @router.get("/matrix")
 async def matrix(cost: float = Query(default=0.0, ge=0, le=1, description="单边交易成本%")):
     """胜率矩阵：方向(buy/sell/配对/置信度分层) × 周期(5/10/20/30/60/至今)。"""
@@ -151,26 +171,38 @@ async def matrix(cost: float = Query(default=0.0, ge=0, le=1, description="单�
 
 
 def _matrix_sync(cost_pct: float = 0.0) -> dict:
+    """matrix 入口：结果级缓存（键含 cost 与 epoch）。"""
+    return cached_result(result_cache_key("matrix", cost_pct),
+                         lambda: _compute_matrix(cost_pct))
+
+
+def _compute_matrix(cost_pct: float = 0.0) -> dict:
     """matrix 同步实现（线程池执行，不阻塞事件循环）。"""
     sigs = _load_signals()
     cols = [*CYCLES, "now"]
     rows = []
 
-    def _cells(arr):
+    def _cells(arr, reverse=False):
+        """方向 × 周期胜率格；sell 需先把收益取反（卖后跌 = 卖对），与 overview 同口径。"""
         cells = []
         for c in cols:
-            vals = [r for s in arr if (r := _signal_returns(s, cost_pct)["ret"].get(c)) is not None]
+            vals = []
+            for s in arr:
+                r = _signal_returns(s, cost_pct)["ret"].get(c)
+                if r is not None:
+                    vals.append(-r if reverse else r)
             w = win_rate(vals)
             ci = wilson_ci(sum(1 for v in vals if v > 0), len(vals)) if len(vals) >= 5 else None
             cells.append({"winrate": w, "n": len(vals), "ci": ci})
         return cells
 
-    for key, label, fn in [
-        ("buy", "buy 买入", lambda s: s["decision"] == "buy"),
-        ("sell", "sell 卖出（反向）", lambda s: s["decision"] == "sell"),
+    for key, label, fn, reverse in [
+        ("buy", "buy 买入", lambda s: s["decision"] == "buy", False),
+        ("sell", "sell 卖出（反向）", lambda s: s["decision"] == "sell", True),
     ]:
         arr = [s for s in sigs if fn(s)]
-        rows.append({"key": key, "label": label, "cells": _cells(arr), "n": len(arr)})
+        rows.append({"key": key, "label": label, "cells": _cells(arr, reverse=reverse),
+                     "n": len(arr)})
 
     pairs = pair_signals(sigs)
     pair_rets = _pair_returns(pairs, cost_pct)
@@ -179,13 +211,18 @@ def _matrix_sync(cost_pct: float = 0.0) -> dict:
                  "cells": [{"winrate": pw, "n": len(pair_rets), "ci": None}] * len(cols),
                  "n": len(pair_rets)})
 
-    for label, lo, hi in [
-        ("buy 高置信 (≥0.75)", 0.75, 1.01),
-        ("buy 中置信 (0.60~0.74)", 0.60, 0.75),
-        ("buy 低置信 (<0.60)", 0.0, 0.60),
+    # 置信度分层：高 / 中 / 低 / 未评级。未评级（confidence 为 NULL）原先被
+    # `(confidence or 0)` 折成 0 并入「低置信 <0.60」，与 dimension_stats 单列的
+    # 「未评级」行对不上（同一页两个数）。这里显式四档、条件互斥，四行 n 之和
+    # 等于 buy 信号数。
+    buy_sigs = [s for s in sigs if s["decision"] == "buy"]
+    for label, match in [
+        ("buy 高置信 (≥0.75)", lambda c: c is not None and c >= 0.75),
+        ("buy 中置信 (0.60~0.74)", lambda c: c is not None and 0.60 <= c < 0.75),
+        ("buy 低置信 (<0.60)", lambda c: c is not None and c < 0.60),
+        ("buy 未评级", lambda c: c is None),
     ]:
-        arr = [s for s in sigs if s["decision"] == "buy"
-               and (s["confidence"] or 0) >= lo and (s["confidence"] or 0) < hi]
+        arr = [s for s in buy_sigs if match(s.get("confidence"))]
         if arr:
             rows.append({"key": "conf", "label": label, "cells": _cells(arr), "n": len(arr)})
 
@@ -196,17 +233,27 @@ def _matrix_sync(cost_pct: float = 0.0) -> dict:
 async def signals(decision: str | None = None,
                   page: int = Query(default=1, ge=1),
                   size: int = Query(default=50, ge=1, le=200),
+                  include_conditional: bool = False,
                   cost: float = Query(default=0.0, ge=0, le=1, description="单边交易成本%")):
     """信号样本列表（筛选/分页），每行含各周期收益/峰值/回撤 + paired 标记。"""
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(
-        None, _signals_sync, decision, page, size, cost)
+        None, _signals_sync, decision, page, size, cost, include_conditional)
     return {"code": 0, "data": data, "msg": "ok"}
 
 
-def _signals_sync(decision: str | None, page: int, size: int, cost_pct: float = 0.0) -> dict:
+def _signals_sync(decision: str | None, page: int, size: int, cost_pct: float = 0.0,
+                  include_conditional: bool = False) -> dict:
+    """signals 入口：结果级缓存（键含筛选/分页/cost/epoch）。"""
+    return cached_result(
+        result_cache_key("signals", decision, page, size, cost_pct, include_conditional),
+        lambda: _compute_signals(decision, page, size, cost_pct, include_conditional))
+
+
+def _compute_signals(decision: str | None, page: int, size: int, cost_pct: float = 0.0,
+                     include_conditional: bool = False) -> dict:
     """signals 同步实现（线程池执行）。"""
-    sigs = _load_signals()
+    sigs = _load_signals(include_conditional=include_conditional)
     if decision:
         sigs = [s for s in sigs if s["decision"] == decision]
     # paired 标记 + 配对收益 + 卖出日期
@@ -220,16 +267,27 @@ def _signals_sync(decision: str | None, page: int, size: int, cost_pct: float = 
     items = []
     for s in sigs:
         r = _signal_returns(s, cost_pct)
-        bench = _bench_returns(s)
         now_ret = r["ret"].get("now")
+        # 基准/alpha 只对 buy 有意义（页面只在 buy 行展示）：hold/sell 不再为
+        # alpha 付基准K线/收益计算的钱（原先 144 条全算，只有 24 条 buy 需要）。
+        # 前端 hold/sell 的 alpha 列显示「—」，属预期（见 docs/areas/observability-and-eval.md）。
+        if s["decision"] == "buy":
+            bench = _bench_returns(s)
+            bench_code = _bench_code_for(s)
+        else:
+            bench = None
+            bench_code = None
         pi = paired_info.get(s["id"])
         items.append({**s, "returns": r["ret"], "peak": r["peak"], "maxDD": r["maxDD"],
                       "entry_price": r.get("entry_price"),
+                      "entry_date": r.get("entry_date"),
+                      "entry_mode": r.get("entry_mode"),
+                      "data_status": classify_returns_status(r),
                       "paired": s["id"] in paired_ids,
                       "paired_ret": pi[1] if pi else None,
                       "paired_sell_date": pi[0] if pi else None,
                       "bench": bench,
-                      "bench_code": _bench_code_for(s),
+                      "bench_code": bench_code,
                       "alpha": (round(now_ret - bench, 2)
                                 if now_ret is not None and bench is not None else None)})
     total = len(items)
@@ -246,6 +304,12 @@ async def top(cost: float = Query(default=0.0, ge=0, le=1, description="单边�
 
 
 def _top_sync(cost_pct: float = 0.0) -> dict:
+    """top 入口：结果级缓存（键含 cost 与 epoch）。"""
+    return cached_result(result_cache_key("top", cost_pct),
+                         lambda: _compute_top(cost_pct))
+
+
+def _compute_top(cost_pct: float = 0.0) -> dict:
     """top 同步实现（线程池执行）。"""
     sigs = [s for s in _load_signals() if s["decision"] in ("buy", "sell")]
     rows = []
@@ -298,6 +362,12 @@ def _bench_equity(dates: list[str], bench_kline: list[dict]) -> list[float | Non
 
 
 def _portfolio_sync(cost_pct: float = 0.0) -> dict:
+    """portfolio 入口：结果级缓存（键含 cost 与 epoch）。"""
+    return cached_result(result_cache_key("portfolio", cost_pct),
+                         lambda: _compute_portfolio(cost_pct))
+
+
+def _compute_portfolio(cost_pct: float = 0.0) -> dict:
     """组合净值同步实现（线程池执行）。"""
     sigs = _load_signals()
     syms = sorted({s["symbol_key"] for s in sigs if s["decision"] in ("buy", "sell")})
@@ -373,3 +443,22 @@ async def calibration(cost: float = Query(default=0.0, ge=0, le=1, description="
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, _calibration_sync, cost)
     return {"code": 0, "data": data, "msg": "ok"}
+
+
+# ── 策略研发：按策略聚合的前瞻统计 ──────────────────────
+
+def _by_strategy_sync(strategy_id: str, cost_pct: float, holding_days: int) -> dict:
+    from server.signal_eval_service import build_by_strategy as _build
+    return _build(strategy_id, cost_pct=cost_pct, holding_days=holding_days)
+
+
+@router.get("/by-strategy/{strategy_id}")
+async def by_strategy(strategy_id: str,
+                      cost: float = Query(default=0.0, ge=0, le=1, description="单边交易成本%"),
+                      holding_days: int = Query(default=5, ge=1, le=60)):
+    """某策略的前瞻跟踪统计（回测口径 vs 前瞻口径的「前瞻」那一半）。
+
+    返回裸 payload（不套 {code,data,msg} 信封）：消费方是策略研发页，直接读顶层键。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _by_strategy_sync, strategy_id, cost, holding_days)

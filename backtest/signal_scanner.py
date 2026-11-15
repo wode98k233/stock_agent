@@ -8,7 +8,8 @@
 - scan 只记录命中 bar，不实际下单
 - scan 买点日期 ⊇ 回测实际买入日期（回测受持仓状态约束会跳过部分买点）
 
-数据口径与 build_run_kline 一致：_load_stock_daily(auto_heal=False) + _apply_adjustment
+数据口径与 build_run_kline 一致：_load_stock_daily(auto_heal=False) 直通——
+库内为源侧预复权数据（P0 §11.8.3），运行时复权已停用。
 """
 import logging
 import time
@@ -18,7 +19,8 @@ from typing import Any, Dict, List, Optional
 import backtrader as bt
 import pandas as pd
 
-from backtest.data_adapter import _load_stock_daily, _apply_adjustment, _normalize_columns
+from backtest import silence_backtrader_warnings
+from backtest.data_adapter import _load_index_daily, _load_stock_daily, _normalize_columns
 from backtest.strategies import get_strategy_class
 from utils.cache.market_data_db import get_latest_trade_date, refresh_stale_tail
 from utils.trading_calendar import get_effective_trading_date
@@ -73,7 +75,8 @@ class SignalScanner:
              end_date: Optional[str] = None,
              params: Optional[Dict[str, Any]] = None,
              adjust_type: str = 'qfq',
-             days: int = 120) -> Dict[str, Any]:
+             days: int = 120,
+             market: str = "") -> Dict[str, Any]:
         """执行无状态信号扫描
 
         Args:
@@ -84,6 +87,10 @@ class SignalScanner:
             params: 策略参数覆盖（如 {'fast_period': 10}）
             adjust_type: 复权类型 qfq / hfq / none
             days: start_date 缺省时的回溯天数
+            market: 'INDEX' 时从 `index_daily` 取数（指数没有复权概念）；
+                缺省按个股读 `stock_daily`。⚠️ `000001` 在两张表里是两个标的
+                （上证指数 / 平安银行），必须显式区分——这是 2026-11-09 前
+                指数图板直接禁用策略扫描的原因。
 
         Returns:
             {
@@ -97,25 +104,31 @@ class SignalScanner:
             }
         """
         params = params or {}
+        is_index = str(market or "").strip().upper() == "INDEX"
         start_date, end_date = self._resolve_dates(start_date, end_date, days)
 
         # 0. 读取侧补尾：本地缓存落后于最近已完成交易日时先拉缺口（失败静默）
-        try:
-            refresh_stale_tail(code)
-        except Exception:
-            logger.debug("[scan] %s 尾部补齐异常（继续用本地缓存）", code, exc_info=True)
+        #    指数分支不补尾：index_daily 的补数走 K 线图路由/采集侧，扫描只读本地。
+        if not is_index:
+            try:
+                refresh_stale_tail(code)
+            except Exception:
+                logger.debug("[scan] %s 尾部补齐异常（继续用本地缓存）", code, exc_info=True)
 
         # 1. 加载策略类
         strategy_cls = get_strategy_class(strategy_id)
 
         # 2. 加载数据（与 build_run_kline 同口径：auto_heal=False）
-        df = _load_stock_daily(code, start_date, end_date, auto_heal=False)
+        if is_index:
+            df = _load_index_daily(code, start_date, end_date, auto_heal=False)
+        else:
+            df = _load_stock_daily(code, start_date, end_date, auto_heal=False)
         if df is None or df.empty:
             return self._empty_result(code, strategy_id, adjust_type)
 
-        # 复权处理
-        if adjust_type in ('qfq', 'hfq'):
-            df = _apply_adjustment(df, code, adjust_type)
+        # 口径声明（P0 §11.8.3）：库内为源侧预复权数据，运行时复权已停用，直通
+        if adjust_type in ('none', 'hfq'):
+            logger.warning(f'库内为前复权预复权数据，无法提供 {adjust_type} 口径（直通）: {code}')
 
         # 截取最近 days 根（start_date 缺省时）
         if not start_date or len(df) > days:
@@ -217,8 +230,9 @@ class SignalScanner:
                 if df is None or df.empty:
                     return code, {"hits": [], "sells": [], "latest_date": "",
                                   "closes": [], "error": "无K线数据"}
-                if adjust_type in ('qfq', 'hfq'):
-                    df = _apply_adjustment(df, code, adjust_type)
+                # 口径声明（P0 §11.8.3）：库内为源侧预复权数据，运行时复权已停用，直通
+                if adjust_type in ('none', 'hfq'):
+                    logger.warning(f'库内为前复权预复权数据，无法提供 {adjust_type} 口径（直通）: {code}')
                 df = df.tail(days).copy()
                 kline = self._build_kline(df)
                 dates = [k.get("date") for k in kline]
@@ -313,6 +327,7 @@ class SignalScanner:
             cerebro.adddata(bt.feeds.PandasData(dataname=probe_df,
                                                 datetime='trade_date'))
             cerebro.addstrategy(strategy_cls, _scan_mode=True, **params)
+            silence_backtrader_warnings()
             strat = cerebro.run()[0]
             return int(getattr(strat, '_minperiod', 0) or 0)
         except Exception:
@@ -355,6 +370,7 @@ class SignalScanner:
 
         # runonce=False：走 next() 逐 bar 模式，避免 once() 向量化在边界
         # （数据长度恰等于 minperiod）时的越界；实测信号值与 runonce=True 逐条一致。
+        silence_backtrader_warnings()
         results = cerebro.run(runonce=False)
         strat = results[0]
         return strat.get_signal_log()

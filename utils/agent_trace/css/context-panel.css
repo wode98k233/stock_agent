@@ -1,0 +1,226 @@
+/* ── 上下文面板（Trace Viewer「上下文」tab）──────────────────────────────
+   移植自 docs/prototypes/2026-10-17-context-insight.html 的 section#skinA（暗色皮肤）。
+   class 名与原型一致；选择器全部限定在 #ctxPaneCtx 内（tab 条限定在 #left-panel > .tabbar），
+   不影响「概览」pane 与其它面板。
+
+   颜色：只用 css/base.css 已有变量。原型 skinA 自己声明了一套 --c1..--c8 别名，这里一一
+   对应回 base.css 变量；唯一例外是 --c7（原型 #a5b4fc periwinkle，base.css 无同款色），
+   取 --green —— 设计要求「思考段不得用灰」（灰在暗底上会被读成未采集占位），
+   且思考 / 回答两段是同一张图里的双色堆叠，必须可辨识。 */
+
+#ctxPaneCtx {
+  --c1: var(--accent);    /* 系统提示词 */
+  --c2: var(--purple);    /* 工具定义 */
+  --c3: var(--warning);   /* 用户消息 */
+  --c4: var(--pink);      /* 注入内容 · 缓存命中之外的暖色 */
+  --c5: var(--success);   /* 助手消息 */
+  --c6: var(--orange);    /* 工具结果 */
+  --c7: var(--green);     /* 思考（含在输出内） */
+  --c8: var(--cyan);      /* 回答（正文） */
+}
+
+/* ── tab 骨架 ── */
+#left-panel > .tabbar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+#left-panel > .tabbar label {
+  padding: 5px 11px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+#left-panel > .tabbar label:hover { color: var(--text-dim); }
+#left-panel > .tabbar label.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 700;
+}
+/* 上下文 pane 的显示/隐藏由 context-panel.js 用 inline display 控制（原型用勾选器，
+   这里没有勾选器，且初始必须是隐藏态） */
+
+/* ── 卡片 ── */
+#ctxPaneCtx .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+#ctxPaneCtx .card-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 9px;
+  letter-spacing: .02em;
+}
+#ctxPaneCtx .card-h .spacer { flex: 1; }
+#ctxPaneCtx .hair { color: var(--muted); font-size: 10.5px; font-weight: 400; }
+
+/* ── 栅格与文本工具类 ── */
+#ctxPaneCtx .grid { display: grid; gap: 10px; }
+#ctxPaneCtx .g-auto { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+/* 原型是宽页面、列宽下界 112px；左栏只有半屏，112px 会让 nowrap 的 KPI 标签溢出格子 → 横向滚动条。
+   这里抬到 132px（放不下时 auto-fit 自然减少列数），视觉仍是「KPI 条」。 */
+#ctxPaneCtx .g-kpi { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
+#ctxPaneCtx .stack { display: grid; gap: 10px; }
+#ctxPaneCtx .mono { font-family: var(--font-mono); }
+#ctxPaneCtx .dim { color: var(--muted); }
+#ctxPaneCtx .small { font-size: 11px; }
+
+/* ── KPI ── */
+#ctxPaneCtx .kpi { text-align: left; }
+#ctxPaneCtx .kpi .k-l { font-size: 10.5px; color: var(--muted); margin-bottom: 2px; white-space: nowrap; }
+#ctxPaneCtx .kpi .k-v { font-size: 19px; font-weight: 700; letter-spacing: -.01em; line-height: 1.15; }
+#ctxPaneCtx .kpi .k-s { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+#ctxPaneCtx .kpi .k-v.c-accent { color: var(--accent); }
+#ctxPaneCtx .kpi .k-v.c-warn { color: var(--warning); }
+#ctxPaneCtx .kpi .k-v.c-ok { color: var(--success); }
+#ctxPaneCtx .kpi .k-v.c-purple { color: var(--purple); }
+
+/* ── 环形图 ── */
+#ctxPaneCtx .ring-wrap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+#ctxPaneCtx .ring { position: relative; width: 132px; height: 132px; flex: none; }
+#ctxPaneCtx .ring svg { transform: rotate(-90deg); display: block; }
+#ctxPaneCtx .ring .ring-mid {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center;
+}
+#ctxPaneCtx .ring .ring-mid .v { font-size: 18px; font-weight: 700; line-height: 1.1; }
+#ctxPaneCtx .ring .ring-mid .l { font-size: 10px; color: var(--muted); }
+#ctxPaneCtx .ring .ring-mid .r { font-size: 10.5px; color: var(--success); font-weight: 700; margin-top: 2px; }
+/* 图例：min-width 给一个下界，容器放不下时靠 .ring-wrap 的 flex-wrap 整块换到环形下方
+   （左栏约半屏，#content 是 1fr 1fr —— 两列环形卡每张只有 ~300px，并排会把图例挤到只剩几个字）。
+   放得下时仍是原型的 环形 + 图例 并排。 */
+#ctxPaneCtx .legend { display: grid; gap: 4px; min-width: 200px; flex: 1; max-width: 420px; }
+#ctxPaneCtx .legend .li { display: flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; min-width: 0; }
+#ctxPaneCtx .legend .li .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+#ctxPaneCtx .legend .li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#ctxPaneCtx .legend .li .pc { color: var(--muted); font-variant-numeric: tabular-nums; }
+#ctxPaneCtx .legend .li .vl { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+
+/* ── 当前上下文：分段占用条 ── */
+#ctxPaneCtx .occ {
+  display: flex; height: 26px; border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border-hi); background: var(--surface2);
+}
+#ctxPaneCtx .occ i { display: block; height: 100%; }
+/* 两段掩码的斜纹：色值取 base.css 变量（原型写的是同色 rgba，这里不硬编码） */
+#ctxPaneCtx .occ .reserve,
+#ctxPaneCtx .dot-mask-reserve {
+  background-image: repeating-linear-gradient(45deg, var(--text-dim) 0 4px, transparent 4px 8px);
+}
+#ctxPaneCtx .occ .out,
+#ctxPaneCtx .dot-mask-out {
+  background-image: repeating-linear-gradient(45deg, var(--accent) 0 4px, transparent 4px 8px);
+}
+#ctxPaneCtx .occ-scale {
+  display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px;
+}
+
+/* ── 横向条（耗时归因）── */
+#ctxPaneCtx .barrows { display: grid; gap: 5px; }
+#ctxPaneCtx .br {
+  display: grid; grid-template-columns: 74px 1fr 118px; gap: 9px;
+  align-items: center; font-size: 11px;
+}
+#ctxPaneCtx .br-l { color: var(--text-dim); white-space: nowrap; }
+#ctxPaneCtx .br-t {
+  display: block; height: 11px; border-radius: 2px;
+  background: var(--surface2); overflow: hidden;
+}
+#ctxPaneCtx .br-t i { display: block; height: 100%; }
+#ctxPaneCtx .br-v {
+  color: var(--muted); text-align: right;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* ── 趋势柱 ── */
+#ctxPaneCtx .trend {
+  position: relative; height: 168px; display: flex; align-items: flex-end;
+  gap: 3px; padding-top: 6px;
+}
+#ctxPaneCtx .trend-col {
+  flex: 1; height: 100%; display: flex; flex-direction: column-reverse;
+  border-radius: 2px 2px 0 0; overflow: hidden; min-width: 0; position: relative;
+}
+#ctxPaneCtx .trend-col:hover { outline: 1px solid var(--accent); outline-offset: 1px; }
+#ctxPaneCtx .trend-col i { display: block; width: 100%; }
+#ctxPaneCtx .trend-col.mark::after {
+  content: ""; position: absolute; inset: 0;
+  border: 1px dashed var(--warning); border-radius: 2px 2px 0 0;
+}
+#ctxPaneCtx .trend-x { display: flex; gap: 3px; margin-top: 5px; }
+#ctxPaneCtx .trend-x span {
+  flex: 1; font-size: 9.5px; color: var(--muted); text-align: center; overflow: hidden;
+}
+#ctxPaneCtx .trend-grid {
+  position: absolute; inset: 6px 0 0; pointer-events: none;
+  background-image: linear-gradient(to top, var(--border) 1px, transparent 1px);
+  background-size: 100% 25%;
+}
+#ctxPaneCtx .chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
+  font-size: 11px; border: 1px solid var(--border-hi); color: var(--text-dim);
+  cursor: pointer; background: var(--surface2);
+}
+#ctxPaneCtx .chip.on {
+  border-color: var(--accent); color: var(--accent); font-weight: 700;
+  background: var(--accent-dim);
+}
+
+/* ── 事件表 / 最慢调用表 ── */
+#ctxPaneCtx .ev { display: grid; gap: 0; }
+#ctxPaneCtx .ev .row {
+  display: grid; grid-template-columns: 62px 76px 1fr 58px; gap: 8px; align-items: center;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11px;
+}
+#ctxPaneCtx .ev .row:last-child { border-bottom: 0; }
+#ctxPaneCtx .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+#ctxPaneCtx .ev .k { font-weight: 700; }
+#ctxPaneCtx .k-compress { color: var(--warning); }
+#ctxPaneCtx .k-skill { color: var(--purple); }
+#ctxPaneCtx .k-fork { color: var(--accent); }
+#ctxPaneCtx .k-memory { color: var(--c4); }
+#ctxPaneCtx .ev .d { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ctxPaneCtx .ev .j { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ── 上下文浏览器（树）── */
+#ctxPaneCtx .browser details { border-bottom: 1px solid var(--border); }
+#ctxPaneCtx .browser details:last-child { border-bottom: 0; }
+#ctxPaneCtx .browser summary {
+  display: grid; grid-template-columns: 10px 1fr auto auto; gap: 8px; align-items: center;
+  padding: 7px 0; cursor: pointer; list-style: none; font-size: 11.5px;
+}
+#ctxPaneCtx .browser summary::-webkit-details-marker { display: none; }
+#ctxPaneCtx .browser summary .dot { width: 8px; height: 8px; border-radius: 2px; }
+#ctxPaneCtx .browser summary .nm { font-weight: 600; }
+#ctxPaneCtx .browser summary .cnt { color: var(--muted); font-size: 10.5px; }
+#ctxPaneCtx .browser summary .tok {
+  color: var(--text-dim); font-variant-numeric: tabular-nums;
+  min-width: 56px; text-align: right;
+}
+#ctxPaneCtx .browser .body { padding: 2px 0 9px 18px; font-size: 11px; color: var(--text-dim); }
+#ctxPaneCtx .browser .body .ln {
+  padding: 3px 0; border-bottom: 1px dashed var(--border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#ctxPaneCtx .browser .body .ln:last-child { border-bottom: 0; }
+
+/* ── 未采集 / 口径说明 ── */
+#ctxPaneCtx .badge-null {
+  display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
+  background: var(--red-dim); color: var(--error); border: 1px solid var(--border-hi);
+}
+#ctxPaneCtx .honest {
+  margin-top: 9px; padding: 7px 9px; border-radius: 4px; font-size: 10.5px;
+  background: var(--red-dim); border: 1px dashed var(--border-hi); color: var(--text-dim);
+}
+#ctxPaneCtx .honest b { color: var(--text); }

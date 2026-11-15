@@ -79,8 +79,16 @@ class TestBacktestEngineRun:
             "total_return", "annual_return", "sharpe_ratio", "max_drawdown",
             "trade_count", "win_rate", "final_equity", "equity_curve",
             "drawdown_curve", "monthly_returns",
+            # 体检四件套必须出现在**返回值**里（不只是落库）：研发闭环的 degenerate
+            # 判定读 result['health']；2026-10-19 真实跑 2 轮时发现它一直是空串。
+            "health", "health_detail", "data_bars", "expected_bars", "coverage_pct",
         }
         assert required <= set(result.keys())
+        assert result["health"] in {
+            "ok", "no_signal", "insufficient_bars", "data_gap",
+            "bad_strategy", "invalid_params", "error",
+        }
+        assert result["data_bars"] == len(result["equity_curve"]) or result["data_bars"] >= 0
 
     def test_equity_curve_structure(self, base_config):
         """净值曲线结构正确"""

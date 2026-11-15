@@ -4,6 +4,7 @@ TokenUsage 统一提取模块测试
 """
 import pytest
 from utils.token_usage import (
+    extract_base_url,
     extract_model_name,
     extract_token_usage,
     normalize_token_usage_dict,
@@ -468,3 +469,31 @@ class TestExtractModelName:
     def test_none_llm_output(self):
         """llm_output=None 不报错"""
         assert extract_model_name(MockLLMOutput(llm_output=None)) == ""
+
+
+class TestExtractBaseUrl:
+    """extract_base_url：供应商统计用，取本次调用**实际端点**（响应回填）。
+
+    2026-10-15 故障复盘：成本原统一用全局默认端点反查供应商，
+    压缩旁路（sensenova）的 9 次调用被全部误归到主端点供应商（opencode-zen）。
+    """
+
+    def test_from_llm_output(self):
+        resp = MockLLMOutput(llm_output={
+            "model_name": "deepseek-v4-flash",
+            "base_url": "https://token.sensenova.cn/v1",
+        })
+        assert extract_base_url(resp) == "https://token.sensenova.cn/v1"
+
+    def test_missing_returns_empty(self):
+        """缺失时返回空串 —— 调用方回落全局默认端点（老路径行为不变）"""
+        assert extract_base_url(MockLLMOutput()) == ""
+        assert extract_base_url(MockLLMOutput(llm_output={"model_name": "x"})) == ""
+        assert extract_base_url(MockLLMOutput(llm_output=None)) == ""
+
+    def test_empty_string_treated_as_missing(self):
+        assert extract_base_url(MockLLMOutput(llm_output={"base_url": ""})) == ""
+
+    def test_non_dict_llm_output(self):
+        """llm_output 非 dict（旧 provider）不报错"""
+        assert extract_base_url(MockLLMOutput(llm_output=["x"])) == ""

@@ -9,9 +9,13 @@ from threading import Lock
 
 @dataclass
 class BudgetLimits:
+    # 计费口径上限（命中/免费已折算）
     max_tokens_per_query: int = 50000
     max_llm_calls_per_query: int = 20
     max_time_seconds: int = 60
+    # 原始 token 硬上限（0 = 不启用）。兜底用：权重配错时它先炸，
+    # 避免"加权后看起来没超、实际已经烧了很多"。
+    max_raw_tokens_per_query: int = 0
 
 
 class BudgetExceeded(Exception):
@@ -67,6 +71,9 @@ class BudgetController:
     def __init__(self, limits: Optional[BudgetLimits] = None):
         self.limits = limits or BudgetLimits()
         self._tokens_used = 0
+        # 计费口径 token（PRD-A11 FR-6）：命中按 in_hit/in_miss 折算、免费端点按
+        # free 权重折算。`_tokens_used` 仍是**原始**口径，两个并存。
+        self._weighted_used = 0.0
         self._llm_calls = 0
         self._start_time = time.time()
         self._excluded_time = 0.0  # 扣除的等待耗时（澄清反问等用户交互阻塞）
@@ -76,6 +83,7 @@ class BudgetController:
     def reset(self):
         """重置计数器（每个新查询开始时调用）"""
         self._tokens_used = 0
+        self._weighted_used = 0.0
         self._llm_calls = 0
         self._start_time = time.time()
         self._excluded_time = 0.0
@@ -102,16 +110,32 @@ class BudgetController:
         """启用预算检查"""
         self._enabled = True
 
-    def add_tokens(self, count: int):
-        """累计 token 消耗"""
+    def add_tokens(self, count: int, *, weighted: float | None = None):
+        """累计 token 消耗。
+
+        :param count: **原始** token（input+output），永远累加 —— 这是
+            `MAX_RAW_TOKENS_PER_QUERY` 的判据，也是"真实消耗"的事实源。
+        :param weighted: 计费口径 token（PRD-A11 FR-6）。None 时按原始计
+            （向后兼容：老调用方只传 count 时行为与改动前完全一致）。
+
+        **为什么需要加权**：prompt cache 命中价是未命中的 1/50，免费端点更是 ¥0，
+        但两者过去都按原始 token 100% 计入预算 —— 等于"缓存优化被预算惩罚"，
+        且免费调用白占额度（实测占 raw 的 26%）。
+        """
         self._tokens_used += count
+        self._weighted_used += float(count if weighted is None else weighted)
 
     def add_call(self):
         """累计一次 LLM 调用"""
         self._llm_calls += 1
 
     def get_tokens(self) -> int:
+        """原始 token（含命中与免费端点）—— 与改动前语义一致。"""
         return self._tokens_used
+
+    def get_weighted_tokens(self) -> float:
+        """计费口径 token —— 预算判定用这个。"""
+        return self._weighted_used
 
     def get_calls(self) -> int:
         return self._llm_calls
@@ -144,11 +168,23 @@ class BudgetController:
                 logger.info("B", f"豁免窗口内，跳过 budget check（剩余 {self.exempt_window.remaining_calls} 次）")
             return True
 
-        if self._tokens_used > self.limits.max_tokens_per_query:
-            msg = f"Token 预算超限 ({self._tokens_used}/{self.limits.max_tokens_per_query})"
+        # ① 原始 token 硬兜底：权重配错时唯一能拦住失控的东西（PRD-A11 FR-6）
+        raw_limit = int(getattr(self.limits, "max_raw_tokens_per_query", 0) or 0)
+        if raw_limit and self._tokens_used > raw_limit:
+            msg = (f"原始 Token 硬上限 ({self._tokens_used}/{raw_limit})"
+                   f"（计费口径 {self._weighted_used:.0f}/{self.limits.max_tokens_per_query}）")
             if logger:
                 logger.warning("B", msg)
-            raise BudgetExceeded("tokens", self._tokens_used, self.limits.max_tokens_per_query)
+            raise BudgetExceeded("raw_tokens", self._tokens_used, raw_limit)
+
+        # ② 计费口径判定（命中与免费端点已折算）
+        if self._weighted_used > self.limits.max_tokens_per_query:
+            msg = (f"Token 预算超限（计费口径 {self._weighted_used:.0f}/"
+                   f"{self.limits.max_tokens_per_query}，原始 {self._tokens_used}）")
+            if logger:
+                logger.warning("B", msg)
+            raise BudgetExceeded("tokens", int(self._weighted_used),
+                                 self.limits.max_tokens_per_query)
 
         if self._llm_calls > self.limits.max_llm_calls_per_query:
             msg = f"LLM 调用次数超限 ({self._llm_calls}/{self.limits.max_llm_calls_per_query})"
@@ -167,10 +203,19 @@ class BudgetController:
 
     def get_status(self) -> dict:
         """获取当前预算状态"""
+        limit = self.limits.max_tokens_per_query or 1
+        raw_limit = int(getattr(self.limits, "max_raw_tokens_per_query", 0) or 0)
         return {
-            "tokens": self._tokens_used,
+            # 兼容：tokens 收紧为**计费口径**（PRD-A11 FR-6 起语义变化）；
+            # 需要原始总量看 tokens_raw，两者同时暴露，看板与日志都能取。
+            "tokens": int(self._weighted_used),
+            "tokens_raw": self._tokens_used,
+            "tokens_weighted": int(self._weighted_used),
             "tokens_limit": self.limits.max_tokens_per_query,
-            "tokens_percent": min(100, int(self._tokens_used / self.limits.max_tokens_per_query * 100)),
+            "tokens_raw_limit": raw_limit,
+            "tokens_raw_percent": (min(100, int(self._tokens_used / raw_limit * 100))
+                                   if raw_limit else None),
+            "tokens_percent": min(100, int(self._weighted_used / limit * 100)),
             "calls": self._llm_calls,
             "calls_limit": self.limits.max_llm_calls_per_query,
             "calls_percent": min(100, int(self._llm_calls / self.limits.max_llm_calls_per_query * 100)),
@@ -200,6 +245,7 @@ class BudgetControllerFactory:
                 max_tokens_per_query=getattr(Config, 'MAX_TOKENS_PER_QUERY', 50000),
                 max_llm_calls_per_query=getattr(Config, 'MAX_LLM_CALLS_PER_QUERY', 20),
                 max_time_seconds=getattr(Config, 'MAX_TIME_SECONDS', 60),
+                max_raw_tokens_per_query=getattr(Config, 'MAX_RAW_TOKENS_PER_QUERY', 0),
             )
         return BudgetController(limits)
     

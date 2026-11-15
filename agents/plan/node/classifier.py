@@ -30,6 +30,8 @@ async def classify_step(state: PlanExecute, ctx: AgentContext, run_config=None):
     updates = {"plan": [], "current_step": 0}
     if result.get("clarified_input"):
         updates["input"] = result["clarified_input"]
+    if result.get("task_spec"):
+        updates["task_spec"] = result["task_spec"]
     return updates
 
 

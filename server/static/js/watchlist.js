@@ -148,6 +148,46 @@ window.StockRadar.WatchlistPanel = class WatchlistPanel {
       this.items = [];
     }
     this._render();
+    this._loadEvents();
+  }
+
+  // 未来 30 天公司事件（只显示自选标的）
+  async _loadEvents() {
+    const el = document.getElementById('wlEventsSection');
+    if (!el) return;
+    const codes = [...new Set((this.items || []).map(s => s.stock_code).filter(Boolean))];
+    if (!codes.length) { el.hidden = true; return; }
+    const today = new Date().toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    try {
+      const r = await fetch(`/api/events?codes=${codes.join(',')}&from=${today}&to=${to}&limit=100`);
+      const body = await r.json();
+      const events = (body && body.data && body.data.events) || [];
+      if (!events.length) { el.hidden = true; return; }
+      el.innerHTML = this._renderEventsHtml(events);
+      el.hidden = false;
+    } catch (e) {
+      el.hidden = true;
+    }
+  }
+
+  _renderEventsHtml(events) {
+    const meta = {
+      unlock: ['解禁', 'unlock'], dividend: ['分红除权', 'dividend'],
+      disclosure: ['预约披露', 'disclosure'], meeting: ['股东大会', 'meeting'],
+      forecast: ['业绩预告', 'forecast'],
+    };
+    const rows = events.map((ev) => {
+      const [label, cls] = meta[ev.event_type] || [ev.type_label || ev.event_type, 'disclosure'];
+      const d = String(ev.event_date || '').slice(5);
+      return `<div class="wl-event-row">
+        <span class="wl-event-date">${this._esc(d)}</span>
+        <span class="wl-event-type ${cls}">${this._esc(label)}</span>
+        <span class="wl-event-main"><b>${this._esc(ev.code || '')}</b> ${this._esc(ev.title || '')}</span>
+      </div>`;
+    }).join('');
+    return `<div class="wl-events-head">未来 30 天事件 <span class="wl-events-count">${events.length}</span></div>
+      <div class="wl-events-rows">${rows}</div>`;
   }
 
   _render() {

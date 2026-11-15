@@ -99,7 +99,9 @@ def test_job_registered_in_default_jobs(monkeypatch):
     monkeypatch.setattr(Config, "SCAN_KLINE_ENABLED", True, raising=False)
     keys = [j.key for j in scan_jobs.default_jobs()]
     assert "kline_keepalive" in keys
-    assert keys.index("kline_keepalive") == len(keys) - 1, "网络密集作业应排在最后错峰"
+    # 网络密集作业应排在**已启用**作业的最后错峰（默认关闭的补录作业不算）。
+    enabled_keys = [j.key for j in scan_jobs.default_jobs() if j.enabled]
+    assert enabled_keys[-1] == "kline_keepalive", "网络密集作业应排在最后错峰"
 
 
 def test_scan_universe_filters_non_equity_codes(monkeypatch, tmp_path):

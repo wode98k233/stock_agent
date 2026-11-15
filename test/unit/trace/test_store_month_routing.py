@@ -81,7 +81,7 @@ def test_explicit_path_keeps_full_schema(trace_env):
 
     tables = {r[0] for r in sqlite3.connect(str(p)).execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-    assert tables == {"runs", "steps", "messages", "reviews"}
+    assert tables == {"runs", "steps", "messages", "reviews", "blobs"}
 
 
 def test_ensure_full_schema_helper_compatible(tmp_path):
@@ -91,7 +91,7 @@ def test_ensure_full_schema_helper_compatible(tmp_path):
     ensure_full_schema(conn)
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-    assert names == {"runs", "steps", "messages", "reviews"}
+    assert names == {"runs", "steps", "messages", "reviews", "blobs"}
 
 
 def test_conn_for_run_probes_newest_first(trace_env):
@@ -147,6 +147,42 @@ def test_get_runs_by_ids_and_find_latest(trace_env):
     assert store.find_latest_run()["id"] == "r-sep"
     assert store.find_latest_run(status="success")["id"] == "r-sep"
     assert store.find_latest_run(status="running") is None
+
+
+def test_find_latest_run_since_skips_stale_running_row(trace_env):
+    """⚠️ 事故回归：`status="running"` 不带 since 会跨月回退到陈旧残留 run。
+
+    进程被杀时 end_run 不执行 → 月库里留下永久 running 行；当月没有 running 行时，
+    裸查询会一路回退到旧月库命中它，把上次/上月的执行过程当成当前任务（transcript
+    串台）。`since` 下界必须能挡住。
+    """
+    c_old = _make_month(trace_env["month_dir"], "202609")
+    c_new = _make_month(trace_env["month_dir"], "202610")
+    _seed_run(c_old, "r-stale", "2026-09-30T13:08:17.844279+00:00", status="running")
+    _seed_run(c_new, "r-done", "2026-10-08T15:58:07.804568+00:00")  # 当月只有成功 run
+    c_old.close()
+    c_new.close()
+
+    # 当月无 running 行 → 裸查询回退旧月，命中残留（事故现场）
+    assert store.find_latest_run(status="running")["id"] == "r-stale"
+    # 带任务创建时间下界 → 残留被排除，返回 None（宁可不显示，也不显示错的过程）
+    assert store.find_latest_run(
+        status="running", since="2026-10-11T01:55:00+00:00") is None
+
+
+def test_find_latest_run_since_returns_only_own_task_run(trace_env):
+    """带 since 时只认「本任务开始之后创建的最新 running run」。"""
+    conn = _make_month(trace_env["month_dir"], "202610")
+    _seed_run(conn, "r-other", "2026-10-11T01:50:00+00:00", status="running")   # 更早的任务
+    _seed_run(conn, "r-task", "2026-10-11T01:55:25.328639+00:00", status="running")
+    _seed_run(conn, "r-done", "2026-10-11T01:56:00+00:00")                      # 已完成的不算
+    conn.close()
+
+    assert store.find_latest_run(
+        status="running", since="2026-10-11T01:55:00+00:00")["id"] == "r-task"
+    # 下界晚于本任务 run 的创建时间 → 无匹配（陈旧/已结束的都排除）
+    assert store.find_latest_run(
+        status="running", since="2026-10-11T02:00:00+00:00") is None
 
 
 def test_get_steps_with_messages_and_step_detail(trace_env):

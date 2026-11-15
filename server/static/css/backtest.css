@@ -1267,3 +1267,108 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* 回测体检徽章（设计文档 §4.4） */
+.bt-health { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid var(--border-light); border-radius: var(--radius); margin-bottom: 8px; font-size: 12px; }
+.bt-health-badge { font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.bt-health.ok .bt-health-badge { background: #dcfce7; color: #166534; }
+.bt-health.warn { border-color: var(--warning); background: var(--warning-bg); }
+.bt-health.warn .bt-health-badge { background: #fef3c7; color: #92400e; }
+.bt-health.bad { border-color: #fecaca; background: #fff5f5; }
+.bt-health.bad .bt-health-badge { background: #fee2e2; color: #991b1b; }
+.bt-health.muted .bt-health-badge { background: var(--border-light); color: var(--text-secondary); }
+.bt-health-detail { color: var(--text-secondary); }
+.bt-origin { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: var(--border-light); color: var(--text-secondary); margin-left: 4px; }
+.bt-origin-research { background: #ede9fe; color: #6d28d9; }
+
+/* 数据缺口 → 补数闭环（设计文档 §6） */
+.bt-gap { padding: 10px 14px; border: 1px solid var(--warning); background: var(--warning-bg); border-radius: var(--radius); margin-bottom: 8px; font-size: 12px; }
+.bt-gap-hd { font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.bt-gap-tip { font-weight: 400; color: var(--text-secondary); }
+.bt-gap table { width: 100%; border-collapse: collapse; }
+.bt-gap td { padding: 4px 6px; border-top: 1px solid var(--border-light); color: var(--text-secondary); }
+.bt-gap-btn { font-size: 12px; padding: 2px 10px; border: 1px solid var(--brand); color: var(--brand); background: transparent; border-radius: var(--radius-sm); cursor: pointer; }
+.bt-gap-btn:hover:not(:disabled) { background: var(--brand-light); }
+.bt-gap-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* 样本内外对照（设计文档 §7）：评判在后台补跑，未评判时是灰态提示 */
+.bt-eval { padding: 10px 14px; border: 1px solid var(--border); background: var(--detail-bg); border-radius: var(--radius); margin-bottom: 8px; font-size: 12px; }
+.bt-eval.ok { border-color: var(--brand); }
+.bt-eval.warn { border-color: var(--warning); background: var(--warning-bg); }
+.bt-eval.bad { border-color: var(--error); }
+.bt-eval.empty { color: var(--text-secondary); }
+.bt-eval-hd { font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.bt-eval table { width: 100%; border-collapse: collapse; }
+.bt-eval td { padding: 4px 6px; border-top: 1px solid var(--border-light); color: var(--text-secondary); }
+.bt-eval td:first-child { width: 140px; color: var(--muted); }
+.bt-eval-note { margin-top: 6px; color: var(--text-secondary); }
+/* ===== 策略详情：一个策略的一生（Plan 4 任务 3） ===== */
+.bt-lifecycle { display: none; position: fixed; inset: 4vh 4vw; z-index: 9999; overflow: auto;
+  background: var(--bg-panel, #fff); border: 1px solid var(--border-light); border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .18); padding: 16px 18px; }
+.bt-lc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.bt-lc-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.bt-lc-ok { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  background: #dcfce7; color: #166534; }
+.bt-lc-warn { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  background: #fef3c7; color: #92400e; }
+.bt-lc-block { margin-bottom: 16px; }
+.bt-lc-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.bt-lc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.bt-lc-table th { text-align: left; font-weight: 600; color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-light); padding: 4px 6px; }
+.bt-lc-table td { border-bottom: 1px solid var(--border-light); padding: 4px 6px; }
+.bt-lc-origin { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--brand-bg-light); }
+/* 策略详情各块的出口链接（原来这块是死胡同：只有展示没有去路） */
+.bt-lc-link {
+  float: right; border: 1px solid transparent; background: transparent; color: var(--brand);
+  font-size: 11.5px; cursor: pointer; padding: 0 6px; border-radius: var(--radius-sm);
+}
+.bt-lc-link:hover { border-color: var(--brand); background: var(--brand-bg-light); }
+
+.bt-lc-line { font-size: 12px; margin-bottom: 2px; }
+.bt-lc-muted { color: var(--text-secondary); }
+.bt-lc-empty { font-size: 12px; color: var(--text-secondary); padding: 6px 2px; }
+
+/* ── 编辑器模式（工作台 v3 F4）─────────────────────────────
+   新建/编辑策略时：380px 策略列表让位，编辑区占满整宽。
+   开关：backtest.js showEditor()/closeEditor() 切 bt-editor-mode。 */
+.backtest-modal.bt-editor-mode .bt-left { width: 100%; min-width: 100%; max-width: none; }
+.backtest-modal.bt-editor-mode #btStrategyList,
+.backtest-modal.bt-editor-mode #btLifecyclePanel { display: none; }
+
+/* ── 参数可读化（v3 F3）：help / 推荐区间 / 超界警告 ── */
+.bt-builder-param { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+.bt-builder-param.out { border-color: var(--warn, #c88a1e); }
+.bt-builder-param-help { font-size: 11.5px; color: var(--text-secondary); line-height: 1.5; margin: 5px 0 2px; }
+.bt-builder-param-rec { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; }
+.bt-builder-param-out { font-size: 11px; color: var(--warn, #c88a1e); display: none; }
+.bt-builder-param.out .bt-builder-param-out { display: inline; }
+.bt-builder-param-foot { display: flex; align-items: center; gap: 10px; margin-top: 3px; }
+.bt-btn-ghost-sm { height: 22px; padding: 0 8px; font-size: 11px; border: 1px solid var(--border);
+  border-radius: 5px; background: none; color: var(--muted); cursor: pointer; }
+.bt-btn-ghost-sm:hover { color: var(--brand); border-color: var(--brand); }
+
+/* ── 嵌套条件树（v3 S3）────────────────────────────────── */
+.bt-builder-preview { margin-top: 8px; padding: 7px 10px; background: var(--panel);
+  border: 1px dashed var(--border); border-radius: var(--radius-sm); font-size: 12px;
+  color: var(--text-secondary); }
+.bt-builder-preview b { color: var(--brand-strong); font-weight: 600; }
+.bt-builder-group { border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm); margin: 6px 0; background: var(--panel); }
+.bt-builder-group[data-depth="1"] { border-left-color: var(--brand); }
+.bt-builder-group[data-depth="2"] { border-left-color: var(--warn, #c88a1e); }
+.bt-builder-group-head { display: flex; align-items: center; gap: 8px; padding: 6px 9px;
+  border-bottom: 1px solid var(--border-light); background: var(--panel); flex-wrap: wrap; }
+.bt-builder-group-tag { font-size: 10.5px; padding: 1px 5px; border-radius: 4px;
+  background: var(--brand-light); color: var(--brand-strong); }
+.bt-builder-group-n { font-size: 11px; color: var(--muted); }
+.bt-builder-group-del { margin-left: auto; border: none; background: none; cursor: pointer;
+  font-size: 11px; color: var(--muted); }
+.bt-builder-group-del:hover { color: var(--up); }
+.bt-builder-group-body { padding: 4px 8px; }
+.bt-builder-group-foot { display: flex; gap: 8px; padding: 3px 9px 7px; }
+
+/* 根层操作行（v3 S3 补漏）：没有这个入口，用户根本进不去嵌套组 ——
+   子组按钮只在子组内部渲染，根层原先只有一个「+ 规则」。 */
+.bt-builder-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }

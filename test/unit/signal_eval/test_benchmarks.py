@@ -191,3 +191,102 @@ class TestBoardKlineBench:
         reset_cache()
         with patch("signal_eval.benchmarks._MAPPING_DB_PATH", bench_db):
             assert resolve_benchmark("300002") == "000300"
+
+
+# ── 磁盘快照 + PK 前缀范围查询（2026-11 性能 P0：冷启动不再扫全表） ──────
+
+class TestMappingSnapshot:
+    def test_first_build_writes_snapshot(self, bench_db):
+        """首次构建成功后原子写回同目录 bench_mapping.json（ts + mapping）。"""
+        import json
+        from pathlib import Path
+
+        import signal_eval.benchmarks as bm
+        bm.reset_cache()
+        mapping = bm.build_bench_mapping(db_path=bench_db)
+        path = bm._mapping_file_path(bench_db)
+        assert path == Path(bench_db).parent / "bench_mapping.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["mapping"] == mapping
+        assert payload["ts"] > 0
+        bm.reset_cache()
+
+    def test_second_build_reads_snapshot_without_querying_db(self, bench_db, monkeypatch):
+        """清内存后第二次构建直接读 JSON，不再查库（映射层调用计数为 0）。"""
+        import signal_eval.benchmarks as bm
+        bm.reset_cache()
+        first = bm.build_bench_mapping(db_path=bench_db)
+        bm.reset_cache()
+
+        calls = []
+        real_load = bm._load_mapping_from_db
+        monkeypatch.setattr(bm, "_load_mapping_from_db",
+                            lambda p: calls.append(p) or real_load(p))
+
+        def _no_connect(*a, **k):
+            raise AssertionError("不应再连库")
+
+        monkeypatch.setattr(bm.sqlite3, "connect", _no_connect)
+        second = bm.build_bench_mapping(db_path=bench_db)
+        assert calls == []
+        assert second == first
+        bm.reset_cache()
+
+    def test_snapshot_expired_rebuilds_and_rewrites(self, bench_db, monkeypatch):
+        """快照超过 7 天 → 重新查库构建，并把 ts 刷新（下一次又能命中）。"""
+        import json
+        import time
+
+        import signal_eval.benchmarks as bm
+        bm.reset_cache()
+        bm.build_bench_mapping(db_path=bench_db)
+        path = bm._mapping_file_path(bench_db)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["ts"] = time.time() - bm._MAPPING_TTL - 60
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        bm.reset_cache()
+
+        calls = []
+        real_load = bm._load_mapping_from_db
+        monkeypatch.setattr(bm, "_load_mapping_from_db",
+                            lambda p: calls.append(p) or real_load(p))
+        bm.build_bench_mapping(db_path=bench_db)
+        assert calls == [bench_db]
+        assert json.loads(path.read_text(encoding="utf-8"))["ts"] > time.time() - 60
+        bm.reset_cache()
+
+    def test_corrupt_snapshot_falls_back_to_db(self, bench_db):
+        """快照是坏 JSON → 忽略并重建（不抛错）。"""
+        import signal_eval.benchmarks as bm
+        bm.reset_cache()
+        bm.build_bench_mapping(db_path=bench_db)
+        bm._mapping_file_path(bench_db).write_text("{not json", encoding="utf-8")
+        bm.reset_cache()
+        assert bm.build_bench_mapping(db_path=bench_db)["600519"] == "399997"
+        bm.reset_cache()
+
+    def test_empty_mapping_not_persisted(self, tmp_path):
+        """无数据/库不存在 → 空映射不落盘（避免把「没数据」缓存 7 天）。"""
+        import signal_eval.benchmarks as bm
+        bm.reset_cache()
+        assert bm.build_bench_mapping(db_path=str(tmp_path / "nope.db")) == {}
+        assert not bm._mapping_file_path(str(tmp_path / "nope.db")).exists()
+        bm.reset_cache()
+
+    def test_board_code_range_covers_chinese_names(self, bench_db):
+        """前缀范围上界必须覆盖中文板块名（追加 chr(0x7f) 会把中文排除掉）。"""
+        from signal_eval.benchmarks import _BOARD_CODE_PREFIX, _BOARD_CODE_UPPER
+        for code in ("board_industry_半导体", "board_industry_酿酒行业",
+                     "board_industry_AI算力", "board_industry_"):
+            assert _BOARD_CODE_PREFIX <= code < _BOARD_CODE_UPPER
+        # 非板块代码不能在范围内（stock_daily 的普通个股/指数）
+        assert not ("600519" < _BOARD_CODE_UPPER and "600519" >= _BOARD_CODE_PREFIX)
+
+    def test_range_query_finds_board_kline(self, bench_db):
+        """走范围查询后板块K线仍能被找到（端到端：半导体→board_industry_半导体）。"""
+        import signal_eval.benchmarks as bm
+        _seed_board_kline(bench_db, ["board_industry_半导体"])
+        bm.reset_cache()
+        mapping = bm.build_bench_mapping(db_path=bench_db)
+        assert mapping["688981"] == "board_industry_半导体"
+        bm.reset_cache()

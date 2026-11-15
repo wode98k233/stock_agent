@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from utils.cache.backtest_db import (
     get_data_task, get_data_tasks, update_data_task,
+    get_backtest_run, get_backtest_result, set_data_task_origin,
 )
 from utils.cache.market_data_db import get_market_data_db
 
@@ -31,6 +32,14 @@ def _get_collector():
     return _collector
 
 
+def _count_tasks_by_origin(origin: str) -> int:
+    """按来源统计任务数（数据中心显示「有多少补数是回测触发的」）。"""
+    from utils.cache.backtest_db import get_backtest_db
+    with get_backtest_db() as conn:
+        row = conn.execute('SELECT COUNT(*) AS n FROM data_tasks WHERE origin = ?', (origin,)).fetchone()
+    return int(row['n'] if row else 0)
+
+
 # ============================================================
 # 请求模型
 # ============================================================
@@ -44,6 +53,11 @@ class CreateTaskRequest(BaseModel):
     dump_kind: str = 'daily-k-10d'      # hithink_dump 用：daily-k（全量10年）/ daily-k-10d（近10交易日）
     board_type: Optional[str] = None    # 板块类型: industry / concept / all
     force: bool = False                 # 强制全量覆盖
+
+
+class FromGapRequest(BaseModel):
+    run_id: str
+    gap_index: int = 0
 
 
 # ============================================================
@@ -72,9 +86,41 @@ async def create_task(req: CreateTaskRequest):
     return {'task_id': task_id, 'task': task}
 
 
+@router.post('/from-gap')
+async def create_task_from_gap(req: FromGapRequest):
+    """把一次回测体检发现的数据缺口变成采集任务（设计文档 §6）。"""
+    run = get_backtest_run(req.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f'回测记录不存在: {req.run_id}')
+    result = get_backtest_result(req.run_id) or {}
+    try:
+        gaps = json.loads(result.get('gaps_json') or '[]')
+    except (json.JSONDecodeError, TypeError):
+        gaps = []
+    if not gaps:
+        raise HTTPException(status_code=400, detail='该回测没有数据缺口记录（health 不是 data_gap 或未体检）')
+    if req.gap_index < 0 or req.gap_index >= len(gaps):
+        raise HTTPException(status_code=400, detail=f'gap_index 越界: {req.gap_index}（共 {len(gaps)} 段）')
+    gap = gaps[req.gap_index] or {}
+    from backtest.data_collector import _days_covering
+    days = _days_covering(gap.get('start'), gap.get('end'))
+    collector = _get_collector()
+    task_id = collector.create_and_run('daily_kline', {
+        'codes': [run['code']],
+        'days': days,
+        'source': 'auto',
+    })
+    set_data_task_origin(task_id, origin='backtest_gap', ref_id=req.run_id)
+    return {'task_id': task_id, 'run_id': req.run_id, 'gap': gap, 'days': days}
+
+
 @router.get('/tasks')
 async def list_tasks(status: Optional[str] = None, limit: int = 50):
-    """获取任务列表"""
+    """获取任务列表
+
+    origin / ref_id（Plan 3 加的来源列）由 get_data_tasks 的 `SELECT *` 原样透传，
+    前端 data-center.js「来源」列据此渲染「回测补数 / 手动」。
+    """
     tasks = get_data_tasks(status=status, limit=limit)
     return {'tasks': tasks}
 
@@ -363,11 +409,26 @@ async def data_stats():
     from utils.cache.backtest_db import get_data_stats
     stats['backtest'] = get_data_stats()
 
+    # 回测数据就绪度（设计文档 §12 / Plan 4 任务 5 步骤 5.1）。
+    # 单独包一层 try：就绪度是加性信息，失败不该让整个 /stats 失败。
+    # ⚠️ 顶层 backtest_gap_tasks 沿用下方 return 里的 Plan 3 全时段计数（口径不同，不覆盖）；
+    #    「近 30 天」窗口内的补数计数在 stats['backtest_readiness']['gap_tasks']。
+    try:
+        from server.backtest_service import build_backtest_readiness
+        readiness = build_backtest_readiness(30)
+        stats['backtest_readiness'] = readiness
+        stats['backtest_gap_filled'] = readiness.get('refilled', 0)
+    except Exception:
+        logger.warning('回测数据就绪度加载失败', exc_info=True)
+        stats['backtest_readiness'] = {}
+        stats['backtest_gap_filled'] = 0
+
     return {
         **stats,
         'tables': tables,
         'incremental': incremental,
         'quality': quality,
+        'backtest_gap_tasks': _count_tasks_by_origin('backtest_gap'),
     }
 
 

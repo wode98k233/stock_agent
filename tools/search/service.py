@@ -17,9 +17,11 @@
 ## 输出契约（勿改，报告层按此解析）
 
 始终返回可 JSON 序列化的 dict：
-`{query, success, result_count, results[], provider, error?, hint?}`
+`{query, success, result_count, results[], provider, error?, hint?, billed_service?}`
 - `success` = 有结果才为 True（空结果一律 False）；
-- 空结果/失败时必带 `hint`（给出可执行的替代工具，避免模型反复重试同一工具）。
+- 空结果/失败时必带 `hint`（给出可执行的替代工具，避免模型反复重试同一工具）；
+- `billed_service` **仅在本次让上游按次计费时出现**（值 = 价目 `services` 段的键，如
+  `deepseek-search`），工具节点据此回填成本；免费源不出现该键，输出契约逐字不变。
 """
 import logging
 from typing import List, Optional
@@ -77,6 +79,11 @@ def normalize_search_response(resp, query: str) -> dict:
         "results": results,
         "provider": getattr(resp, "provider", "aggregator"),
     }
+    # 按次计费声明（价目 `services` 段的键）：**仅在真的计费时出现**，保持输出契约
+    # （`{query, success, result_count, results, provider, error?, hint?}`）在免费源上逐字不变。
+    billed_service = (getattr(resp, "billed_service", "") if results else "") or ""
+    if billed_service:
+        payload["billed_service"] = billed_service
     err = getattr(resp, "error_message", None)
     if isinstance(resp, dict):
         err = err or resp.get("error")

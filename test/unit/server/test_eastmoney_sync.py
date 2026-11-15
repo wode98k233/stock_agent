@@ -60,7 +60,7 @@ def _em_position(code="002714", name="牧原股份", qty=100, cbjg="41.132",
 
 
 def _em_response(positions=None, zzc="100000.0", kyzj="35000.0",
-                 zjye="35000.0", mkval="65000.0", status=0, errcode=0):
+                 zjye="35000.0", mkval="65000.0", status=0, errcode=0, dryk=None):
     if positions is None:
         # 15 只样本：4 股票 + 11 ETF（口径照实测：Zqlx='E' 为 ETF）
         positions = [
@@ -94,6 +94,8 @@ def _em_response(positions=None, zzc="100000.0", kyzj="35000.0",
                 str(round((zxjg_f - cbjg_f) * qty, 2)), ykbl, "E", str(qty)))
     data0 = {"Zzc": zzc, "Kyzj": kyzj, "Zjye": zjye,
              "totalSecMkval": mkval, "positions": positions}
+    if dryk is not None:
+        data0["Dryk"] = dryk
     return {"Status": status, "Errcode": errcode, "Errmsg": "", "Data": [data0]}
 
 
@@ -275,7 +277,7 @@ class TestNormalize:
         assert snap.positions[0]["today_pnl"] == pytest.approx(123.45)
 
     def test_account_today_pnl_sum(self):
-        """组合当日盈亏 = 各持仓行 Dryk 求和；空串行跳过。"""
+        """账户级 Dryk 缺失时回退到逐行求和；空串行跳过。"""
         positions = [
             _em_position("002714", dryk="100.5"),
             _em_position("600519", dryk="-40.25"),
@@ -284,6 +286,50 @@ class TestNormalize:
         snap = em.normalize(_em_response(positions=positions))
         assert snap.account["today_pnl"] == pytest.approx(60.25)
         assert snap.positions[2]["today_pnl"] is None
+
+    # ── 2026-11-06 事故：当日盈亏对不上券商（-509.69 vs -163.44）──
+    #
+    # 券商报文里 4 只「今日已清仓」的标的 Zqsl=0，但它们带着当天的已实现盈亏
+    # （Dryk 合计 -346.25）。旧实现先按 qty=0 过滤、再对剩下的行求和，
+    # 于是这一段被整段丢掉。账户级 Dryk 本来就是权威值，优先用它。
+
+    def test_account_today_pnl_prefers_account_level(self):
+        """账户级 Dryk 存在时以它为准（含当日已清仓标的的已实现盈亏）。"""
+        positions = [
+            _em_position("002714", dryk="100.5"),
+            _em_position("600519", dryk="-40.25"),
+        ]
+        snap = em.normalize(_em_response(positions=positions, dryk="-509.69"))
+        assert snap.account["today_pnl"] == pytest.approx(-509.69)
+
+    def test_account_today_pnl_includes_closed_rows(self):
+        """账户级缺失时，逐行求和必须把 qty=0 的行也算上。"""
+        positions = [
+            _em_position("002714", dryk="-163.44"),
+            _em_position("159558", "半导体设备ETF易方达", qty=0, zxsz="0.00",
+                         zqlx="E", dryk="-23.83"),
+            _em_position("513310", "中韩半导体ETF华泰柏瑞", qty=0, zxsz="0.00",
+                         zqlx="E", dryk="-262.78"),
+        ]
+        snap = em.normalize(_em_response(positions=positions))
+        assert snap.account["today_pnl"] == pytest.approx(-450.05)
+
+    def test_closed_rows_not_imported_as_positions(self):
+        """qty=0 的行只贡献当日盈亏，绝不能变成持仓行。"""
+        positions = [
+            _em_position("002714", dryk="-1"),
+            _em_position("513310", "中韩半导体ETF", qty=0, zxsz="0.00",
+                         zqlx="E", dryk="-262.78"),
+        ]
+        snap = em.normalize(_em_response(positions=positions))
+        assert [p["stock_code"] for p in snap.positions] == ["002714"]
+        assert snap.skipped_rows == 1
+
+    def test_account_dryk_empty_string_falls_back(self):
+        """账户级 Dryk 空串（实测存在）→ 回退逐行求和。"""
+        positions = [_em_position("002714", dryk="12.5")]
+        snap = em.normalize(_em_response(positions=positions, dryk=""))
+        assert snap.account["today_pnl"] == pytest.approx(12.5)
 
     def test_account_today_pnl_none_when_all_empty(self):
         snap = em.normalize(_em_response(positions=[_em_position("002714", dryk="")]))

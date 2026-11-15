@@ -25,5 +25,6 @@ TABLES = [
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
     )""",
-             indexes=["CREATE INDEX IF NOT EXISTS idx_shortline_date ON shortline_daily(trade_date DESC)"]),
+             # 不需要 (trade_date DESC) 的索引：主键就是 trade_date，反向扫 PK 即可。
+             indexes=[]),
 ]

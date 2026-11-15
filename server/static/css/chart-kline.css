@@ -455,6 +455,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;          /* 窄屏/扫描后状态文字变长时换行，而不是撑出模态被裁掉 */
   gap: 8px;
   padding: 6px 16px;
   background: var(--panel, #fff);
@@ -464,7 +465,10 @@
 .kline-toolbar-left {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;          /* 工具组自身也允许换行 */
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .kline-days-group,
@@ -503,6 +507,42 @@
   font-weight: 600;
 }
 
+/* 当前柱数提示：贴着预设按钮显示，省掉一个占位标签的宽度
+   （有自定义区间时加前缀「区间」并染成品牌色，避免误以为选中的是某个预设） */
+.kline-days-hint {
+  font-size: 11px;
+  font-family: 'DIN Alternate', 'Tabular Nums', 'Courier New', monospace;
+  color: var(--muted, #667085);
+  white-space: nowrap;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kline-days-hint.range { color: var(--brand, #176b5b); font-weight: 600; }
+
+/* 自定义起止日期（2026-11-12）：日期框复用 .kline-search-input 的边框与焦点环，
+   但必须在这里钉死 width —— 那个类是 width:100%，放进 flex 会把整行吃掉、
+   把工具栏挤成两三行。 */
+.kline-range-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  background: var(--bg, #f6f7f9);
+  border-radius: var(--radius-sm, 6px);
+}
+.kline-range-group .kline-range-input {
+  width: 118px;
+  height: 26px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-family: inherit;   /* 日期框用系统字号，DIN 等宽字体在窄框里会截断年月日 */
+}
+.kline-range-group .kline-range-sep {
+  font-size: 11px;
+  color: var(--muted, #667085);
+}
+
 /* K线样式切换按钮 */
 .kline-chart-type-group {
   display: flex;
@@ -539,6 +579,8 @@
 .kline-status {
   margin-left: auto;
   min-width: 150px;
+  flex: 1 1 150px;          /* 允许被压缩，配合 ellipsis 而不是把工具栏撑爆 */
+  max-width: 100%;
   color: var(--muted, #667085);
   font-size: 11px;
   text-align: right;
@@ -788,3 +830,29 @@
 .kci-pct.up { color: #e74c3c; }
 .kci-pct.down { color: #176b5b; }
 .kci-note { font-size: 11px; color: #94a3b8; }
+
+/* ── 资金面：北向持股 + 龙虎榜席位（2026-11-07） ─────────────── */
+.kline-funds { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #fbfcfd; }
+.kline-funds-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 14px; background: none; border: 0; cursor: pointer; text-align: left; }
+.kline-funds-title { font-size: 12px; font-weight: 800; color: var(--text); }
+.kline-funds-summary { font-size: 11px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kline-funds-arrow { color: var(--muted); font-size: 11px; transition: transform .15s ease; }
+.kline-funds.open .kline-funds-arrow { transform: rotate(180deg); }
+.kline-funds-body { display: grid; grid-template-columns: 1fr 1.5fr; gap: 12px; padding: 8px 14px 12px; }
+.kline-funds-block { min-width: 0; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.kline-funds-block-title { font-size: 11px; font-weight: 800; color: #94a3b8; margin-bottom: 6px; }
+.kline-funds-kv { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text); }
+.kline-funds-kv b { font-weight: 700; }
+.kline-funds-spark { width: 100%; height: 34px; display: block; margin-top: 6px; }
+.kline-funds-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.kline-funds-table th, .kline-funds-table td { padding: 3px 4px; text-align: right; border-bottom: 1px solid #f1f5f9; }
+.kline-funds-table th:first-child, .kline-funds-table td:first-child { text-align: left; }
+.kline-funds-empty { font-size: 11px; color: var(--muted); padding: 4px 0; }
+
+.kline-funds-risk { font-size: 10px; font-weight: 800; border-radius: 3px; padding: 0 4px; }
+.kline-funds-risk.high { color: #b91c1c; background: #fef2f2; }
+.kline-funds-risk.mid { color: #b45309; background: #fffbeb; }
+.kline-funds-risk.low { color: #176b5b; background: #eaf4f1; }
+.kline-funds-note { font-size: 11px; color: #b45309; margin-top: 4px; }
+.kline-funds-kv .up { color: #b91c1c; }
+.kline-funds-kv .down { color: #176b5b; }

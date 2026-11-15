@@ -365,7 +365,7 @@ window.StockRadar.timeline = (() => {
 
     if (detail.input) {
       html += `<div class="tl-section-title">Input</div>
-        <div class="tl-section-content">${_formatValue(detail.input)}</div>`;
+        <div class="tl-section-content">${_formatTracePayload(detail.input)}</div>`;
     }
 
     const msgs = detail.messages || [];
@@ -373,11 +373,16 @@ window.StockRadar.timeline = (() => {
       html += '<div class="tl-section-title">Messages</div>';
       html += '<div class="tl-msg-list">';
       msgs.forEach(m => {
-        const role = m.role || "unknown";
+        // 后端存的是 LangChain 口径（human/ai），旧样式只认 user/assistant，
+        // 导致角色徽标既显示英文原值又没配色。这里做归一 + 中文显示。
+        const RAW_ROLE = m.role || "unknown";
+        const ROLE_ALIAS = { human: "user", ai: "assistant" };
+        const role = ROLE_ALIAS[RAW_ROLE] || RAW_ROLE;
+        const ROLE_LABEL = { user: "用户", assistant: "模型", system: "系统", tool: "工具" };
         html += `<div class="tl-msg-item">
-          <div class="tl-msg-role tl-msg-role-${role}">${esc(role)}</div>
+          <div class="tl-msg-role tl-msg-role-${role}" title="${esc(RAW_ROLE)}">${esc(ROLE_LABEL[role] || role)}</div>
           <div class="tl-msg-content">${esc(m.content || "")}</div>
-          ${m.reasoning ? `<details class="tl-reasoning-block"><summary>💭 推理过程</summary><div class="tl-reasoning-content">${esc(m.reasoning)}</div></details>` : ""}
+          ${m.reasoning ? `<details class="tl-reasoning-block"><summary>推理过程</summary><div class="tl-reasoning-content">${esc(m.reasoning)}</div></details>` : ""}
           ${m.tool_calls ? `<div class="tl-msg-tool-calls">${esc(typeof m.tool_calls === "object" ? JSON.stringify(m.tool_calls, null, 2) : m.tool_calls)}</div>` : ""}
         </div>`;
       });
@@ -397,7 +402,7 @@ window.StockRadar.timeline = (() => {
 
     if (detail.output) {
       html += `<div class="tl-section-title">Output</div>
-        <div class="tl-section-content">${_formatValue(detail.output)}</div>`;
+        <div class="tl-section-content">${_formatTracePayload(detail.output)}</div>`;
     }
 
     if (step.error) {
@@ -439,6 +444,72 @@ window.StockRadar.timeline = (() => {
       return `<pre>${esc(str)}</pre>`;
     }
     return esc(String(val));
+  }
+
+  /* ── 摘要行（trace 存储瘦身产物）───────────────────────────────
+     写入端 utils/agent_trace/payload.py：llm_prompt_ref / state_digest。
+     节点步的 state 现在只存摘要，这里渲染成「状态摘要卡」而不是裸 JSON
+     （设计 docs/superpowers/specs/2026-10-19-trace-storage-slimming-design.md §9.3 选项 A）。 */
+  function _parseTraceSummary(raw) {
+    if (!raw) return null;
+    let d = raw;
+    if (typeof raw === "string") {
+      const t = raw.trim();
+      if (t[0] !== "{") return null;
+      try { d = JSON.parse(t); } catch { return null; }
+    }
+    if (!d || typeof d !== "object") return null;
+    return (d._kind === "state_digest" || d._kind === "llm_prompt_ref") ? d : null;
+  }
+
+  function _fmtChars(n) {
+    const v = Number(n) || 0;
+    if (v >= 1048576) return (v / 1048576).toFixed(1) + " MB";
+    if (v >= 1024) return (v / 1024).toFixed(1) + " KB";
+    return v + " 字符";
+  }
+
+  function _formatTracePayload(raw) {
+    const d = _parseTraceSummary(raw);
+    if (!d) return _formatValue(raw);
+    const rows = [];
+    if (d._kind === "llm_prompt_ref") {
+      rows.push(`<div class="tl-digest-note">prompt 已瘦身存储为引用摘要（${d.msg_count || 0} 条消息 · ${_fmtChars(d.chars)}），完整逐条内容见下方 Messages。</div>`);
+      if (d.preview) rows.push(`<pre class="tl-digest-snippet">${esc(String(d.preview))}</pre>`);
+      return `<div class="tl-digest">${rows.join("")}</div>`;
+    }
+    // 形状见 utils/agent_trace/payload.py：`_` 前缀为保留键，其余为平铺保留的真实字段
+    rows.push(`<div class="tl-digest-note">节点 state 已摘要存储（原文 ${_fmtChars(d._orig_chars)}）。完整中间产物不再入库 —— 工具入参/出参见 tool 步骤，对话与工具结果见 Messages。</div>`);
+    const truncated = new Set(d._truncated || []);
+    const acc = d._acc || {};
+    if (Object.keys(acc).length) {
+      let t = `<div class="tl-digest-sub">累积容器（只记形状）</div><table class="tl-digest-table">`;
+      for (const [k, v] of Object.entries(acc)) {
+        t += `<tr><td class="tl-digest-key">${esc(k)}</td><td class="tl-digest-meta">${esc(v.type || "?")}${v.count != null ? " · " + v.count + " 条" : ""} · ${_fmtChars(v.chars)}</td></tr>`;
+        if (v.last) t += `<tr><td colspan="2"><pre class="tl-digest-snippet">${esc(String(v.last))}</pre></td></tr>`;
+      }
+      rows.push(t + "</table>");
+    }
+    const clipped = d._clipped || {};
+    if (Object.keys(clipped).length) {
+      let t = `<div class="tl-digest-sub">已裁剪字段</div><table class="tl-digest-table">`;
+      for (const [k, v] of Object.entries(clipped)) {
+        t += `<tr><td class="tl-digest-key">${esc(k)}</td><td class="tl-digest-meta">${esc(v.type || "?")} · ${_fmtChars(v.chars)}${truncated.has(k) ? " · 已截断" : ""}</td></tr>`;
+        if (v.head) t += `<tr><td colspan="2"><pre class="tl-digest-snippet">${esc(String(v.head))}</pre></td></tr>`;
+      }
+      rows.push(t + "</table>");
+    }
+    const keptKeys = Object.keys(d).filter(k => !k.startsWith("_"));
+    if (keptKeys.length) {
+      let t = `<div class="tl-digest-sub">保留字段</div><table class="tl-digest-table">`;
+      for (const k of keptKeys) {
+        t += `<tr><td class="tl-digest-key">${esc(k)}</td><td class="tl-digest-meta">${esc(JSON.stringify(d[k]))}</td></tr>`;
+      }
+      rows.push(t + "</table>");
+    }
+    if (d._note) rows.push(`<div class="tl-digest-note">${esc(d._note)}</div>`);
+    rows.push(`<div class="tl-digest-note">键：${esc((d._keys || []).join("、"))}${d._keys_omitted ? "（其余 " + d._keys_omitted + " 个键省略）" : ""}</div>`);
+    return `<div class="tl-digest">${rows.join("")}</div>`;
   }
 
   function clearAll() {

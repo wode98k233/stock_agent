@@ -6,6 +6,7 @@ from typing import Any
 _SENSITIVE_KEYS = {
     "TAVILY_API_KEYS", "SERPAPI_API_KEYS",
     "BOCHA_API_KEYS", "BRAVE_API_KEYS", "ANSPIRE_API_KEYS", "MINIMAX_API_KEYS",
+    "DEEPSEEK_API_KEYS",
     "DINGTALK_WEBHOOK_SECRET", "FEISHU_WEBHOOK_SECRET",
     "TELEGRAM_BOT_TOKEN", "EMAIL_SMTP_PASSWORD",
     "PUSHOVER_USER_KEY", "PUSHOVER_APP_TOKEN",
@@ -13,7 +14,20 @@ _SENSITIVE_KEYS = {
     "HITHINK_FINANCE_API_KEY",
     # Embedding / 评测等密钥：接口不返回明文、页面不可改、apply 接口拒绝写入
     "STOCK_MEMORY_API_KEY", "STOCK_MEMORY_RERANKER_API_KEY", "JUDGE_LLM_API_KEY",
+    # 2026-11-14：主模型/数据源凭据纳入「只写不读」可配置
+    "OPENAI_API_KEY", "REPORT_LLM_API_KEY", "TOOL_COMPRESS_LLM_API_KEY",
+    "CONTEXT_SUMMARY_LLM_API_KEY",
+    "MX_APIKEY", "TUSHARE_TOKEN", "IWENCAI_API_KEY", "FINNHUB_API_KEY",
+    "LONGBRIDGE_APP_KEY", "LONGBRIDGE_APP_SECRET", "LONGBRIDGE_ACCESS_TOKEN",
+    "CHECKPOINT_PG_URI",
 }
+
+# 只读项：页面展示但禁止通过接口修改（改 .env 后重启）
+_READONLY_KEYS = {"TRACE_DB_PATH", "WEB_HOST", "WEB_PORT", "WEB_MAX_WORKERS"}
+
+
+def is_readonly(key: str) -> bool:
+    return key in _READONLY_KEYS
 
 
 def mask_sensitive(key: str, value: Any) -> str:
@@ -68,13 +82,14 @@ def _build_config_schema() -> list[dict]:
         {"key": "OPENAI_DEFAULT_PARAMS", "label": "默认参数 (JSON)", "type": "str", "group": "LLM"},
         {"key": "EXTRA_BODY", "label": "额外请求体 (JSON)", "type": "str", "group": "LLM"},
         {"key": "CACHE_PREFIX_ENABLED", "label": "启用 LLM 缓存前缀", "type": "bool", "group": "LLM"},
+        {"key": "LLM_REQUEST_TIMEOUT", "label": "LLM 请求超时(秒)", "type": "int", "group": "LLM", "description": "单次 LLM 请求超时。SDK 默认 read=600s×3 次重试=最坏 30 分钟静默挂死，收紧到 300s。"},
         {"key": "CACHE_PREFIX_CONTENT", "label": "自定义缓存前缀", "type": "str", "group": "LLM"},
         # ── A8 语义缓存（LLM 响应缓存，默认关闭灰度） ──
         {"key": "LLM_CACHE_ENABLED", "label": "启用 LLM 语义缓存", "type": "bool", "group": "LLM 缓存", "description": "命中同义同场景问题直接返回缓存响应，跳过 LLM 调用。默认关闭（灰度），关闭后行为与上线前完全一致"},
         {"key": "LLM_CACHE_TTL_MAP", "label": "TTL 分级映射(秒)", "type": "str", "group": "LLM 缓存", "description": "JSON：market=市场观点(1800)；sector_intraday=盘中板块(0=禁缓存)；sector_offhours=盘后板块(14400)；methodology=方法论(604800)；data_query=数据查询(0=禁缓存)"},
         {"key": "LLM_CACHE_CATEGORY_MAP", "label": "场景→缓存类别映射", "type": "str", "group": "LLM 缓存", "description": "JSON：sr_scenario → market/sector/methodology/data_query；未列出场景默认 sector"},
         # ── A8 模型路由（默认关闭灰度） ──
-        {"key": "LLM_ROUTING_ENABLED", "label": "启用模型分档路由", "type": "bool", "group": "模型路由", "description": "按场景/标签将请求路由到 fast/standard/strong 三档模型。默认关闭（灰度）。热改配置生效"},
+        {"key": "LLM_ROUTING_ENABLED", "label": "启用模型分档路由", "type": "bool", "group": "模型路由", "description": "按场景/标签将请求路由到 fast/standard/strong 三档模型。默认关闭（灰度）。**重启服务后生效**（路由/缓存策略在启动时装配）"},
         {"key": "LLM_ROUTING_MAP", "label": "路由映射表", "type": "str", "group": "模型路由", "description": "JSON：{\"rules\":[{\"match\":{\"scenario\":[..]/\"label\":[..]/\"purpose\":[..]},\"tier\":\"fast\"}],\"default\":\"standard\"}，按顺序首条命中生效"},
         {"key": "LLM_TIER_FAST_MODEL", "label": "fast 档模型", "type": "str", "group": "模型路由", "description": "留空=沿用该用途原配模型；凭证沿用原配置，仅换模型名"},
         {"key": "LLM_TIER_STANDARD_MODEL", "label": "standard 档模型", "type": "str", "group": "模型路由", "description": "留空=沿用该用途原配模型"},
@@ -83,18 +98,44 @@ def _build_config_schema() -> list[dict]:
         {"key": "BATCH_SIZE", "label": "批处理大小", "type": "int", "group": "Agent 通用"},
         {"key": "MEMORY_ENABLED", "label": "启用对话记忆", "type": "bool", "group": "Agent 通用", "description": "控制 ConversationSummaryBufferMemory 开关"},
         {"key": "MEMORY_MAX_TOKENS", "label": "记忆压缩 Token 上限", "type": "int", "group": "Agent 通用"},
+        {"key": "CONTEXT_WINDOW_TOKENS", "label": "上下文窗口上限(token)", "type": "int", "group": "Agent 通用",
+         "description": "上下文洞察页占用率的分母。按模型区分请用下一项。"},
+        {"key": "CONTEXT_WINDOW_BY_MODEL", "label": "按模型的窗口上限(JSON)", "type": "str", "group": "Agent 通用",
+         "description": "JSON，形如 {\"deepseek-v4.1-flash\": 1000000}；命中优先于上一项。"},
         {"key": "INFO_ACCUMULATOR_COMPRESS_THRESHOLD", "label": "信息累积压缩阈值", "type": "int", "group": "Agent 通用"},
         {"key": "CLARIFY_ENABLED", "label": "启用澄清反问", "type": "bool", "group": "Agent 通用", "description": "classify 后信息不足时先向用户提问（Web 交互，CLI/TUI 暂跳过）"},
         {"key": "CLARIFY_MAX_QUESTIONS", "label": "澄清问题数量上限", "type": "int", "group": "Agent 通用"},
         {"key": "CLARIFY_TIMEOUT_SECONDS", "label": "澄清等待超时(秒)", "type": "int", "group": "Agent 通用", "description": "倒计时归零后按推荐选项继续分析"},
+        {"key": "STRATEGY_INTENT_MODE", "label": "策略会话闸门", "type": "select", "choices": ["confirm", "auto", "off"], "group": "Agent 通用", "description": "对话里认出策略意图后：confirm 先弹确认卡（推荐）/ auto 槽位齐全直接跑 / off 关闭"},
+        {"key": "STRATEGY_SESSION_MAX_TURNS", "label": "策略会话轮数上限", "type": "int", "group": "Agent 通用"},
+        {"key": "STRATEGY_INTENT_LLM_FALLBACK", "label": "策略意图 LLM 兜底", "type": "bool", "group": "Agent 通用", "description": "词表判不了时交 LLM 裁决归属；关闭则回退「只是问问/要回测」分流题，零 LLM 调用"},
+        {"key": "STRATEGY_SLOT_CARD_LLM", "label": "策略确认卡 LLM 生成", "type": "bool", "group": "Agent 通用", "description": "确认卡（反问）的题面与选项由 LLM 就着用户原话现写；关闭则用内置模板兜底"},
+        {"key": "STRATEGY_INTENT_FIDELITY", "label": "策略意图保真核对", "type": "bool", "group": "Agent 通用", "description": "每轮生成后先核对「实现出来的策略」是否忠实于用户原话，再回测；关闭 = 不核对（结果卡如实标「未核对」）"},
         {"key": "REACT_TOOL_CALLS", "label": "工具调用上限", "type": "int", "group": "ReAct"},
         {"key": "REACT_SKILL_BATCH_SIZE", "label": "技能批量装载数", "type": "int", "group": "ReAct"},
         {"key": "REACT_SKILL_RESELECT_EVERY", "label": "每N轮换批(0关)", "type": "int", "group": "ReAct"},
+        # 2026-10-17 删档：TOOL_SURFACE_MODE / SKILL_ACTIVATE_TOOL_MODE 已固化
+        # 为常量（config/agent.py），不再进配置面板。
         {"key": "REACT_ENABLE_CONTEXT_COMPACTION", "label": "上下文压缩", "type": "bool", "group": "上下文压缩"},
         {"key": "REACT_CONTEXT_RECENT_ROUNDS", "label": "保留完整轮次", "type": "int", "group": "上下文压缩"},
         {"key": "REACT_SUMMARY_TRIGGER_ROUNDS", "label": "摘要触发轮次", "type": "int", "group": "上下文压缩"},
         {"key": "REACT_SUMMARY_PENDING_CHARS", "label": "摘要触发字符", "type": "int", "group": "上下文压缩"},
+        {"key": "REACT_CONTEXT_SOFT_LIMIT_TOKENS", "label": "上下文软上限(tok, 0=关)",
+         "type": "int", "group": "上下文压缩"},
+        # 2026-10-17 删档：CONTEXT_SUMMARY_MODE 固化 fork、SKILL_SELECTOR_PROMPT_MODE
+        # 固化 compact、SKILL_SELECTOR_FORK / SKILL_ROUTER_SKIP_FIRST / SKILL_DETAIL_DELIVERY
+        # 同批固化（config/agent.py、config/side_llm.py），不再进配置面板。
+        {"key": "CONTEXT_SUMMARY_LLM_MODEL", "label": "压缩专用模型(留空=主模型)",
+         "type": "str", "group": "上下文压缩"},
+        {"key": "CONTEXT_SUMMARY_LLM_API_BASE", "label": "压缩专用 API Base",
+         "type": "str", "group": "上下文压缩"},
         {"key": "REACT_SUMMARY_MAX_CHARS", "label": "摘要最大字符", "type": "int", "group": "上下文压缩"},
+        {"key": "BUDGET_CACHE_HIT_WEIGHT", "label": "命中 token 计费权重(0=不折算)",
+         "type": "float", "group": "预算"},
+        {"key": "BUDGET_FREE_WEIGHT", "label": "免费端点计费权重(0=不占预算)",
+         "type": "float", "group": "预算"},
+        {"key": "MAX_RAW_TOKENS_PER_QUERY", "label": "原始 token 硬上限(0=不启用)",
+         "type": "int", "group": "预算"},
         {"key": "REACT_DEDUP_MODE", "label": "去重模式", "type": "str", "group": "上下文压缩", "choices": ["exact", "off"]},
         {"key": "REACT_CONTEXT_DEBUG_LOG", "label": "压缩调试日志", "type": "bool", "group": "上下文压缩"},
         {"key": "PLAN_MAX_STEPS", "label": "最大规划步骤数", "type": "int", "group": "Plan / PDOR / Unified"},
@@ -119,9 +160,10 @@ def _build_config_schema() -> list[dict]:
         {"key": "PYTDX_PRIORITY", "label": "Pytdx 优先级", "type": "int", "group": "数据源"},
         {"key": "PYTDX_CONNECTION_COOLDOWN", "label": "Pytdx 连接冷却(秒)", "type": "int", "group": "数据源"},
         {"key": "PYTDX_SERVERS", "label": "Pytdx 服务器列表", "type": "str", "group": "数据源"},
-        {"key": "HITHINK_FINANCE_API_KEY", "label": "同花顺 API Key", "type": "str", "group": "数据源", "description": "同花顺官方金融数据服务 Key（fuyao.aicubes.cn/admin/ 签发），留空禁用该源"},
+        {"key": "HITHINK_FINANCE_API_KEY", "label": "同花顺 API Key", "type": "str", "group": "数据源", "sensitive": True, "description": "同花顺官方金融数据服务 Key（fuyao.aicubes.cn/admin/ 签发），留空禁用该源"},
         {"key": "HITHINK_PRIORITY", "label": "同花顺优先级", "type": "int", "group": "数据源"},
         {"key": "REPORT_ENABLE_ANALYSIS_ENGINE", "label": "启用分析引擎", "type": "bool", "group": "报告"},
+        {"key": "DEEP_REPORT_SSE_MAX_SECONDS", "label": "长报告 SSE 兜底时长(秒)", "type": "int", "group": "报告", "description": "只兜任务卡死；终态会提前收流。默认 1800（30 分钟）"},
         {"key": "REPORT_TEMPLATE", "label": "报告模板", "type": "str", "group": "报告", "choices": ["lightweight", "standard", "professional"]},
         {"key": "REPORT_TEMPLATE_CONTINUATION_MODE", "label": "模板续问判定模式", "type": "str", "group": "报告", "choices": ["keyword", "llm"], "description": "keyword=基于历史的规则续问(零成本,默认)；llm=调用 LLM 判定续问并选模板(更准,有单次调用成本)"},
         {"key": "REPORT_MODE", "label": "报告合成模式", "type": "str", "group": "报告", "choices": ["fast", "full"]},
@@ -132,8 +174,8 @@ def _build_config_schema() -> list[dict]:
         {"key": "REPORT_MAX_NEWS_CHARS", "label": "新闻截断(字符)", "type": "int", "group": "报告"},
         {"key": "REPORT_LLM_MODEL", "label": "报告专用模型", "type": "str", "group": "报告"},
         {"key": "REPORT_LLM_API_BASE", "label": "报告专用 API Base", "type": "str", "group": "报告"},
-        {"key": "COMPRESS_LLM_MODEL", "label": "压缩专用模型", "type": "str", "group": "报告"},
-        {"key": "COMPRESS_LLM_API_BASE", "label": "压缩专用 API Base", "type": "str", "group": "报告"},
+        {"key": "TOOL_COMPRESS_LLM_MODEL", "label": "工具压缩模型", "type": "str", "group": "报告"},
+        {"key": "TOOL_COMPRESS_LLM_API_BASE", "label": "工具压缩 API Base", "type": "str", "group": "报告"},
         {"key": "JUDGE_LLM_MODEL", "label": "评测 Judge 模型", "type": "str", "group": "报告"},
         {"key": "JUDGE_LLM_API_KEY", "label": "Judge 专用 API Key", "type": "str", "group": "报告", "sensitive": True},
         {"key": "JUDGE_LLM_API_BASE", "label": "Judge 专用 API Base", "type": "str", "group": "报告"},
@@ -239,6 +281,20 @@ def _build_config_schema() -> list[dict]:
         {"key": "SEARCH_FREE_MCP_ENABLED", "label": "启用免 Key 境外搜索源（Parallel/Exa）", "type": "str", "group": "搜索引擎",
          "choices": ["true", "false"],
          "description": "Parallel / Exa 托管 MCP，免 Key、国内可达，作为兜底搜索源。关闭后查询不会发往境外服务。"},
+        {"key": "DEEPSEEK_API_KEYS", "label": "DeepSeek API Keys（Search/Fetch）", "type": "str", "group": "搜索引擎", "sensitive": True,
+         "description": "官方 Search/Fetch 专用 Key（platform.deepseek.com 申请，逗号分隔可配多个）。按请求次数计费 ¥5/1000 次成功请求，只有 200 且拿到结果才计费；LLM 走第三方中继时那把 Key 在官方站点无效，需单独配置。"},
+        {"key": "DEEPSEEK_API_BASE", "label": "DeepSeek API Base", "type": "str", "group": "搜索引擎",
+         "description": "默认 https://api.deepseek.com，一般无需修改。"},
+        {"key": "DEEPSEEK_SEARCH_ENABLED", "label": "启用 DeepSeek 搜索源（排首位）", "type": "str", "group": "搜索引擎",
+         "choices": ["true", "false"],
+         "description": "启用后排在搜索链首位（自带排序分/权威度与 600~800 字符长摘要）。关闭 = 搜索不再用该源（不产生搜索费用），但 web_fetch 抓取仍可用；要一并停用请清空 DEEPSEEK_API_KEYS（Key 是总开关）。"},
+        {"key": "DEEPSEEK_SEARCH_NEED_CONTENT", "label": "DeepSeek 搜索直接返回正文", "type": "str", "group": "搜索引擎",
+         "choices": ["true", "false"],
+         "description": "默认 false：正文交给 web_fetch 按需抓取，搜索只取长摘要，避免一次塞爆上下文。"},
+        {"key": "DEEPSEEK_FETCH_MAX_CHARS", "label": "网页抓取正文上限(字符)", "type": "int", "group": "搜索引擎",
+         "description": "web_fetch 单篇正文截断上限，默认 8000，实际夹在 500~20000。"},
+        {"key": "SEARCH_PROVIDER_ORDER", "label": "搜索引擎顺序（白名单）", "type": "str", "group": "搜索引擎",
+         "description": "逗号分隔引擎名，可用 DeepSeek/MX/Tavily/SerpAPI/Bocha/Brave/Anspire/MiniMax/Parallel/Exa/SearXNG。填了则「写了的才用、按写的顺序用」，例如 DeepSeek,MX；留空 = 默认顺序全量使用。"},
         {"key": "NOTIFICATION_ENABLED", "label": "启用通知层", "type": "bool", "group": "通知"},
         {"key": "NOTIFICATION_CHANNELS", "label": "指定渠道", "type": "str", "group": "通知"},
         {"key": "NOTIFICATION_DEDUP_TTL", "label": "去重窗口(秒)", "type": "int", "group": "通知"},
@@ -268,6 +324,93 @@ def _build_config_schema() -> list[dict]:
         {"key": "GOTIFY_TOKEN", "label": "Gotify Token", "type": "str", "group": "通知", "sensitive": True},
         {"key": "PUSHPLUS_TOKEN", "label": "PushPlus Token", "type": "str", "group": "通知", "sensitive": True},
         {"key": "SERVERCHAN3_SENDKEY", "label": "Server酱3 SendKey", "type": "str", "group": "通知", "sensitive": True},
+        {
+            "key": "BACKTEST_MIN_COVERAGE",
+            "label": "回测最低数据覆盖率",
+            "type": "float",
+            "group": "回测",
+            "description": "低于该覆盖率的回测判定为数据缺口（health=data_gap），提示补数后再看结论；0.95 表示允许缺 5% 的交易日",
+        },
+        {
+            "key": "BACKTEST_AUTO_EVAL",
+            "label": "回测自动样本内外评判",
+            "type": "bool",
+            "group": "回测",
+            "description": "回测完成后自动后台补跑 IS/OOS 对照，verdict 落 backtest_eval 表。关掉后只影响新产生的回测，已有评判结果不受影响",
+        },
+        {
+            "key": "PRICE_LIMIT_MODE",
+            "label": "涨跌停拦截口径",
+            "type": "select",
+            "choices": ["enforce", "warn", "off"],
+            "group": "回测",
+            "description": "涨停不可买 / 跌停不可卖的撮合约束：enforce=真实拦截（默认）/ warn=只记录归因但放行（量化旧曲线虚高多少）/ off=关闭（一键回滚）",
+        },
+        # ── 成本 / 计价（结构化价目在 data/pricing/pricing_catalog.json，用「定价目录编辑器」改） ──
+        {
+            "key": "COST_TRACKING_ENABLED",
+            "label": "▶ 启用成本统计",
+            "type": "bool",
+            "group": "成本 / 计价",
+            "description": "总开关：每次 LLM 调用按「实际模型 + 实际 token + 调用时刻（峰/谷）+ 供应商」算出花费，并在日志 / 单次对话 / 月度统计 / 大屏四处展示。关闭后退回只有 token 的旧口径",
+        },
+        {
+            "key": "COST_PRICING_CATALOG_PATH",
+            "label": "价目文件路径",
+            "type": "str",
+            "group": "成本 / 计价",
+            "description": "运行时价目文件（页面可编辑）；缺失时自动回落仓库内置的 data/pricing/pricing_catalog.default.json",
+        },
+        {"key": "COST_CURRENCY", "label": "币种", "type": "str", "group": "成本 / 计价"},
+        {"key": "COST_PEAK_TZ", "label": "峰谷判定时区", "type": "str", "group": "成本 / 计价", "description": "DeepSeek 以北京时间为准；改成 UTC 会把高峰窗口判错（09:00-12:00 会变成 01:00-04:00）"},
+        {"key": "COST_UNKNOWN_PROVIDER_POLICY", "label": "未计价时的策略", "type": "str", "group": "成本 / 计价", "description": "warn=记「未计价」并告警 / zero=按 0 元计 / estimate=按最便宜付费源估"}, 
+        {"key": "COST_FREE_VALIDITY_CHECK", "label": "免费源有效期检查", "type": "bool", "group": "成本 / 计价", "description": "免费额度会变：过期后自动按「未计价」处理并告警一次"}, 
+        {"key": "UPLOAD_MAX_MB", "label": "单图上限 (MB)", "type": "int", "group": "上传", "description": "对话图片单张大小上限，默认 5MB"},
+        {"key": "UPLOAD_RETENTION_DAYS", "label": "图片保留天数", "type": "int", "group": "上传", "description": "超过该天数的历史图片会被每日巡检清理（消息里的文字转述保留）"},
+        {"key": "UPLOAD_MAX_TOTAL_MB", "label": "图片目录总量上限 (MB)", "type": "int", "group": "上传", "description": "超过后按最老文件 LRU 清理到 80%"},
+        {"key": "UPLOAD_CAPTION_MAX_CHARS", "label": "图片转述字数上限", "type": "int", "group": "上传", "description": "视觉模型输出的最大字数（默认 500）；调大更详细但更慢、更贵"},
+
+        # ── 凭据（只写不读：GET 不返回值，留空不改）──────────────
+        {"key": "OPENAI_API_KEY", "label": "主模型 API Key", "type": "str", "group": "LLM", "sensitive": True, "description": "OpenAI 兼容接口的 Key；保存后立即重载"},
+        {"key": "REPORT_LLM_API_KEY", "label": "报告模型 API Key", "type": "str", "group": "报告", "sensitive": True, "description": "留空 = 复用主模型 Key"},
+        {"key": "TOOL_COMPRESS_LLM_API_KEY", "label": "压缩模型 API Key", "type": "str", "group": "上下文压缩", "sensitive": True, "description": "留空 = 复用主模型 Key"},
+        {"key": "CONTEXT_SUMMARY_LLM_API_KEY", "label": "摘要模型 API Key", "type": "str", "group": "上下文压缩", "sensitive": True, "description": "留空 = 复用主模型 Key"},
+        {"key": "MX_APIKEY", "label": "妙想 API Key", "type": "str", "group": "数据源", "sensitive": True, "description": "妙想数据源（MX）"},
+        {"key": "TUSHARE_TOKEN", "label": "Tushare Token", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "IWENCAI_API_KEY", "label": "问财 API Key", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "IWENCAI_BASE_URL", "label": "问财 Base URL", "type": "str", "group": "数据源"},
+        {"key": "FINNHUB_API_KEY", "label": "Finnhub API Key", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "LONGBRIDGE_APP_KEY", "label": "Longbridge App Key", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "LONGBRIDGE_APP_SECRET", "label": "Longbridge App Secret", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "LONGBRIDGE_ACCESS_TOKEN", "label": "Longbridge Access Token", "type": "str", "group": "数据源", "sensitive": True},
+        {"key": "CHECKPOINT_PG_URI", "label": "Checkpoint PG URI", "type": "str", "group": "调试", "sensitive": True, "description": "含口令，只写不读"},
+
+        # ── 运行开关（此前只能在 .env 改）────────────────────────
+        # 注意：TOOL_SURFACE_MODE / SKILL_ACTIVATE_TOOL_MODE / SKILL_SELECTOR_PROMPT_MODE /
+        # SKILL_DETAIL_DELIVERY / SKILL_SELECTOR_FORK / SKILL_ROUTER_SKIP_FIRST /
+        # CONTEXT_SUMMARY_MODE 已于 2026-10-17 固化为常量（config/agent.py、config/side_llm.py），
+        # 不再是环境变量 —— 放进面板只会「改了不生效」，故不收录。
+        {"key": "STRATEGY_TURN_ROUTER_LLM", "label": "策略路由用 LLM", "type": "bool", "group": "Agent 通用"},
+        {"key": "GROUP_MAX_LLM_CALLS", "label": "群模式最大 LLM 调用", "type": "int", "group": "Agent 群模式"},
+        {"key": "REPORT_DRILLDOWN_ENABLED", "label": "报告证据下钻", "type": "bool", "group": "报告"},
+        {"key": "REPORT_DRILLDOWN_MIN_CHARS", "label": "下钻最少字符", "type": "int", "group": "报告"},
+        {"key": "REPORT_DRILLDOWN_MIN_TOOLS", "label": "下钻最少工具数", "type": "int", "group": "报告"},
+        {"key": "CACHE_STOCK_HISTORY_HOURS", "label": "个股历史缓存(小时)", "type": "int", "group": "缓存"},
+        {"key": "CACHE_BOARD_HOURS", "label": "板块缓存(小时)", "type": "int", "group": "缓存"},
+        {"key": "CACHE_NEWS_HOURS", "label": "新闻缓存(小时)", "type": "int", "group": "缓存"},
+        {"key": "CACHE_RATING_HOURS", "label": "评级缓存(小时)", "type": "int", "group": "缓存"},
+        {"key": "CACHE_FINANCIAL_HOURS", "label": "财务缓存(小时)", "type": "int", "group": "缓存"},
+        {"key": "BACKTEST_MULTI_WINDOW_N", "label": "批量回测窗口数", "type": "int", "group": "回测"},
+        {"key": "BACKTEST_MULTI_WINDOW_EMBARGO", "label": "批量回测禁运期(天)", "type": "int", "group": "回测"},
+        {"key": "SCAN_MARKET_AMOUNT_ENABLED", "label": "成交额补录作业", "type": "bool", "group": "后台巡检"},
+        {"key": "SCAN_MARKET_AMOUNT_INTERVAL_MINUTES", "label": "成交额补录间隔(分)", "type": "int", "group": "后台巡检"},
+        {"key": "SCAN_MARKET_AMOUNT_FIRST_DELAY_S", "label": "成交额补录首延迟(秒)", "type": "int", "group": "后台巡检"},
+        {"key": "DATASOURCE_PRIORITY_ORDER", "label": "数据源优先级顺序", "type": "str", "group": "数据源", "description": "逗号分隔，如 hithink,akshare,mx_data"},
+        {"key": "PORTFOLIO_ENRICH_ENABLED", "label": "持仓增强取数", "type": "bool", "group": "数据源"},
+        {"key": "TRACE_DB_PATH", "label": "Trace 库路径", "type": "str", "group": "调试", "readonly": True},
+        {"key": "WEB_HOST", "label": "监听地址", "type": "str", "group": "系统监控", "readonly": True},
+        {"key": "WEB_PORT", "label": "监听端口", "type": "int", "group": "系统监控", "readonly": True},
+        {"key": "WEB_MAX_WORKERS", "label": "最大工作线程", "type": "int", "group": "系统监控", "readonly": True},
     ]
 
 
@@ -276,3 +419,4 @@ def get_config_schema() -> list[dict]:
     if not hasattr(get_config_schema, "_cache"):
         get_config_schema._cache = _build_config_schema()
     return get_config_schema._cache
+

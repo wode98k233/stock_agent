@@ -29,6 +29,7 @@ from backtest.strategy_research import (
     DISCLAIMER,
     IsoOsRunner,
     IterRecord,
+    MAX_BACKTEST_FAILURES,
     MAX_ROUNDS,
     OOS_MIN_TRADES,
     STOP_BUDGET,
@@ -42,7 +43,9 @@ from backtest.strategy_research import (
     clamp_win_rate,
     diff_strategy,
     extract_json_block,
+    preflight_data,
     sanitize_text,
+    short_span_note,
     scan_sensitive_words,
     strategy_hash,
 )
@@ -92,7 +95,7 @@ class FakeGenerator:
         self.calls.append(('initial', idea, universe))
         return self._next()
 
-    def mutate(self, idea, history):
+    def mutate(self, idea, universe, history):
         self.calls.append(('mutate', len(history)))
         return self._next()
 
@@ -183,6 +186,17 @@ def _loop(store, generator, runner, **kw):
     return StrategyResearchLoop('SR-TEST', db=store, generator=generator,
                                 runner=runner, **kw)
 
+@pytest.fixture(autouse=True)
+def _no_intent_fidelity_llm(monkeypatch):
+    """关掉「意图保真核对」的真实 LLM 外呼。
+
+    研发循环本身全部 mock，但 backtest/intent_fidelity.py::check_intent 默认开启且会真调 LLM：
+    实测本文件 test_step_marks_overfit_and_low_sample 单例 142.20s（11 次指数退避），
+    且失败后 fail-open 让用例假绿。核对逻辑由 test/unit/backtest/test_intent_fidelity.py 覆盖。
+    """
+    from config import Config
+    monkeypatch.setattr(Config, 'STRATEGY_INTENT_FIDELITY', False, raising=False)
+
 
 # ============================================================
 # 1. 基础转移：首轮生成 → 回测 → 落库（happy path）
@@ -240,6 +254,95 @@ class TestHappyPath:
 
 
 # ============================================================
+# 1.1 回测执行失败的韧性（真机事故 2026-10-14）
+# ============================================================
+
+
+class TestBacktestFailureResilience:
+    """单轮回测执行异常不该带走整个研发任务。
+
+    真机事故：strategy_run SR-20261014-BE8018 第 4 轮用 RSI 周期 2，backtrader 内部除零
+    （ZeroDivisionError: float division by zero），旧实现直接 status=failed、stop_reason=failed，
+    用户看到的是「研究失败」——其实只是那一轮的指标在部分区间除不了。
+    """
+
+    def test_single_backtest_failure_does_not_kill_run(self):
+        store = _make_run(FakeStore())
+        g1, m1, m2 = _gen_result(1.0, 0.9, hypothesis="第一轮")
+        g2, m3, m4 = _gen_result(1.0, 1.1, hypothesis="第二轮")
+        lp = _loop(store, FakeGenerator([g1, g2]),
+                   FakeRunner([ZeroDivisionError("float division by zero"), (m3, m4)]),
+                   budget=2)
+        result = lp.run()
+
+        assert result.status == "done"
+        assert result.total_iters == 2
+        assert store.iters[0].verdict == "failed"
+        assert store.iters[0].failure_kind == "backtest"
+        assert "除零" in store.iters[0].compile_error, "除零必须给出可执行的下一步提示"
+        assert store.iters[1].compile_ok == 1
+
+    def test_consecutive_backtest_failures_fail_run(self):
+        """连续 MAX_BACKTEST_FAILURES 轮都失败才终止（不能无限重试）"""
+        store = _make_run(FakeStore())
+        g, m1, m2 = _gen_result(1.0, 1.0)
+        lp = _loop(store, FakeGenerator([g]),
+                   FakeRunner([RuntimeError("回测挂了")]), budget=8)
+        result = lp.run()
+
+        assert result.status == "failed"
+        assert result.stop_reason == STOP_FAILED
+        assert len(store.iters) == MAX_BACKTEST_FAILURES
+        assert all(it.failure_kind == "backtest" for it in store.iters)
+
+    def test_generation_failure_still_fails_immediately(self):
+        """生成侧连续非法仍立即终止（韧性只针对回测执行失败）"""
+        from backtest.strategy_research import GenResult
+        bad = GenResult(ok=False, strategy_json=None, hypothesis="",
+                        error="生成侧连续非法", model="fake")
+        store = _make_run(FakeStore())
+        lp = _loop(store, FakeGenerator([bad]), FakeRunner([RuntimeError("不该跑到回测")]),
+                   budget=8)
+        result = lp.run()
+
+        assert result.status == "failed"
+        assert len(store.iters) == 1
+        assert store.iters[0].failure_kind == "gen"
+
+    def test_final_failed_round_without_best_reports_failed(self):
+        """末轮失败且没选出可用策略 → 如实报 failed（防「完成却什么都没有」的假绿）"""
+        store = _make_run(FakeStore())
+        g, m1, m2 = _gen_result(1.0, 1.0)
+        # 预算 2 轮、两轮都失败（还没到 3 连击）：循环按预算正常收尾，
+        # 但没有任何可用策略 —— 不能显示「已完成」
+        lp = _loop(store, FakeGenerator([g]),
+                   FakeRunner([ZeroDivisionError("boom")]), budget=2)
+        result = lp.run()
+
+        assert len(store.iters) == 2
+        assert result.best_iter is None
+        assert result.status == "failed"
+        assert result.stop_reason == STOP_FAILED
+
+    def test_mutate_prompt_carries_failure_reason(self):
+        """失败原因必须回灌给模型：否则它不知道上一轮为什么没结果，会原样重抄"""
+        class _NoLLM:
+            def invoke(self, messages):
+                raise AssertionError("构造 prompt 不应调用 LLM")
+
+        gen = StrategyGenerator(llm=_NoLLM(), pacing_seconds=0, backoff_seconds=0)
+        rec = IterRecord(round=1, hypothesis="RSI 周期 2", strategy_json=None,
+                         compile_ok=0,
+                         compile_error="回测执行失败：float division by zero（指标在部分区间出现除零）",
+                         verdict="failed", failure_kind="backtest")
+        prompt = gen._round_prompt(rec, "600519")
+
+        assert "失败原因" in prompt
+        assert "division by zero" in prompt
+        assert "不要原样照抄" in prompt
+
+
+# ============================================================
 # 2. 重试兜底（AC-2 / AC-3）
 # ============================================================
 
@@ -289,7 +392,8 @@ class TestRetryPath:
             result = gen.generate_initial('想法', '600519')
 
         assert result.ok is False
-        assert '未知指标函数' in result.error
+        # 保存闸门先于编译拦截，错误信息是「可用指标」清单（比编译期的更可读）
+        assert '不是可用指标' in result.error
         assert 'Traceback' not in result.error
         assert result.attempts == 3  # 初次 + 2 次重试
 
@@ -303,6 +407,40 @@ class TestRetryPath:
             result = gen.generate_initial('想法', '600519')
         assert result.ok is False
         assert 'JSON' in result.error
+
+    def test_scalar_operand_gets_readable_rejection_then_retry(self):
+        """裸标量操作数在生成期就被拦下并回灌原因（而不是静默把阈值改成 1）
+
+        旧链路：编译是唯一校验门，而 _build_rule_tree 会把 `"right": 50` 当成
+        「缺 left/right」并把右值换成 1 —— 模型无从知道、用户拿到的是另一个策略。
+        """
+        bad_obj = _ok_gen(name="裸标量")
+        bad_obj["conditions"]["buy"]["rules"][0]["right"] = 50   # 规范写法 {"value": 50}
+        good_obj = _ok_gen(name="规范写法")
+        responses = [
+            json.dumps({"hypothesis": "x", "strategy": bad_obj}, ensure_ascii=False),
+            json.dumps({"hypothesis": "y", "strategy": good_obj}, ensure_ascii=False),
+        ]
+
+        class FakeLLM:
+            def __init__(self):
+                self.invoked = []
+
+            def invoke(self, messages):
+                self.invoked.append(messages)
+                return type("R", (), {"content": responses[len(self.invoked) - 1],
+                                      "response_metadata": {"model_name": "fake"}})()
+
+        fake = FakeLLM()
+        with patch.object(StrategyGenerator, "_pacing", lambda self, extra=0.0: None):
+            gen = StrategyGenerator(llm=fake, pacing_seconds=0, backoff_seconds=0)
+            result = gen.generate_initial("RSI 超跌反弹", "600519")
+
+        assert result.ok is True
+        assert result.attempts == 2
+        # 第二次调用带上了反馈消息（LangChain 消息对象，取 content 比对）
+        feedback_text = " ".join(str(getattr(m, "content", m)) for m in fake.invoked[1])
+        assert "必须是非空对象" in feedback_text, feedback_text[-500:]
 
 
 # ============================================================
@@ -708,3 +846,220 @@ class TestDDLAndCRUD:
         assert len(runs) == 1
         assert runs[0]['best_oos_metrics']['sharpe'] == 0.9  # JOIN + 反序列化
         assert get_strategy_iters('SR-J')[0]['is_metrics']['sharpe'] == 1.0
+
+
+# ============================================================
+# 6. 数据前置闸门 + 退化轮 + IS 小样本（真机事故 2026-10-18）
+# ============================================================
+# 事故复盘：universe=000300 被当股票，stock_daily 只有 24 根月线，8 轮全跑在 16 根 bar 上。
+# 轮1-3 零成交却 verdict=keep，模型拿不到「没数据」这个事实，一路放宽条件直到烧完预算。
+
+
+class TestPreflightData:
+    """研发前数据闸门：条数不够 / 不是日线 → 一轮都不跑。"""
+
+    @staticmethod
+    def _df(dates):
+        import pandas as pd
+        return pd.DataFrame({'trade_date': dates, 'close': [1.0] * len(dates)})
+
+    def test_monthly_bars_rejected_with_non_daily_message(self, monkeypatch):
+        import pandas as pd
+        # 24 根、间隔 30 天：正是 000300 事故里 mx_data 返回的月频快照
+        dates = pd.date_range('2024-01-31', periods=24, freq='30D')
+        monkeypatch.setattr('utils.cache.market_data_db.get_stock_daily',
+                            lambda *a, **k: self._df(dates))
+        with pytest.raises(ValueError) as ei:
+            preflight_data('000300', '2023-10-19', '2026-10-18')
+        msg = str(ei.value)
+        assert '只有 24 根 K 线' in msg
+        # required 按**实际跨度**（690 天 // 3 = 230），不是请求区间 1095//3=365：
+        # 后者会把「请求 3 年但上市不满 3 年」的次新股误杀。
+        assert '需 ≥230 根' in msg
+        assert '非日线' in msg
+        assert '请检查数据源' in msg
+
+    def test_daily_bars_pass(self, monkeypatch):
+        import pandas as pd
+        dates = pd.date_range('2023-10-20', periods=725, freq='B')
+        monkeypatch.setattr('utils.cache.market_data_db.get_stock_daily',
+                            lambda *a, **k: self._df(dates))
+        info = preflight_data('600519', '2023-10-19', '2026-10-18')
+        assert info['bars'] == 725
+        assert info['gap_days'] is not None and info['gap_days'] <= 5
+        # 按实际首末 bar 的跨度算（不是请求区间的 1095//3=365）
+        assert info['required'] == max(60, (dates[-1] - dates[0]).days // 3)
+        assert info['required'] < 365
+        assert info['actual_start'] == '2023-10-20'
+        assert info['actual_end'] > info['actual_start']
+
+    def test_short_actual_span_is_reported_not_silently_shortened(self, monkeypatch):
+        """请求 3 年、实际只有 1 年：能过闸门，但必须给出「只覆盖实际区间」的说明。"""
+        import pandas as pd
+        dates = pd.date_range('2025-01-02', periods=240, freq='B')
+        monkeypatch.setattr('utils.cache.market_data_db.get_stock_daily',
+                            lambda *a, **k: self._df(dates))
+        info = preflight_data('600519', '2023-10-19', '2026-10-18')
+        assert info['bars'] == 240
+        assert info['required'] == max(60, (dates[-1] - dates[0]).days // 3)
+        assert info['required'] < 365            # 不会因为「请求 3 年」被误杀
+        note = short_span_note(info, '2023-10-19', '2026-10-18')
+        assert '2025-01-02' in note and '短于请求区间' in note
+
+    def test_empty_data_rejected(self, monkeypatch):
+        import pandas as pd
+        monkeypatch.setattr('utils.cache.market_data_db.get_stock_daily',
+                            lambda *a, **k: pd.DataFrame(columns=['trade_date', 'close']))
+        with pytest.raises(ValueError, match='只有 0 根 K 线'):
+            preflight_data('600519', '2023-10-19', '2026-10-18')
+
+
+class _PreflightFailRunner(FakeRunner):
+    """带 preflight 的替身：模拟「月线当股票」。"""
+
+    def preflight(self, universe, period):
+        raise ValueError('标的 000300 在 2023-10-19~2026-10-18 只有 24 根 K 线（需 ≥365 根），'
+                         '且相邻间隔中位数 31 天（非日线）。请检查数据源。')
+
+
+class TestPreflightGate:
+    def test_data_gate_aborts_before_burning_rounds(self):
+        """数据不达标 → 整任务 failed，一轮 LLM 都不调（不再烧 8 轮预算）。"""
+        store = _make_run(FakeStore())
+        g, m1, m2 = _gen_result()
+        gen = FakeGenerator([g])
+        lp = _loop(store, gen, _PreflightFailRunner([(m1, m2)]))
+        result = lp.run()
+
+        assert result.status == 'failed'
+        assert result.total_iters == 0
+        assert result.stop_reason.startswith('数据不足：')
+        assert '非日线' in result.stop_reason
+        assert gen.calls == [], '数据闸门必须在第一次 LLM 调用之前'
+        assert store.iters == []
+        assert store.runs['SR-TEST']['status'] == 'failed'
+
+    def test_runner_without_preflight_is_unaffected(self):
+        """替身/自定义 runner 没有 preflight → 跳过闸门（单测不读真实行情库）。"""
+        store = _make_run(FakeStore())
+        g, m1, m2 = _gen_result()
+        result = _loop(store, FakeGenerator([g]), FakeRunner([(m1, m2)]), budget=1).run()
+        assert result.status == 'done'
+        assert len(store.iters) == 1
+
+
+class _ShortSpanRunner(FakeRunner):
+    """数据够用、但实际区间短于请求区间。"""
+
+    def preflight(self, universe, period):
+        return {'bars': 240, 'required': 120, 'gap_days': 1.0, 'span_days': 358,
+                'actual_start': '2025-01-02', 'actual_end': '2025-12-31'}
+
+
+class TestShortSpanDisclosure:
+    def test_short_span_written_into_first_prompt(self):
+        """实际区间短于请求 → 首轮 prompt 必须带【数据说明】，不许静默缩短。"""
+        store = _make_run(FakeStore())
+        g, m1, m2 = _gen_result()
+        gen = FakeGenerator([g])
+        _loop(store, gen, _ShortSpanRunner([(m1, m2)]), budget=1).run()
+
+        idea_arg = gen.calls[0][1]          # ('initial', idea, universe)
+        assert '【数据说明】' in idea_arg
+        assert '2025-01-02' in idea_arg and '短于请求区间' in idea_arg
+        # 落库的 idea 仍是用户原话，不掺说明
+        assert store.runs['SR-TEST']['idea'] == '测试想法'
+
+
+class TestDegenerateRound:
+    """零成交 / 体检不过关 → verdict=degenerate，不得当选最优。"""
+
+    def test_zero_trade_round_is_degenerate(self):
+        store = _make_run(FakeStore())
+        g, is_m, oos_m = _gen_result(1.0, 1.0, trades_oos=0)
+        result = _loop(store, FakeGenerator([g]),
+                       FakeRunner([(is_m, oos_m)]), budget=1).run()
+        assert store.iters[0].verdict == 'degenerate'
+        assert result.best_iter is None
+
+    def test_zero_trade_is_not_keep(self):
+        """事故核心：零交易轮的 sharpe=None 曾让它被判 keep。"""
+        import backtest.strategy_research as sr
+        assert sr.round_is_degenerate(
+            {'trades': 0, 'sharpe': None}, {'trades': 0, 'sharpe': None}) is True
+        assert sr.round_is_degenerate(
+            {'trades': 5, 'health': 'insufficient_bars'},
+            {'trades': 5, 'health': 'insufficient_bars'}) is True
+        assert sr.round_is_degenerate(
+            {'trades': 5, 'health': 'ok'}, {'trades': 5, 'health': 'ok'}) is False
+        # 老数据/替身没有 health：只看成交笔数
+        assert sr.round_is_degenerate({'trades': 5}, {'trades': 5}) is False
+
+    def test_bad_health_round_is_degenerate(self):
+        store = _make_run(FakeStore())
+        g, is_m, oos_m = _gen_result(1.0, 1.0, trades_oos=8)
+        is_m['health'] = 'data_gap'
+        oos_m['health'] = 'data_gap'
+        _loop(store, FakeGenerator([g]),
+              FakeRunner([(is_m, oos_m)]), budget=1).run()
+        assert store.iters[0].verdict == 'degenerate'
+
+    def test_degenerate_never_wins_best(self):
+        store = _make_run(FakeStore())
+        g1, is1, oos1 = _gen_result(1.0, 9.0, trades_oos=30)
+        oos1['health'] = 'insufficient_bars'      # 夏普再高，数据不可用也不算
+        g2, is2, oos2 = _gen_result(1.0, 1.0, trades_oos=30)
+        result = _loop(store, FakeGenerator([g1, g2]),
+                       FakeRunner([(is1, oos1), (is2, oos2)]), budget=2).run()
+        assert result.best_iter.round == 2
+
+
+class TestIsLowSample:
+    def test_is_low_sample_marked_and_excluded(self):
+        """IS 3 笔的轮次：metrics 打标 + 不进最优候选（与 OOS 同口径）。"""
+        store = _make_run(FakeStore())
+        g1, is1, oos1 = _gen_result(1.0, 9.0, trades_oos=30)
+        is1['trades'] = 3
+        g2, is2, oos2 = _gen_result(1.0, 1.0, trades_oos=30)
+        result = _loop(store, FakeGenerator([g1, g2]),
+                       FakeRunner([(is1, oos1), (is2, oos2)]), budget=2).run()
+        assert store.iters[0].is_metrics['low_sample'] == 1
+        assert store.iters[1].is_metrics['low_sample'] == 0
+        assert result.best_iter.round == 2
+
+    def test_round_prompt_carries_health_and_bars(self):
+        """反馈里必须有「16/615 根 + 体检 + 空结果」——模型才不会继续猜条件松紧。"""
+        lp = StrategyGenerator()
+        it = IterRecord(
+            round=1, hypothesis='放宽趋势条件', verdict='degenerate',
+            is_metrics={'cagr': 0, 'sharpe': None, 'trades': 0,
+                        'health': 'insufficient_bars', 'data_bars': 16,
+                        'expected_bars': 615, 'coverage_pct': 0.026},
+            oos_metrics={'cagr': 0, 'sharpe': None, 'trades': 0,
+                         'health': 'insufficient_bars', 'data_bars': 8,
+                         'expected_bars': 142, 'coverage_pct': 0.056},
+        )
+        text = lp._round_prompt(it, '000300')
+        assert '16/615 根(2.6%)' in text
+        assert 'K线不足指标预热' in text
+        assert 'IS: cagr=0' in text and 'trades=0' in text
+        assert '000300' in text
+        assert '空结果' in text
+
+
+class TestAnnualMethod:
+    """年化口径标记：新 run=calendar_days，卡片据此决定展不展示年化。"""
+
+    def test_iso_runner_marks_calendar_days(self):
+        class _FakeEngine:
+            def run(self, config, **kwargs):
+                return {'annual_return': 0.1, 'total_return': 0.2,
+                        'sharpe_ratio': 1.0, 'max_drawdown': 0.1, 'win_rate': 0.5,
+                        'trade_count': 10, 'health': 'ok', 'health_detail': '',
+                        'data_bars': 700, 'expected_bars': 720, 'coverage_pct': 0.97}
+
+        m = IsoOsRunner(engine=_FakeEngine())._run_segment(
+            'sr_x', '600519', '2023-01-01', '2024-01-01', 'IS')
+        assert m['annual_method'] == 'calendar_days'
+        assert m['cagr'] == 0.1 and m['total_return'] == 0.2
+        assert m['health'] == 'ok' and m['data_bars'] == 700

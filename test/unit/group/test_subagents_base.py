@@ -134,44 +134,31 @@ class TestConfigure:
 # ── build_context ────────────────────────────────────────────
 
 class TestBuildContext:
-    """SpecializedAgent.build_context: 上下文消息构建"""
+    """build_context / build_tail_system：头部只留 user 原话，其余下沉尾部。
 
-    def test_basic_structure(self):
-        agent = _make_agent()
-        state = _make_state()
-        msgs = agent.build_context(state)
-        # 至少有 system prompt + user message
-        assert len(msgs) >= 2
-        assert msgs[0][0] == "system"  # system prompt
-        assert msgs[-1][0] == "user"   # 任务指令
+    ⚠️ 2026-10-18 口径变更（PRD-A11）：原实现把**子 Agent 自己的角色提示**放 `messages[0]`
+    → 与 agent 工具族第 0 字节分叉，技术/宏观/风险/传导链各写各的 messages[0]，
+    每个子 Agent 都冷启动。现改为「头部 = [user 原话]；尾部 = 角色 + 数据 + 约束 + 任务」。
+    """
 
-    def test_with_accumulated_data(self):
-        agent = _make_agent()
-        state = _make_state(accumulated_data="已有数据")
-        msgs = agent.build_context(state)
-        data_msgs = [m for m in msgs if "已收集" in m[1]]
-        assert len(data_msgs) == 1
+    def test_header_is_only_user_input(self):
+        assert _make_agent().build_context(_make_state()) == [("user", "分析贵州茅台")]
 
-    def test_with_resolved_data(self):
-        agent = _make_agent()
-        state = _make_state(resolved_data="依赖数据")
-        msgs = agent.build_context(state)
-        resolved_msgs = [m for m in msgs if "已解析" in m[1]]
-        assert len(resolved_msgs) == 1
-
-    def test_with_constraints(self):
-        agent = _make_agent()
-        state = _make_state(constraints="只看近30天")
-        msgs = agent.build_context(state)
-        constraint_msgs = [m for m in msgs if "用户约束" in m[1]]
-        assert len(constraint_msgs) == 1
-
-    def test_system_prompt_first(self):
+    def test_tail_carries_role_prompt(self):
         agent = _make_agent()
         agent.get_system_prompt = lambda: "自定义系统提示"
-        state = _make_state()
-        msgs = agent.build_context(state)
-        assert msgs[0] == ("system", "自定义系统提示")
+        assert "自定义系统提示" in agent.build_tail_system(_make_state())
+
+    def test_tail_carries_data_and_constraints(self):
+        state = _make_state(accumulated_data="已有数据", resolved_data="依赖数据",
+                            constraints="只看近30天")
+        tail = _make_agent().build_tail_system(state)
+        assert "已收集的分析数据:" in tail and "已有数据" in tail
+        assert "已解析的依赖数据:" in tail and "依赖数据" in tail
+        assert "[用户约束] 只看近30天" in tail
+
+    def test_tail_carries_task_instruction(self):
+        assert "请执行以下任务: 技术分析" in _make_agent().build_tail_system(_make_state())
 
 
 # ── load_tools ───────────────────────────────────────────────

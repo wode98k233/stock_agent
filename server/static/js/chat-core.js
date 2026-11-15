@@ -36,7 +36,7 @@ window.StockRadar.chat = (() => {
 
   /* ── Chart Fragments：报告中的 @@CHART:uuid@@ 标记 → ECharts 图表卡片 ──
      异步加载 + 失败降级为占位，绝不影响 markdown 正文展示 */
-  const _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js";
+  const _ECHARTS_CDN = "/static/vendor/echarts.min.js";  // 本地 vendor 优先：jsdelivr 在部分网络（含本机）不可达，会让全站图表静默不渲染
   let _echartsPromise = null;
 
   function _ensureEcharts() {
@@ -54,12 +54,15 @@ window.StockRadar.chat = (() => {
   }
 
   // 图表数值展示：基准单位（元/点）按量级压缩为 万/亿，避免轴标签与 tooltip 出现长数字
+  // ⚠️ 2026-11-03 修：万量级原来除以 1e6 却标「万」（1e4），整轴读数放大 100 倍
+  //    （某用户报告里 1267 万被画成「12.67万」、-9755 万画成「-97.55万」）。
   function _fmtChartNum(v) {
     const n = Number(v);
     if (!isFinite(n)) return String(v == null ? "" : v);
     const abs = Math.abs(n);
+    if (abs >= 1e12) return (n / 1e12).toFixed(2).replace(/\.?0+$/, "") + "万亿";
     if (abs >= 1e8) return (n / 1e8).toFixed(2).replace(/\.?0+$/, "") + "亿";
-    if (abs >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "万";
+    if (abs >= 1e4) return (n / 1e4).toFixed(2).replace(/\.?0+$/, "") + "万";
     return String(+n.toFixed(2));
   }
 
@@ -90,65 +93,359 @@ window.StockRadar.chat = (() => {
     });
   }
 
-  function _buildFragmentOption(dataJson) {
+  // 主题色：统一取 chart-theme.js 的 token，取不到时回退旧色
+  function _tc(key, fallback) {
+    const c = window.SRChartTheme && window.SRChartTheme.colors;
+    return (c && c[key]) || fallback;
+  }
+
+  // 取数据点的数值（兼容裸数字与 {value} 对象）
+  function _num(v) {
+    const n = (v && typeof v === "object") ? Number(v.value) : Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // 图表副标题：静态图没人会悬停，把"时间范围 + 区间涨跌"直接写在标题下面
+  function _fragmentSubtitle(raw) {
+    const dates = (raw && raw.xAxis && raw.xAxis[0] && raw.xAxis[0].data) || [];
+    if (dates.length < 10) return "";
+    const s0 = ((raw.series || []).find(s => s && s.data && s.data.length)) || null;
+    if (!s0) return `${dates[0]} → ${dates[dates.length - 1]}`;
+    const vals = (s0.data || []).map(_num).filter(v => v !== null);
+    if (vals.length < 2) return `${dates[0]} → ${dates[dates.length - 1]}`;
+    const first = vals[0], last = vals[vals.length - 1];
+    let tail = "";
+    if (first !== 0) {
+      const pct = (last / first - 1) * 100;
+      tail = ` · 区间 ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    }
+    return `${dates[0]} → ${dates[dates.length - 1]}${tail}`;
+  }
+
+  // 哪些指标是"涨跌量"，颜色必须红涨绿跌；成交额 / PE / 市值这类是中性的，单色即可。
+  // 判据放在指标名与标题上，因为同一个图表类型（comparison）两种语义都会出现。
+  const _SIGNED_METRIC_RE = /涨跌|涨幅|跌幅|净流入|净流出|净额|超额收益|收益率/;
+  function _isSignedMetric(series, title) {
+    const name = (series && series.name) || "";
+    return _SIGNED_METRIC_RE.test(name) || _SIGNED_METRIC_RE.test(title || "");
+  }
+
+  // 涨跌类柱状图改横条（借 lieflat G10 的语法）：
+  //   横向条 + 零轴实线贯穿 + 数值标在条外侧 + 朝外一端胶囊圆角
+  // 竖向柱在类目 >10 时要把类目名转 38°，而横条天生就能横排；零轴也更显眼。
+  // 只对「涨跌幅 / 净流入」这类有正负语义的指标启用——成交额、PE 是中性的，竖柱更合适。
+  function _prepareSignedBars(raw, title) {
+    const s0 = (raw && raw.series && raw.series[0]) || null;
+    if (!s0 || s0.type !== "bar" || !_isSignedMetric(s0, title)) return null;
+    const labels = ((raw.xAxis && raw.xAxis[0] && raw.xAxis[0].data) || []);
+    const vals = s0.data || [];
+    let rows = labels.map((lab, i) => ({ lab, v: _num(vals[i]) }))
+      .filter(r => r.v !== null && Math.abs(r.v) > 0.0001);   // 0.00% 的条长为零，白占一行
+    if (rows.length < 2) return null;
+    rows.sort((a, b) => b.v - a.v);                            // 谁强谁弱，不是代码顺序
+    return { rows, name: s0.name || "涨跌幅" };
+  }
+
+  function _buildSignedBarOption(prep) {
+    const up = _tc("up", "#e74c3c");
+    const down = _tc("down", "#176b5b");
+    const rows = prep.rows;
+    return {
+      animation: false,
+      grid: { left: 8, right: 66, top: 10, bottom: 10, containLabel: true },
+      xAxis: {
+        type: "value", axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { show: false }, splitLine: { show: false },
+      },
+      yAxis: {
+        type: "category", data: rows.map(r => r.lab), inverse: true,
+        axisLine: { show: false }, axisTick: { show: false },
+        axisLabel: { fontSize: 10.5, color: _tc("axis", "#6b7280"), width: 96, overflow: "truncate" },
+      },
+      tooltip: {
+        trigger: "axis", axisPointer: { type: "shadow" },
+        backgroundColor: _tc("tooltipBg", "rgba(255,255,255,.96)"),
+        borderColor: _tc("axisLine", "#e5e7eb"),
+        textStyle: { color: _tc("text", "#1c2430"), fontSize: 12 },
+        valueFormatter: (v) => ((v > 0 ? "+" : "") + Number(v).toFixed(2) + "%"),
+      },
+      series: [{
+        name: prep.name,
+        type: "bar",
+        barWidth: 13,
+        data: rows.map(r => ({
+          value: r.v,
+          itemStyle: {
+            color: r.v >= 0 ? up : down,
+            borderRadius: r.v >= 0 ? [0, 7, 7, 0] : [7, 0, 0, 7],
+          },
+        })),
+        label: {
+          // 正值标在条右端外，负值标在零轴右侧——都用 'right'，避免负值标签
+          // 压到左边的类目名（2026-11-05 实测：短负条 + 长类目名会粘成一行）
+          show: true, position: "right", distance: 6, fontSize: 10.5, fontWeight: 600,
+          color: _tc("text", "#1c1c2e"),
+          formatter: (p) => (p.value > 0 ? "+" : "") + Number(p.value).toFixed(2),
+        },
+        // 零轴：整条贯穿，读者不用在图里找 0 在哪
+        markLine: {
+          symbol: "none", silent: true, label: { show: false },
+          lineStyle: { color: "#8f8e88", width: 1.5 },
+          data: [{ xAxis: 0 }],
+        },
+      }],
+    };
+  }
+
+  function _buildFragmentOption(dataJson, title) {
     let data;
     try { data = JSON.parse(dataJson); } catch (e) { return null; }
+    // 涨跌语义的柱状图走横条（G10 语法），其余继续走通用竖柱
+    const signedBars = _prepareSignedBars(data, title);
+    if (signedBars) return _buildSignedBarOption(signedBars);
+    const xData = ((data.xAxis && data.xAxis[0] && data.xAxis[0].data) || []);
+    const nCat = xData.length;
+    const series = _withBarLabels(data.series) || [];
+    const hasBar = series.some(s => s && s.type === "bar");
+    const nSeries = series.length;
     const option = {
       animation: false,
-      grid: { left: 60, right: 30, top: 30, bottom: 40 },
-      xAxis: Object.assign({ type: "category" }, (data.xAxis && data.xAxis[0]) || { data: [] }),
-      yAxis: { type: "value", scale: true, axisLabel: { formatter: _fmtChartNum } },
+      grid: {
+        left: 12, right: 46, bottom: nCat > 14 ? 20 : 8,
+        top: nSeries > 1 ? 46 : 24, containLabel: true,
+      },
+      xAxis: Object.assign({ type: "category" }, (data.xAxis && data.xAxis[0]) || {},
+        {
+          axisLabel: {
+            fontSize: 10, color: _tc("axis", "#64748b"), hideOverlap: true,
+            // 自动 interval 在 50+ 类目时仍会挤；密度超过 16 就按比例抽稀，
+            // 再加旋转，保证交易日轴看得清（2026-11-03 实测 120 个点糊成一片）
+            interval: nCat > 16 ? Math.max(0, Math.ceil(nCat / 10) - 1) : "auto",
+            rotate: nCat > 14 ? 38 : 0,
+          },
+        }),
+      yAxis: {
+        type: "value", scale: true,
+        name: data.yUnit || "",
+        nameTextStyle: { fontSize: 10, color: _tc("axis", "#64748b"), padding: [0, 0, 4, 0] },
+        axisLabel: { formatter: _fmtChartNum, fontSize: 10, color: _tc("axis", "#64748b") },
+        splitLine: { lineStyle: { color: _tc("grid", "#eef2f7") } },
+      },
       tooltip: { trigger: "axis", valueFormatter: _fmtChartNum },
-      series: _withBarLabels(data.series),
+      series: series.map((s, si) => {
+        if (!s) return s;
+        if (s.type === "bar") {
+          // 类目很少（2~3 个）时不限宽会撑成两块巨砖，限宽后居中更接近常规柱状图
+          let bar = Object.assign({}, s, { barMaxWidth: 48, barGap: "20%" });
+          // 涨跌语义的指标（涨跌幅 / 净流入…）按符号上色：红涨绿跌。
+          // 判据是「指标本身是不是涨跌量」，不是「这组数据里有没有负数」——
+          // 2026-11-05 实测：一批「涨跌幅对比」全是正数，按"有负数才上色"的旧规则
+          // 全部走了默认品牌绿，A 股用户看到的是一排绿柱=全在跌，语义完全反了。
+          if (_isSignedMetric(s, title)) {
+            bar.itemStyle = Object.assign({}, s.itemStyle, {
+              color: (p) => ((_num(p.value) || 0) >= 0
+                ? _tc("up", "#e74c3c") : _tc("down", "#176b5b")),
+            });
+          }
+          return bar;
+        }
+        // 主角（第一条线）加粗一档：报告图是静态的，靠粗细而不是色相区分主次
+        const color = si === 0 ? _tc("brand", "#176b5b") : _tc("axis", "#6b7280");
+        return Object.assign({}, s, {
+          // 点数过多时不画圆点，否则折线变成一串珠子
+          showSymbol: nCat <= 40, symbolSize: 4,
+          lineStyle: Object.assign({ width: si === 0 ? 1.7 : 1.1 }, s.lineStyle || {}),
+          // 端点直接标最后一个值：静态图没有悬停，右端读数是刚需
+          endLabel: {
+            show: true,
+            distance: 3,
+            formatter: (p) => _fmtChartNum(p.value),
+            color,
+            fontSize: 10,
+            fontWeight: si === 0 ? 600 : 400,
+          },
+          labelLayout: { moveOverlap: "shiftY" },
+        });
+      }),
     };
+    if (nSeries > 1) {
+      option.legend = {
+        top: 4, itemWidth: 12, itemHeight: 8, itemGap: 12,
+        textStyle: { fontSize: 11, color: _tc("legend", "#475569") },
+      };
+    }
     if (data.markLine) {
       option.series = option.series.map(s => Object.assign({}, s, { markLine: { data: data.markLine } }));
     }
     return option;
   }
 
+  // 图表容器高度：默认 300px 是给「满屏时序」的，类目很少的柱状图撑满 300px 会显得空。
+  function _chartBodyHeight(raw, title) {
+    // 横条按类目数长：15 行挤在 300px 里，标签会和类目名粘成一行
+    const prep = _prepareSignedBars(raw, title);
+    if (prep) return Math.min(560, Math.max(220, prep.rows.length * 22 + 44));
+    const nCat = ((raw && raw.xAxis && raw.xAxis[0] && raw.xAxis[0].data) || []).length;
+    const isBar = ((raw && raw.series) || []).some(s => s && s.type === "bar");
+    if (isBar && nCat > 0 && nCat <= 4) return 190;
+    if (isBar && nCat <= 10) return 240;
+    if (nCat > 80) return 320;
+    return 300;
+  }
+
+  // 单张图表导出为 PNG：报告里的图经常要贴到微信/文档里，截图会带上周围空白和页面背景。
+  // ECharts 的 getDataURL 直接从 canvas 取图，白底、2 倍清晰度，标题文件名也用图表的标题。
+  function _exportChartImage(chart, title) {
+    try {
+      const url = chart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = ((title || "图表").replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60)) + ".png";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      console.error("图表导出失败:", e);
+    }
+  }
+
+  // 服务重启/预热期间接口会短暂 503（detail: "服务正在启动预热，请稍后重试"）。
+  // 图表卡片原来只 fetch 一次，这一下失败就永久停在「图表加载失败」，用户只能刷新整页；
+  // 所以对**瞬时错误**（网络失败 / 5xx / 503）退避重试，约 90 秒覆盖一次 restart 的
+  // 预热窗口；4xx（片段真不存在 / 标的无本地日线）不重试，别把真错误藏掉。
+  const _chartSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function _fetchJsonRetry(url, { attempts = 8, base = 2000, cap = 30000 } = {}) {
+    let lastErr = null;
+    for (let i = 0; i < attempts; i += 1) {
+      let resp = null;
+      try {
+        resp = await fetch(url);
+      } catch (err) {
+        lastErr = err;                 // 连接被拒/中断：重启瞬间就是这种
+      }
+      if (resp) {
+        if (resp.ok) return resp.json();
+        if (resp.status !== 503 && resp.status < 500) {
+          throw new Error("HTTP " + resp.status);
+        }
+        lastErr = new Error("HTTP " + resp.status);
+      }
+      // 最后一次不再等，直接抛
+      if (i < attempts - 1) await _chartSleep(Math.min(cap, base * Math.pow(1.7, i)));
+    }
+    throw lastErr || new Error("fetch failed");
+  }
+
+  // 图表区的失败占位：可点击重试（重试成功就地把占位换回图）
+  function _showChartError(container, label, onRetry) {
+    container.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "ccf-error";
+    box.textContent = label || "图表加载失败";
+    box.title = "服务重启/预热或网络抖动时会出现，点击重新加载";
+    box.style.cssText = [
+      "cursor:pointer", "display:flex", "align-items:center", "justify-content:center",
+      "min-height:60px", "font-size:12px", "color:#8a8b86",
+      "border:1px dashed #dfe4ea", "border-radius:8px", "background:#fbfbfa",
+    ].join(";");
+    box.onclick = () => {
+      box.textContent = "图表重新加载中…";
+      box.style.cursor = "wait";
+      Promise.resolve(onRetry()).catch(() => {
+        box.textContent = (label || "图表加载失败") + "（仍失败）";
+        box.style.cursor = "pointer";
+      });
+    };
+    container.appendChild(box);
+  }
+
   function _renderOneFragment(el, frag) {
     const render = (f) => {
-      const option = _buildFragmentOption(f.data_json);
+      const option = _buildFragmentOption(f.data_json, f.title);
       if (!option) throw new Error("图表数据解析失败");
+      let raw = null;
+      try { raw = JSON.parse(f.data_json); } catch (e) { raw = null; }
       return _ensureEcharts().then(echarts => {
+        if (window.SRChartTheme) window.SRChartTheme.register(echarts);
         el.dataset.state = "ok";
         el.innerHTML = "";
+        let exportBtn = null;
         if (f.title) {
+          const head = document.createElement("div");
+          head.style.cssText = "display:flex;align-items:center;gap:8px";
           const t = document.createElement("div");
           t.className = "ccf-title";
-          t.textContent = "📊 " + f.title;
-          el.appendChild(t);
+          t.style.flex = "1";
+          t.style.minWidth = "0";
+          t.textContent = f.title;
+          head.appendChild(t);
+          exportBtn = document.createElement("button");
+          exportBtn.type = "button";
+          exportBtn.textContent = "导出图片";
+          exportBtn.title = "把这张图存成 PNG（白底 2 倍图）";
+          exportBtn.style.cssText =
+            "flex:none;font-size:11px;line-height:18px;padding:0 8px;border:1px solid #dfe4ea;"
+            + "border-radius:6px;background:#fff;color:#6b7280;cursor:pointer";
+          head.appendChild(exportBtn);
+          el.appendChild(head);
+        }
+        const subText = _fragmentSubtitle(raw);
+        if (subText) {
+          const sd = document.createElement("div");
+          sd.className = "ccf-sub";
+          sd.style.cssText = "font-size:11px;color:#8a8b86;margin:-2px 0 6px;letter-spacing:.01em";
+          sd.textContent = subText;
+          el.appendChild(sd);
         }
         const body = document.createElement("div");
         body.className = "ccf-body";
+        body.style.height = _chartBodyHeight(raw, f.title) + "px";
         el.appendChild(body);
-        const chart = echarts.init(body);
+        const chart = echarts.init(body, (window.SRChartTheme && window.SRChartTheme.NAME) || undefined);
         chart.setOption(option);
+        if (exportBtn) {
+          exportBtn.onclick = () => _exportChartImage(chart, f.title);
+        }
+        // 懒加载 Tab 里的卡片初始化时容器可能还没有宽度，首帧会按 0 宽排版
+        // （表现为图表挤在左边、标题被截断）。下一帧补一次 resize，并持续跟随容器尺寸。
+        requestAnimationFrame(() => chart.resize());
+        if (window.ResizeObserver) {
+          const ro = new ResizeObserver(() => chart.resize());
+          ro.observe(body);
+          el.addEventListener("ccf-dispose", () => ro.disconnect());
+        }
         window.addEventListener("resize", () => chart.resize());
       });
     };
-    const fail = () => {
+    const fail = (err) => {
       el.dataset.state = "error";
-      el.textContent = "📊 图表加载失败";
+      console.warn("[chart] 片段渲染失败", el.dataset.chartId, err);
+      _showChartError(el, "图表加载失败", () => {
+        el.dataset.state = "loading";
+        return _renderOneFragment(el, null);   // frag=null → 重新走 fetch
+      });
     };
     if (frag) {
       render(frag).catch(fail);
       return;
     }
-    fetch(`/api/chart/${encodeURIComponent(el.dataset.chartId)}`)
-      .then(r => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+    _fetchJsonRetry(`/api/chart/${encodeURIComponent(el.dataset.chartId)}`)
       .then(f => render(f))
       .catch(fail);
   }
 
-  // 图表类型分组键：按标题关键词（与 chart_extractor 的 title 对齐）
+  // 图表类型分组键：按标题关键词（与 chart_extractor 的 title 对齐），
+  // 命中不了就用**中文类型名**——直接在 Tab 上显示 time_series / tech_panel 太难看了。
+  const _GROUP_LABELS = {
+    time_series: "走势", comparison: "对比", indicator: "指标", tech_panel: "K线图板",
+  };
+
   function _groupKey(frag) {
     const t = frag.title || "";
     for (const kw of ["均线", "RSI", "MACD", "财务", "资金流向"]) {
       if (t.includes(kw)) return kw;
     }
-    return frag.chart_type || "图表";
+    return _GROUP_LABELS[frag.chart_type] || frag.chart_type || "图表";
   }
 
   /* ── tech_panel：技术面图板（本地 K 线 + 全指标 + 信号标注）──
@@ -163,11 +460,102 @@ window.StockRadar.chat = (() => {
     { type: "dpo",  label: "DPO" },
   ];
 
+  /* ── 技术指标读数：图板此前只有图、没有任何数值/结论 ──
+     2026-11-09 用户反馈「K 线图怎么没技术指标分析」。副图（MACD/RSI/KDJ/BOLL/DPO）
+     和信号字母一直都在，但**没有一处告诉你现在是什么状态**——尤其指数没有策略扫描行时
+     更像「什么分析都没有」。这里把已加载的指标压成一行结论，个股/指数通用。 */
+  function _lastVal(arr) {
+    return (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
+  }
+
+  function _n2(v) {
+    return (typeof v === "number" && isFinite(v)) ? v.toFixed(2) : "—";
+  }
+
+  function _indicatorReadout(res) {
+    const ind = (res && res.indicators) || {};
+    const kline = (res && res.kline) || [];
+    const close = kline.length ? Number(kline[kline.length - 1].close) : null;
+    const ma5 = _lastVal(ind.ma5), ma10 = _lastVal(ind.ma10);
+    const ma20 = _lastVal(ind.ma20), ma60 = _lastVal(ind.ma60);
+    const rsi6 = _lastVal(ind.rsi6);
+    const macd = ind.macd || {};
+    const dif = _lastVal(macd.dif), dea = _lastVal(macd.dea), hist = _lastVal(macd.hist);
+    const histPrev = (Array.isArray(macd.hist) && macd.hist.length > 1)
+      ? macd.hist[macd.hist.length - 2] : null;
+    const kdj = ind.kdj || {};
+    const K = _lastVal(kdj.k), D = _lastVal(kdj.d), J = _lastVal(kdj.j);
+    const boll = ind.boll || {};
+    const bu = _lastVal(boll.upper), bm = _lastVal(boll.mid), bl = _lastVal(boll.lower);
+
+    const items = [];
+    if (ma5 != null && ma10 != null && ma20 != null && ma60 != null) {
+      const up = ma5 > ma10 && ma10 > ma20 && ma20 > ma60;
+      const down = ma5 < ma10 && ma10 < ma20 && ma20 < ma60;
+      items.push({
+        label: "均线",
+        text: up ? "多头排列" : down ? "空头排列" : "纠缠",
+        tone: up ? "up" : down ? "down" : "",
+      });
+    }
+    if (rsi6 != null) {
+      // A 股口径：超买提示风险、超卖提示机会，所以超买用 down 色
+      const tone = rsi6 >= 70 ? "down" : rsi6 <= 30 ? "up" : "";
+      const word = rsi6 >= 70 ? "超买" : rsi6 <= 30 ? "超卖" : "中性";
+      items.push({ label: "RSI", text: `RSI6 ${_n2(rsi6)}（${word}）`, tone });
+    }
+    if (dif != null && dea != null) {
+      const golden = dif > dea;
+      const growing = (hist != null && histPrev != null && Math.abs(hist) > Math.abs(histPrev));
+      items.push({
+        label: "MACD",
+        text: `${golden ? "DIF 在 DEA 上方" : "DIF 在 DEA 下方"} · 柱 ${_n2(hist)}${growing ? " 放大" : " 缩小"}`,
+        tone: golden ? "up" : "down",
+      });
+    }
+    if (K != null && D != null) {
+      items.push({
+        label: "KDJ",
+        text: `${K > D ? "金叉" : "死叉"} · K ${_n2(K)} / D ${_n2(D)} / J ${_n2(J)}`,
+        tone: K > D ? "up" : "down",
+      });
+    }
+    if (close != null && bm != null) {
+      let word = "中轨附近", tone = "";
+      if (bu != null && close > bu) { word = "上轨之上（超买区）"; tone = "down"; }
+      else if (bl != null && close < bl) { word = "下轨之下（超卖区）"; tone = "up"; }
+      else if (close > bm) { word = "中轨上方"; tone = "up"; }
+      else { word = "中轨下方"; tone = "down"; }
+      items.push({ label: "BOLL", text: word, tone });
+    }
+
+    const parts = [];
+    if (ma5 != null && ma20 != null) parts.push(ma5 > ma20 ? "短期均线在中期之上" : "短期均线在中期之下");
+    if (dif != null && dea != null) parts.push(dif > dea ? "MACD 多头" : "MACD 空头");
+    if (rsi6 != null) parts.push(rsi6 >= 70 ? "RSI 超买需防回落" : rsi6 <= 30 ? "RSI 超卖有反抽" : "RSI 中性");
+    return { items, summary: parts.join("；") };
+  }
+
+  function _renderReadout(container, res) {
+    if (!container) return;
+    const { items, summary } = _indicatorReadout(res);
+    if (!items.length) { container.hidden = true; return; }
+    /* 内容全部由本地数字与固定词拼成，不含后端自由文本，可安全用 innerHTML */
+    const chips = items.map((it) => {
+      const cls = it.tone === "up" ? "tpr-up" : it.tone === "down" ? "tpr-down" : "tpr-muted";
+      return `<span class="tpr-item"><b>${it.label}</b><span class="${cls}">${it.text}</span></span>`;
+    }).join("");
+    container.innerHTML = chips
+      + (summary ? `<div class="tpr-sum">📐 ${summary}</div>` : "");
+    container.hidden = false;
+  }
+
   function _renderTechPanel(el, frag) {
     let meta;
     try { meta = JSON.parse(frag.data_json); } catch (e) { meta = null; }
     const code = meta && meta.code;
-    const days = (meta && meta.days) || 250;
+    // 可变的：工具栏的「1月/2月/半年/1年/2年」会改它并重新取数
+    let days = (meta && meta.days) || 250;
     // 标的市场类型由后端显式携带（INDEX/STOCK）。必须透传给数据接口：
     // 裸 6 位码在不同表里是不同标的（000001 = 上证指数 / 平安银行），
     // 不传 market 时后端默认按个股取数。
@@ -175,7 +563,7 @@ window.StockRadar.chat = (() => {
     const isIndex = market === "INDEX";
     const marketQ = market ? "&market=" + encodeURIComponent(market) : "";
     if (!code || !window.StockRadar || !window.StockRadar.KlineChart) {
-      el.textContent = "📊 技术面图板暂不可用";
+      el.textContent = "技术面图板暂不可用";
       el.dataset.state = "error";
       return;
     }
@@ -189,6 +577,37 @@ window.StockRadar.chat = (() => {
     title.textContent = "📈 " + (frag.title || "技术面图板");
     el.appendChild(title);
 
+    /* 工具栏：周期 / 技术面图层 / 信号布局——对齐独立 K 线弹窗的能力（2026-11-10）。
+       此前图板只能看固定 250 天、固定 MACD、固定贴图，用户反馈「不能选时间、不能选
+       斐波那契、不能分道」。三者都只是 KlineChart 已有的 setter，这里补 UI 与联动。 */
+    const toolbar = document.createElement("div");
+    toolbar.className = "tech-panel-toolbar";
+    toolbar.innerHTML = `
+      <span class="tpt-group" title="时间范围">
+        <button type="button" class="tpt-btn" data-days="30">1月</button>
+        <button type="button" class="tpt-btn" data-days="60">2月</button>
+        <button type="button" class="tpt-btn" data-days="120">半年</button>
+        <button type="button" class="tpt-btn" data-days="250">1年</button>
+        <button type="button" class="tpt-btn" data-days="500">2年</button>
+      </span>
+      <select class="tpt-select tpt-ta" title="技术面图层（算法生成的测量线，非交易信号）">
+        <option value="off">技术面：关</option>
+        <option value="retracement">斐波那契回撤</option>
+        <option value="channel">斐波那契通道</option>
+        <option value="fan">斐波那契扇形</option>
+        <option value="trend">自动趋势线</option>
+        <option value="bands">支撑阻力带</option>
+        <option value="structure">波段结构 HH/HL</option>
+        <option value="regression">回归通道 ±2σ</option>
+        <option value="gaps">跳空缺口</option>
+        <option value="all">全显示</option>
+      </select>
+      <span class="tpt-group" title="信号展示方式">
+        <button type="button" class="tpt-btn" data-layout="pinned">贴图</button>
+        <button type="button" class="tpt-btn" data-layout="lanes">分道</button>
+      </span>`;
+    el.appendChild(toolbar);
+
     // 副图指标 Tab 行
     const tabs = document.createElement("div");
     tabs.className = "ccf-tabs tech-panel-tabs";
@@ -201,6 +620,12 @@ window.StockRadar.chat = (() => {
       tabs.appendChild(btn);
     });
     el.appendChild(tabs);
+
+    // 技术指标读数（加载完成后填充；个股/指数通用）
+    const readout = document.createElement("div");
+    readout.className = "tech-panel-readout";
+    readout.hidden = true;
+    el.appendChild(readout);
 
     const body = document.createElement("div");
     body.className = "tech-panel-body";
@@ -220,15 +645,13 @@ window.StockRadar.chat = (() => {
     const scanBtn = scanRow.querySelector(".tech-scan-btn");
     const clearBtn = scanRow.querySelector(".tech-scan-clear");
     const scanStatus = scanRow.querySelector(".tech-scan-status");
-    if (isIndex) {
-      // 指数（上证指数等）没有「策略买卖点」语义：策略扫描走个股通道
-      // （backtest/data_adapter._load_stock_daily），对指数会取到同码个股数据
-      scanRow.hidden = true;
-    }
+    // 指数也支持策略扫描了（2026-11-09）：后端 /api/chart/strategy-signals 增加 market，
+    // 'INDEX' 时从 index_daily 取数。此前这里 `scanRow.hidden = true`，因为扫描走个股
+    // 通道，000001 会被当成平安银行，算出来的买卖点毫无意义。
     el.appendChild(scanRow);
 
-    // 懒加载策略列表（backtest/strategies 的 8 个内置策略）
-    if (!isIndex && window.StockRadar.api && window.StockRadar.api.getBacktestStrategies) {
+    // 懒加载策略列表（backtest/strategies 的 8 个内置策略；指数同样可用）
+    if (window.StockRadar.api && window.StockRadar.api.getBacktestStrategies) {
       window.StockRadar.api.getBacktestStrategies().then(data => {
         const strategies = (data && (data.strategies || data.items)) || [];
         strategies.forEach(s => {
@@ -264,6 +687,10 @@ window.StockRadar.chat = (() => {
       });
 
       // 策略扫描交互
+      // ⚠️ 兜底：扫描结果必须与图板是同一个标的。服务端未重启（旧进程不认 market）时，
+      // 指数会被当成同码个股扫（000001 上证指数 → 平安银行），结果依然「成功」返回，
+      // 画出来就是张冠李戴。用最新收盘价量级做交叉校验，不一致就拒绝叠加并明确提示。
+      let panelClose = null;
       scanSelect.addEventListener("change", () => {
         scanBtn.disabled = !scanSelect.value || scanBtn.classList.contains("running");
       });
@@ -284,11 +711,24 @@ window.StockRadar.chat = (() => {
             strategy_id: strategyId,
             adjust_type: "qfq",
             days: days,
+            // 指数必须带 market，否则后端按个股读 stock_daily，
+            // 000001 会取到平安银行（2026-11-09 前指数直接禁用扫描就是这个原因）
+            market: isIndex ? "INDEX" : undefined,
           });
-          const signals = result.signals || [];
-          chart.setOverlay({ type: "scan", signals: signals });
-          const buys = signals.filter(s => s.buy).length;
-          const sells = signals.filter(s => s.sell).length;
+          const sig = result.signals || [];
+          const scanKline = result.kline || [];
+          const scanClose = scanKline.length
+            ? Number(scanKline[scanKline.length - 1].close) : null;
+          if (panelClose && scanClose && Math.abs(scanClose - panelClose) / panelClose > 0.05) {
+            scanStatus.textContent =
+              `扫描数据与图表不一致（图 ${panelClose.toFixed(2)} vs 扫描 ${scanClose.toFixed(2)}），`
+              + "疑似同码不同标的：请重启服务后重试";
+            scanStatus.classList.add("err");
+            return;
+          }
+          chart.setOverlay({ type: "scan", signals: sig });
+          const buys = sig.filter(s => s.buy).length;
+          const sells = sig.filter(s => s.sell).length;
           let tip = `${buys} 个买点 / ${sells} 个卖点`;
           if (result.latest_is_buy) tip += " · 今日出现买点";
           else if (result.latest_is_sell) tip += " · 今日出现卖点";
@@ -310,11 +750,83 @@ window.StockRadar.chat = (() => {
         scanStatus.textContent = "";
       });
 
-      chart.ready.then(async () => {
+      // ── 工具栏联动：周期 / 技术面图层 / 信号布局 ──
+      const TA_VALUES = ["off", "retracement", "channel", "fan", "trend", "bands",
+                         "structure", "regression", "gaps", "all"];
+      const LAYOUT_VALUES = ["pinned", "lanes"];
+      const pickOne = (v, arr, dft) => (arr.indexOf(v) >= 0 ? v : dft);
+      let savedTa = "off";
+      let savedLayout = "pinned";
+      try {
+        savedTa = pickOne(localStorage.getItem("kline_ta_layer"), TA_VALUES, "off");
+        savedLayout = pickOne(localStorage.getItem("kline_signal_layout"), LAYOUT_VALUES, "pinned");
+      } catch (e) { /* 隐私模式下 localStorage 可能抛错 */ }
+      const taSel = toolbar.querySelector(".tpt-ta");
+      if (taSel) taSel.value = savedTa;
+      toolbar.querySelectorAll("[data-layout]").forEach((b) => {
+        b.classList.toggle("active", b.dataset.layout === savedLayout);
+      });
+      // setter 只记录状态、不要求已有数据，先设好再取数，首帧就是用户选的样子
+      try {
+        chart.setTaMode(savedTa);
+        chart.setSignalLayout(savedLayout);
+      } catch (e) { /* 老版本 KlineChart 没有这两个 setter，忽略 */ }
+
+      /* 技术面图层不是纯前端绘制：几何线由后端 /api/chart/ta/{code} 算好再喂给
+         chart.setTaData()。弹窗里由它的 _loadTa() 负责，图板必须自己做同一件事，
+         否则切了图层什么都不会出现（2026-11-10 首版漏了这一步）。按 code:days:market
+         缓存一份，来回切层不重复请求。 */
+      let taMode = savedTa;
+      let taCache = { key: "", data: null };
+      async function ensureTaAnnotations() {
+        if (taMode === "off") {
+          try { chart.setTaData(null); } catch (e) { /* ignore */ }
+          return;
+        }
+        // 后端 /api/chart/ta 要求 days>=60（少于 60 根摆点不够，算不出几何线）；
+        // 「1月(30)」窗口先按 60 根算，前端再按日期映射回图上的 bar。
+        const taDays = Math.max(60, Number(days) || 250);
+        const key = `${code}:${taDays}:${market}`;
+        if (taCache.key === key) {
+          try { chart.setTaData(taCache.data); } catch (e) { /* ignore */ }
+          return;
+        }
+        try {
+          if (!window.StockRadar.api || !window.StockRadar.api.getTaAnnotations) return;
+          const data = await window.StockRadar.api.getTaAnnotations(code, taDays, market);
+          taCache = { key, data };
+          chart.setTaData(data);
+        } catch (e) {
+          taCache = { key: "", data: null };
+          try { chart.setTaData(null); } catch (_) { /* ignore */ }
+        }
+      }
+
+      if (taSel) {
+        taSel.addEventListener("change", async () => {
+          taMode = pickOne(taSel.value, TA_VALUES, "off");
+          try { chart.setTaMode(taMode); } catch (e) { /* ignore */ }
+          try { localStorage.setItem("kline_ta_layer", taMode); } catch (e) { /* ignore */ }
+          await ensureTaAnnotations();
+        });
+      }
+      toolbar.querySelectorAll("[data-layout]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const v = pickOne(btn.dataset.layout, LAYOUT_VALUES, "pinned");
+          toolbar.querySelectorAll("[data-layout]").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          try { chart.setSignalLayout(v); } catch (e) { /* 同上 */ }
+          try { localStorage.setItem("kline_signal_layout", v); } catch (e) { /* ignore */ }
+        });
+      });
+
+      // 取数（周期切换时复用）：图 + 信号 + 读数条一起刷新
+      async function loadKline() {
         chart.showLoading("K线数据加载中...");
         const [klineRes, signalsRes] = await Promise.all([
-          fetch(`/api/chart/kline/${encodeURIComponent(code)}?days=${days}${marketQ}`)
-            .then(r => (r.ok ? r.json() : Promise.reject(new Error("kline HTTP " + r.status)))),
+          // 重启/预热窗口内 K 线接口也是 503：必须重试，否则图板会一直停在错误态
+          _fetchJsonRetry(`/api/chart/kline/${encodeURIComponent(code)}?days=${days}${marketQ}`,
+                          { attempts: 6 }),
           fetch(`/api/chart/signals/${encodeURIComponent(code)}?days=${days}${marketQ}`)
             .then(r => (r.ok ? r.json() : null))
             .catch(() => null),
@@ -324,9 +836,33 @@ window.StockRadar.chat = (() => {
         }
         klineRes.signals = (signalsRes && signalsRes.signals) || [];
         await chart.setData(klineRes);
-      }).catch(() => {
+        // 记下图板最新收盘价：策略扫描后用它校验「扫的到底是不是同一个标的」
+        try {
+          const kl = klineRes.kline || [];
+          panelClose = kl.length ? Number(kl[kl.length - 1].close) : null;
+        } catch (e) { panelClose = null; }
+        // 技术面图层按新周期重算（缓存 key 含 days，切周期会自动重取）
+        await ensureTaAnnotations();
+        // 指标读数与图一起出：数值/结论在这里，图里只有形状
+        try { _renderReadout(readout, klineRes); } catch (e) { readout.hidden = true; }
+      }
+
+      toolbar.querySelectorAll("[data-days]").forEach((btn) => {
+        if (Number(btn.dataset.days) === days) btn.classList.add("active");
+        btn.addEventListener("click", async () => {
+          const next = Number(btn.dataset.days);
+          if (!next || next === days) return;
+          toolbar.querySelectorAll("[data-days]").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          days = next;
+          try { await loadKline(); }
+          catch (e) { try { chart.showError("K线数据暂不可用（本地未同步该标的日线）"); } catch (_) { /* ignore */ } }
+        });
+      });
+
+      chart.ready.then(() => loadKline()).catch(() => {
         try { chart.showError("K线数据暂不可用（本地未同步该标的日线）"); }
-        catch (e) { el.textContent = "📊 技术面图板数据加载失败"; }
+        catch (e) { el.textContent = "技术面图板数据加载失败"; }
       });
     });
   }
@@ -337,7 +873,7 @@ window.StockRadar.chat = (() => {
     el.className = "chat-chart-frag";
     el.dataset.chartId = frag.id;
     el.dataset.state = "loading";
-    el.textContent = "📊 图表加载中...";
+    el.textContent = "图表加载中...";
     if (frag.chart_type === "tech_panel") {
       _renderTechPanel(el, frag);
       return el;
@@ -387,14 +923,17 @@ window.StockRadar.chat = (() => {
     wrap.className = "ccf-wrap";
     mdDiv.appendChild(wrap);
 
-    Promise.all(ids.map(id =>
-      fetch(`/api/chart/${encodeURIComponent(id)}`)
-        .then(r => (r.ok ? r.json() : null))
-        .catch(() => null)
-    )).then(frags => {
+    const _fetchAllFrags = (list) => Promise.all(list.map(id =>
+      _fetchJsonRetry(`/api/chart/${encodeURIComponent(id)}`).catch(() => null)));
+
+    const paint = (frags) => {
       const ok = frags.filter(Boolean);
       if (ok.length === 0) {
-        wrap.textContent = "📊 图表加载失败";
+        // 服务重启时整段图表都可能拉不到：给可点击重试，而不是让用户刷新整页
+        _showChartError(wrap, "图表加载失败", () => {
+          wrap.innerHTML = "";
+          return _fetchAllFrags(ids).then(paint);
+        });
         return;
       }
       // 按类型分组（保序）
@@ -448,7 +987,9 @@ window.StockRadar.chat = (() => {
       wrap.appendChild(tabs);
       wrap.appendChild(_buildFragBar(ok));
       wrap.appendChild(panels);
-    });
+    };
+
+    _fetchAllFrags(ids).then(paint);
   }
 
   // 图表操作栏：平铺大屏按钮
@@ -472,7 +1013,7 @@ window.StockRadar.chat = (() => {
     header.className = "ccf-overlay-header";
     const title = document.createElement("div");
     title.className = "ccf-overlay-title";
-    title.textContent = `📊 图表总览（${frags.length} 张）`;
+    title.textContent = `图表总览（${frags.length} 张）`;
     const close = document.createElement("button");
     close.className = "ccf-overlay-close";
     close.textContent = "✕ 关闭";
@@ -501,14 +1042,40 @@ window.StockRadar.chat = (() => {
 
   function setBubbleContentWithDashboard(bubble, text, skipMermaid = false) {
     let dashboardData = null;
+    let deepReportData = null;
     let cleanText = text;
-    const match = text.match(/@@DASHBOARD_START@@([\s\S]*?)@@DASHBOARD_END@@/);
-    if (match) {
+    /* 一份回答里出现多个仪表盘块时（2026-11-06 事故：report-fast 把上下文里
+       上一份报告的尾巴续写进正文，dashboard 节点又追加了一个）：
+       - 只渲染**最后一个**（后端正常路径就是往末尾追加的，最后一个才是本轮的）；
+       - 正文里**所有**块都要删干净，否则残留的会原样裸露成一坨 JSON。
+       旧实现用 .match() 取第一个、.replace() 只删第一处，恰好两个都做错。 */
+    const dashRe = /@@DASHBOARD_START@@([\s\S]*?)@@DASHBOARD_END@@/g;
+    const dashBlocks = [];
+    let dashMatch;
+    while ((dashMatch = dashRe.exec(text)) !== null) {
+      dashBlocks.push(dashMatch[1]);
+    }
+    if (dashBlocks.length) {
+      // 倒序尝试：最后一个能解析就用它（前面的多半是 LLM 抄来的旧块）
+      for (let i = dashBlocks.length - 1; i >= 0; i -= 1) {
+        try {
+          dashboardData = JSON.parse(dashBlocks[i]);
+          break;
+        } catch (e) {
+          console.warn("[Dashboard] JSON parse failed (#" + (i + 1) + "):",
+            e.message, String(dashBlocks[i]).substring(0, 200));
+        }
+      }
+      cleanText = text.replace(/@@DASHBOARD_START@@[\s\S]*?@@DASHBOARD_END@@/g, "");
+    }
+    // 深度报告哨兵块：卡片由 deep-report-card.js 渲染，消息里只存 rid 等最小信息
+    const drMatch = cleanText.match(/@@DEEP_REPORT_START@@([\s\S]*?)@@DEEP_REPORT_END@@/);
+    if (drMatch) {
       try {
-        dashboardData = JSON.parse(match[1]);
-        cleanText = text.replace(/@@DASHBOARD_START@@[\s\S]*?@@DASHBOARD_END@@/, "");
+        deepReportData = JSON.parse(drMatch[1]);
+        cleanText = cleanText.replace(/@@DEEP_REPORT_START@@[\s\S]*?@@DEEP_REPORT_END@@/g, "");
       } catch (e) {
-        console.warn("[Dashboard] JSON parse failed:", e.message, match[1].substring(0, 200));
+        console.warn("[DeepReport] JSON parse failed:", e.message, drMatch[1].substring(0, 200));
       }
     }
     setBubbleContent(bubble, cleanText, true, skipMermaid);
@@ -525,6 +1092,18 @@ window.StockRadar.chat = (() => {
         console.warn("[Dashboard] renderDashboardCard failed:", e.message);
       }
     }
+    if (deepReportData && window.StockRadar && window.StockRadar.deepReportCard) {
+      try {
+        const card = window.StockRadar.deepReportCard.render(deepReportData);
+        if (card) {   // rid 缺失/非法时卡片模块返回 null，不能 insertBefore(null)
+          const mdContent = bubble.querySelector(".md-content");
+          if (mdContent) mdContent.parentNode.insertBefore(card, mdContent.nextSibling);
+          else bubble.appendChild(card);
+        }
+      } catch (e) {
+        console.warn("[DeepReport] render failed:", e.message);
+      }
+    }
   }
 
   function setButtonDone(button, className = "copied", delay = 1500) {
@@ -537,6 +1116,7 @@ window.StockRadar.chat = (() => {
   function cleanNotificationContent(content) {
     return String(content || "")
       .replace(/@@DASHBOARD_START@@[\s\S]*?@@DASHBOARD_END@@/g, "")
+      .replace(/@@DEEP_REPORT_START@@[\s\S]*?@@DEEP_REPORT_END@@/g, "")
       .trim();
   }
 
@@ -1026,6 +1606,26 @@ window.StockRadar.chat = (() => {
       bubble.textContent = content;
     }
 
+    // 图片附件（v1：图片转文字进对话；这里只做展示）
+    const atts = meta && Array.isArray(meta.attachments) ? meta.attachments : [];
+    if (atts.length) {
+      const box = document.createElement("div");
+      box.className = "msg-images";
+      atts.forEach((att) => {
+        if (!att || !att.id) return;
+        const img = document.createElement("img");
+        img.src = `/api/uploads/${att.id}`;
+        img.alt = att.name || "图片";
+        img.loading = "lazy";
+        img.onerror = () => {
+          img.classList.add("msg-image-expired");
+          img.alt = "图片已过期";
+        };
+        box.appendChild(img);
+      });
+      if (box.children.length) bubble.appendChild(box);
+    }
+
     wrap.appendChild(contentCol);
     container.appendChild(wrap);
 
@@ -1033,10 +1633,27 @@ window.StockRadar.chat = (() => {
     return bubble;
   }
 
+  /* 贴底。⚠️ #messageList 自身没有 overflow-y（真正滚动的是 .chat-pane），
+     直接写 container.scrollTop 无效；且「用户已上滚暂停跟随」时不该再抢滚动位置。 */
   function scrollBottom(container) {
+    const follow = window.StockRadar && window.StockRadar.chatFollow;
+    if (follow && !follow.isAtBottom()) return;   // 用户已上滚 → 不打断阅读
     requestAnimationFrame(() => {
-      container.scrollTop = container.scrollHeight;
+      const el = _scrollParent(container);
+      if (el) el.scrollTop = el.scrollHeight;
     });
+  }
+
+  /* 只按 overflowY 判定滚动容器：加上「当前是否溢出」的条件会在空/短对话时
+     跳过 .chat-pane 而落到 body，之后所有贴底都静默失效。 */
+  function _scrollParent(el) {
+    let n = el;
+    while (n && n !== document.body && n !== document.documentElement) {
+      const s = window.getComputedStyle(n);
+      if (/(auto|scroll|overlay)/.test(s.overflowY)) return n;
+      n = n.parentElement;
+    }
+    return el;
   }
 
   function createStatusBubble(container) {

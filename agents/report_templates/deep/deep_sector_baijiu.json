@@ -1,0 +1,337 @@
+{
+  "template_id": "deep_sector_baijiu",
+  "variant": "baijiu",
+  "name": "板块深度 · 白酒",
+  "asset_type": "sector",
+  "total_words_target": [
+    10000,
+    13000
+  ],
+  "charts_target": [
+    10,
+    20
+  ],
+  "estimate_anchors": [
+    "批价",
+    "库存",
+    "PE分位",
+    "股息率"
+  ],
+  "note": "白酒的核心是「动销-报表-库存-批价」四维周期；量价结构与价位带决定弹性。",
+  "slots": {
+    "snapshot": {
+      "desc": "白酒指数点位/涨跌/成交/估值分位",
+      "priority": 0
+    },
+    "valuation": {
+      "desc": "PE/PB/股息率及历史分位",
+      "priority": 0
+    },
+    "series_history": {
+      "desc": "中证白酒指数历史序列",
+      "priority": 0
+    },
+    "macro": {
+      "desc": "社零、CPI、10Y 国债（股息率利差）",
+      "priority": 0
+    },
+    "capital_flow": {
+      "desc": "主力净流入、北向、两融",
+      "priority": 0
+    },
+    "consensus_poll": {
+      "desc": "近 90 天机构观点、批价/库存判断",
+      "priority": 1,
+      "tool_hint": "iwc_search(report)"
+    },
+    "constituents": {
+      "desc": "酒企涨跌与估值横截面",
+      "priority": 0
+    },
+    "financials": {
+      "desc": "酒企营收/净利/预收款/毛利率",
+      "priority": 1
+    },
+    "news": {
+      "desc": "批价、库存、动销相关新闻",
+      "priority": 2
+    },
+    "share_cr": {
+      "desc": "高端/次高端份额与集中度",
+      "priority": 2,
+      "tool_hint": "研报摘要"
+    }
+  },
+  "sections": [
+    {
+      "id": "summary",
+      "title": "投资摘要",
+      "target_words": [
+        600,
+        800
+      ],
+      "required": true,
+      "data_slots": [
+        "snapshot",
+        "valuation"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "一句话给周期位置（磨底/去库/复苏）与时间框架；列 3–5 条「判断 + 数字」；最后写最大风险。"
+    },
+    {
+      "id": "catalog",
+      "title": "目录与图表目录",
+      "target_words": [
+        0,
+        0
+      ],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": [
+        "program"
+      ],
+      "prompt": "由程序生成，不要手写正文。"
+    },
+    {
+      "id": "consensus",
+      "title": "与市场不同之处",
+      "target_words": [
+        800,
+        1000
+      ],
+      "required": true,
+      "data_slots": [
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "先写市场共识（机构 + 日期），再写我们的反证（自有数据），最后给验证条件。"
+    },
+    {
+      "id": "cycle",
+      "title": "周期定位：动销·报表·库存·批价",
+      "target_words": [
+        1400,
+        1800
+      ],
+      "required": true,
+      "data_slots": [
+        "series_history",
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "四个维度逐一给读数与方向；能定量的定量，不能的写「数据缺失：批价/库存」并给代理指标。"
+    },
+    {
+      "id": "demand",
+      "title": "需求与政策",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "macro",
+        "news"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "社零/餐饮/商务需求与政策催化；外部测算写机构 + 年份。"
+    },
+    {
+      "id": "priceband",
+      "title": "量价结构与价位带",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "valuation",
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "高端/次高端/区域酒的价与量；批价带变化必须给区间与来源。"
+    },
+    {
+      "id": "tier",
+      "title": "个股分层与分化",
+      "target_words": [
+        1600,
+        2000
+      ],
+      "required": true,
+      "data_slots": [
+        "peer_financials",
+        "peer_series"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "按高端/次高端/区域酒三层，逐股对比营收、净利、毛利率、净利率、PE；必须覆盖至少 8 只个股并给出分组中位数；再判断分化方向（谁在修复、谁在恶化）。"
+    },
+    {
+      "id": "channel",
+      "title": "渠道与库存",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "consensus_poll",
+        "news"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "渠道库存周数、回款、终端动销；研报口径须写机构 + 日期。"
+    },
+    {
+      "id": "landscape",
+      "title": "格局与集中度",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "constituents",
+        "share_cr"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "CR3/CR5、头部份额变化；份额数据必须注明口径与来源。"
+    },
+    {
+      "id": "targets",
+      "title": "标的：龙头与弹性",
+      "target_words": [
+        1800,
+        2200
+      ],
+      "required": true,
+      "data_slots": [
+        "constituents",
+        "financials",
+        "peer_financials"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "分「确定性龙头 / 出清弹性」两类；每个标的给一条可验证理由 + 一个关键数字。"
+    },
+    {
+      "id": "advice",
+      "title": "估值与红利",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "valuation",
+        "macro"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "PE 分位、股息率与 10Y 利差、历史极值；不给目标价就明说「未覆盖」。"
+    },
+    {
+      "id": "risk",
+      "title": "风险提示",
+      "target_words": [
+        400,
+        600
+      ],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "批价下行、库存高企、需求不及预期、政策与食品安全；每条对应前文判断。"
+    }
+  ],
+  "qa_rules": [
+    "任何外部数字必须带（来源，日期）；无来源数字不得出现",
+    "批价/库存等渠道数据必须注明机构与日期；拿不到写「数据缺失」",
+    "数据缺失必须显式写「数据缺失：<字段>」，禁止用 0 或「约」代替",
+    "图表必须带 source 与 asof，无源图不得出现"
+  ],
+  "stock_tiers": {
+    "高端": [
+      {
+        "name": "贵州茅台",
+        "code": "600519"
+      },
+      {
+        "name": "五粮液",
+        "code": "000858"
+      },
+      {
+        "name": "泸州老窖",
+        "code": "000568"
+      }
+    ],
+    "次高端": [
+      {
+        "name": "山西汾酒",
+        "code": "600809"
+      },
+      {
+        "name": "酒鬼酒",
+        "code": "000799"
+      },
+      {
+        "name": "舍得酒业",
+        "code": "600702"
+      }
+    ],
+    "区域酒": [
+      {
+        "name": "今世缘",
+        "code": "603369"
+      },
+      {
+        "name": "迎驾贡酒",
+        "code": "603198"
+      },
+      {
+        "name": "古井贡酒",
+        "code": "000596"
+      },
+      {
+        "name": "老白干酒",
+        "code": "600559"
+      }
+    ]
+  }
+}

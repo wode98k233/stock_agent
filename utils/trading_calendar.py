@@ -206,3 +206,35 @@ def get_next_trading_date(market: str, from_date: Optional[date] = None) -> date
         while d.weekday() >= 5:
             d += timedelta(days=1)
         return d
+
+
+def get_previous_trading_date(market: str, from_date: Optional[date] = None) -> date:
+    """获取指定市场的上一个交易日（严格早于 from_date）。"""
+    if from_date is None:
+        from_date = get_market_local_date(market)
+
+    if not _XCALS_AVAILABLE:
+        from datetime import timedelta
+        d = from_date - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+
+    ex = MARKET_EXCHANGE.get(market)
+    if not ex:
+        from datetime import timedelta
+        return from_date - timedelta(days=1)
+
+    try:
+        cal = xcals.get_calendar(ex)
+        dt = datetime(from_date.year, from_date.month, from_date.day)
+        session = cal.date_to_session(dt, direction="previous")
+        if session.date() == from_date:
+            return cal.previous_session(session).date()
+        return session.date()
+    except Exception:
+        from datetime import timedelta
+        d = from_date - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d

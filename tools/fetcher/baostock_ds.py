@@ -1,12 +1,27 @@
 """Baostock 数据源"""
+import contextlib
+import io
 import logging
 import os
+import socket
+import threading
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 from .base import DataSource
 from .cache import get_baostock_cache
 
 logger = logging.getLogger("radar.fetcher")
+
+
+def _tcp_probe(host: str, port: int, timeout: float) -> None:
+    """单个 TCP 探针（纯连通性检查，不参与任何业务数据流）。
+
+    抽成模块级函数是为了给测试一个**唯一接缝**：单测只打桩本函数即可保证零网络，
+    不必去改标准库 `socket.create_connection`（那是进程级全局对象，影响面不可控）。
+    """
+    sock = socket.create_connection((host, port), timeout=timeout)
+    sock.close()
 
 
 class BaostockDataSource(DataSource):
@@ -16,6 +31,27 @@ class BaostockDataSource(DataSource):
     priority: int = int(os.getenv("BAOSTOCK_PRIORITY", "70"))
     _bs = None
     _login = False
+
+    # ── 连接串行化 ────────────────────────────────────────
+    # ⚠️ baostock 用的是**模块级全局 socket**（baostock.common.context.default_socket）：
+    #   每次 login() 新建 socket 并覆盖全局，logout() 关闭全局 socket。
+    #   因此它**完全非线程安全**：并发调用时 A 的 socket 被 B 的 login 覆盖（泄漏），
+    #   B 的 logout 又会关掉 A 正在 send 的 socket → WinError 10057 +「接收数据异常」。
+    #   本项目的并行面很多（react 工具批次 asyncio.gather、group parallel_executor、
+    #   run_with_timeout 守护线程），必须整段串行。
+    _lock = threading.RLock()
+    # 等锁上限：超时直接跳过（换下一个数据源），绝不排队堆死请求
+    _lock_timeout = float(os.getenv("BAOSTOCK_LOCK_TIMEOUT", "15"))
+    # 单次 recv/send 超时（baostock 自身不设 timeout，recv 可能永久挂住）
+    _socket_timeout = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
+
+    # ── 服务器可达性预检 + 冷却 ────────────────────────────
+    # baostock 的 connect() 用裸 socket（无 timeout），服务器不响应时要等系统 SYN
+    # 重试（Windows 实测 ~21s）；失败后它仍把**未连接**的 socket 写进全局 context，
+    # 后续 send 抛 WinError 10057 并在库内 print。预检把这段整体跳过。
+    _preflight_timeout = float(os.getenv("BAOSTOCK_PREFLIGHT_TIMEOUT", "3"))
+    _unreachable_cooldown = float(os.getenv("BAOSTOCK_UNREACHABLE_COOLDOWN", "120"))
+    _unreachable_until = 0.0
 
     @classmethod
     def _get_bs(cls):
@@ -30,28 +66,95 @@ class BaostockDataSource(DataSource):
         return cls._bs
 
     @classmethod
-    def _with_connection(cls, fn, *args, **kwargs):
-        """用 login/logout 包裹每次数据查询，防止 socket 泄漏"""
-        bs = cls._get_bs()
+    def _preflight(cls):
+        """TCP 预检：服务器不可达时快速失败，且冷却期内不再探测。
+
+        失败会置 `_unreachable_until`，`is_available()` 在冷却期返回 False，
+        于是 DataSourceManager 根本不把 baostock 放进候选列表 —— 零连接、零 print。
+        """
+        now = time.monotonic()
+        if now < cls._unreachable_until:
+            raise RuntimeError("baostock 服务器不可达（冷却中，跳过）")
         try:
-            lg = bs.login()
-            if lg.error_code != '0':
-                raise RuntimeError(f"baostock 登录失败: {lg.error_msg}")
-            cls._login = True
-            return fn(bs, *args, **kwargs)
+            import baostock.common.contants as cons
+        except ImportError:
+            cons = None
+        host = getattr(cons, "BAOSTOCK_SERVER_IP", "www.baostock.com")
+        port = getattr(cons, "BAOSTOCK_SERVER_PORT", 10030)
+        try:
+            _tcp_probe(host, port, cls._preflight_timeout)
+        except OSError as e:
+            cls._unreachable_until = now + cls._unreachable_cooldown
+            logger.warning(
+                "Baostock: 服务器不可达（%s:%s），冷却 %ds 内跳过: %s",
+                host, port, int(cls._unreachable_cooldown), e,
+            )
+            raise RuntimeError(f"baostock 服务器不可达: {e}") from e
+
+    @classmethod
+    @contextlib.contextmanager
+    def _quiet(cls):
+        """吞掉 baostock 库内的 print（login success / 服务器连接失败 / 接收数据异常）。
+
+        该库不用 logging，只 print 到 stdout，运行期会直接污染 uvicorn / TUI 输出。
+        仅在**持锁期间**重定向 stdout，同一时刻只有一个 baostock 调用在跑；
+        项目运行期日志统一走 logging，不受影响。
+        """
+        with contextlib.redirect_stdout(io.StringIO()):
+            yield
+
+    @classmethod
+    def _with_connection(cls, fn, *args, **kwargs):
+        """用 login/logout 包裹每次数据查询：全程串行 + 失败快速返回。
+
+        关键约束：
+          - 只有 login 成功才 logout（登录失败时 logout 会往未连接 socket 发送 → 10057）
+          - 登录成功后给全局 socket 设 timeout，避免 recv 永久挂住把锁带走
+        """
+        bs = cls._get_bs()
+        cls._preflight()
+        if not cls._lock.acquire(timeout=cls._lock_timeout):
+            raise RuntimeError("baostock 上一次调用尚未结束（全局连接串行），本次跳过")
+        try:
+            cls._preflight()  # 等锁期间可能已被别的线程判为不可达
+            logged_in = False
+            with cls._quiet():
+                try:
+                    lg = bs.login()
+                    if lg.error_code != '0':
+                        raise RuntimeError(f"baostock 登录失败: {lg.error_msg}")
+                    logged_in = True
+                    cls._set_socket_timeout()
+                    return fn(bs, *args, **kwargs)
+                finally:
+                    if logged_in:
+                        try:
+                            bs.logout()
+                        except Exception:
+                            pass
+                    cls._login = False
         finally:
-            try:
-                bs.logout()
-            except Exception:
-                pass
-            cls._login = False
+            cls._lock.release()
+
+    @classmethod
+    def _set_socket_timeout(cls):
+        """给 baostock 的全局 socket 设读写超时（它自己从不设置）。"""
+        try:
+            import baostock.common.context as bs_ctx
+            sock = getattr(bs_ctx, "default_socket", None)
+            if sock is not None:
+                sock.settimeout(cls._socket_timeout)
+        except Exception:
+            pass
 
     @classmethod
     def is_available(cls) -> bool:
+        if time.monotonic() < cls._unreachable_until:
+            return False
         try:
             cls._get_bs()
             return cls.enabled
-        except:
+        except Exception:
             return False
 
     @classmethod

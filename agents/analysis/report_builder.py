@@ -20,21 +20,21 @@ logger = logging.getLogger(__name__)
 def _min_report_tokens(template: dict | None = None) -> int:
     """报告最低 token 目标，支持运行时配置，并允许**模板级覆盖**。
 
-    模板可用 `min_report_tokens` 覆盖全局 `REPORT_MIN_TOKENS`（默认 2200）。
+    模板可用 `min_report_tokens` 覆盖全局 `REPORT_MIN_TOKENS`（默认 1500）。
     **设 0 表示"轻量模板"**：不触发 `_expand_report_if_short` 扩写，且提示词里
     把「全文目标不少于 N token」换成「简洁优先、只答用户所问」。
     背景（2026-10-01）：`max_report_words` 只被模板管理界面消费、生成路径不读，
     因此单靠模板字段无法让报告变短 —— 用户明明说「只需要这个就行了」，
     报告仍会被扩写机制拉到 3500 token 量级（实测 7283 字符）。
-    2026-10-10 下调 3500→2200：3500 的下限 + 扩写指令「必须增加表格/矩阵/Mermaid」
-    是报告注水的直接来源（实测核心结论+行动方案仅占全文 9%）。
+    2026-10-10 下调 3500→2200；2026-10-18 再下调至 1500（下限 + 扩写指令
+    「必须增加表格/矩阵/Mermaid」是报告注水的直接来源）。
     """
     if template is not None and template.get("min_report_tokens") is not None:
         try:
             return max(0, int(template["min_report_tokens"]))
         except (TypeError, ValueError):
             pass
-    return max(0, int(getattr(Config, "REPORT_MIN_TOKENS", 2200) or 0))
+    return max(0, int(getattr(Config, "REPORT_MIN_TOKENS", 1500) or 0))
 
 
 def _max_report_words(template: dict | None = None) -> int:
@@ -52,7 +52,13 @@ def _max_report_words(template: dict | None = None) -> int:
 # ═══════════════════════════════════════════════════════════════
 
 def _dedupe_chart_markers(markers: list) -> list:
-    """按图表的 (stock_code, chart_type) 去重，同组保留最后出现的（最新）。
+    """按 (stock_code, chart_type, title) 去重，同组保留最后出现的（最新）。
+
+    为什么带上 title（2026-11-02）：图表萃取放宽到 iwc_query 后，**一次调用会产出
+    多张同 chart_type 的对比图**（涨跌幅 / 估值 / 盈利），若仍按 (code, type) 去重，
+    同一 (code='', comparison) 只会剩最后一张——用户的观感就是「还是没图」。
+    顺带修掉 AGENTS.md §7 记录的老问题：RSI 与 MACD 同属 indicator，同股票只剩 MACD。
+    前端按**标题关键词**分组出 Tab（`chat-core.js::_groupKey`），同类型多张可以并排渲染。
 
     查不到元数据的 ID 原样保留，绝不因去重丢图。
     """
@@ -60,7 +66,7 @@ def _dedupe_chart_markers(markers: list) -> list:
         return markers
     try:
         from agents.analysis.chart_extractor import get_fragment
-        seen: dict = {}          # (code, type) -> marker（后出现的覆盖前面的）
+        seen: dict = {}          # (code, type, title) -> marker（后出现的覆盖前面的）
         fallback: list = []      # 查不到元数据的标记，原样保留
         for m in markers:
             cid = re.sub(r"^@@CHART:|@@$", "", m)
@@ -68,7 +74,8 @@ def _dedupe_chart_markers(markers: list) -> list:
             if not frag:
                 fallback.append((m, len(seen)))
                 continue
-            key = (frag.get("stock_code") or "", frag.get("chart_type") or "")
+            key = (frag.get("stock_code") or "", frag.get("chart_type") or "",
+                   frag.get("title") or "")
             seen[key] = m
         # fallback 按原顺序插入，且不与已保留的标记重复
         result = list(seen.values())
@@ -146,7 +153,8 @@ def _index_symbols(codes: list) -> Optional[list]:
 
 
 def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
-                             prefer_index_symbols: bool = False) -> list:
+                             prefer_index_symbols: bool = False,
+                             code_hint: str = "") -> list:
     """提取涉及的主标的（按出现频次前 N），每个尝试生成一张技术面图板。
 
     板块分析场景：报告覆盖多只个股时，每只各有一张图板（上限 REPORT_TECH_PANEL_MAX）。
@@ -154,6 +162,11 @@ def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
       1. 图表元数据中出现频次最高的 stock_code（有基础图时）
       2. 工具证据中高频出现的 6 位代码（无基础图时回退——如 ETF 查询
          妙想未返回指标表，报告一张图都没有的场景）
+      3. ``code_hint``：fork 路径从对话（用户提问 + 工具入参）回收的标的线索。
+         ⚠️ 为什么需要这一层（2026-11-02）：fork 路径传给 ``tool_evidence`` 的
+         只有「含 @@CHART 标记」的消息，一旦上游没产出任何图表片段（数据源换了 /
+         妙想额度耗尽），evidence 必为空串 → 这条独立兜底也被一起掐断，
+         报告连一张本地 K 线图板都没有。
 
     prefer_index_symbols=True（市场日报类报告，见 `_prefer_index_symbols`）：
       候选**收敛为指数码**，且歧义码（000001）显式按 INDEX 解释。这类报告的
@@ -162,7 +175,7 @@ def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
 
     本地 K 线数据不足、查不到或任何异常 → 返回 []（报告保持原样，绝不抛错）。
     """
-    if not chart_markers and not tool_evidence:
+    if not chart_markers and not tool_evidence and not code_hint:
         return []
     try:
         from collections import Counter
@@ -183,12 +196,17 @@ def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
                 if code not in names and frag.get("stock_name"):
                     names[code] = str(frag["stock_name"])
 
-        if not codes and tool_evidence:
-            # 回退：从工具证据文本提取高频 6 位代码（mx_data query 里 code 会多次出现）
-            found = [c for c in _EVIDENCE_CODE_RE.findall(tool_evidence)
-                     if _is_plausible_stock_code(c)]
-            if found:
-                codes = found
+        if not codes:
+            # 回退：从工具证据 / 对话线索里提取高频 6 位代码
+            # （mx_data query 里 code 会多次出现；iwc_query 的入参同理）
+            for text in (tool_evidence, code_hint):
+                if not text:
+                    continue
+                found = [c for c in _EVIDENCE_CODE_RE.findall(text)
+                         if _is_plausible_stock_code(c)]
+                if found:
+                    codes = found
+                    break
 
         if not codes:
             return []
@@ -223,45 +241,188 @@ def _maybe_build_tech_panels(chart_markers: list, tool_evidence: str = "",
         return []
 
 
+_DASHBOARD_BLOCK_RE = re.compile(r"@@DASHBOARD_START@@.*?@@DASHBOARD_END@@", re.S)
+
+
+def strip_copied_blocks(content: str) -> str:
+    """清掉 LLM 从上下文「续写」进正文的标记块（仪表盘 JSON / 图表 UUID）。
+
+    2026-11-06 事故：fork 路径把完整 agent 对话当前缀，而对话里某条 AI 消息的尾部
+    正是**上一份报告**的 `@@CHART:…@@ + 免责声明 + @@DASHBOARD_START@@{…}`。
+    report-fast 写完正文后照着「续写」了这段尾巴：
+
+    - 正文里多出一坨**旧仪表盘 JSON**（前端只能渲染第一个块，第二个就裸露成文字）；
+    - 前端渲染的是旧块，字段对不上新 schema → 卡片显示 `undefined`；
+    - 那些旧 `@@CHART@@` UUID 还会被当成「本轮图表」收进报告尾部（重复、指向旧图）。
+
+    所以正文里出现的这两类标记**一律不可信、一律清除**：图表只认工具证据
+    （`tool_evidence`），仪表盘只认 `dashboard_node` 生成的最后一个块。
+    """
+    if not content:
+        return content or ""
+    text = _DASHBOARD_BLOCK_RE.sub("", content)
+    # LLM 复述的图表标记（完整壳）整体删除；裸 UUID 交给调用方按已知 id 清
+    text = re.sub(r"\s*@@CHART:[0-9a-f-]+@@\s*", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.rstrip()
+
+
 def _merge_chart_markers(content: str, tool_evidence: str = "",
-                         template: dict = None) -> str:
+                         template: dict = None, code_hint: str = "") -> str:
     """归集图表标记到报告末尾（统一入口，任何异常返回原 content）。
 
-    1) 收集 tool_evidence 与正文复述中的图表 id，按 (stock_code, chart_type) 去重；
-    2) 清理 LLM 在正文里复述的标记——LLM 抄写常丢壳（@@CHART: 前缀/@@ 后缀），
-       残留裸 UUID 会污染正文且无法渲染；
-    3) 尝试注入「技术面图板」增强卡（`template` 决定标的类型：市场日报类按指数）；
+    1) 只从 `tool_evidence` 收集图表 id（正文复述的一律不采信，见 `strip_copied_blocks`）；
+    2) 清掉正文里 LLM 复述的仪表盘块 / 图表标记（含抄坏的裸 UUID 残留）；
+    3) 尝试注入「技术面图板」增强卡（`template` 决定标的类型：市场日报类按指数；
+       `code_hint` 是无图表片段时的标的线索，见 `_maybe_build_tech_panels`）；
     4) 统一以完整 ``@@CHART:id@@`` 格式拼到报告末尾。
     """
     try:
+        # 先清掉 LLM 续写的旧块：既避免旧仪表盘 JSON 裸露进正文，
+        # 也避免把上一轮的 UUID 当成本轮图表。
+        known_ids = set(re.findall(r"@@CHART:([0-9a-f-]+)@@", content or ""))
+        content = strip_copied_blocks(content)
+
         markers = re.findall(r"@@CHART:[0-9a-f-]+@@", tool_evidence or "")
-        # LLM 复述的完整标记并入（dict.fromkeys 保序去重）
-        markers += re.findall(r"@@CHART:[0-9a-f-]+@@", content or "")
         unique = _dedupe_chart_markers(list(dict.fromkeys(markers)))
 
-        # 清理正文中的复述标记：完整标记整体删除；已知 id 的裸 UUID（LLM 抄坏的）也删除
-        known_ids = set(re.findall(r"@@CHART:([0-9a-f-]+)@@", content or ""))
-        if known_ids or markers:
-            cleaned = re.sub(r"\s*@@CHART:[0-9a-f-]+@@\s*", " ", content)
+        # 清理正文里「丢壳」的裸 UUID（LLM 抄坏的情形），只删已知 id，不误伤正文数字
+        if known_ids:
             for cid in known_ids:
-                cleaned = cleaned.replace(cid, " ")
-            cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
-            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
-            content = cleaned
+                content = content.replace(cid, " ")
+            content = re.sub(r"[ \t]+\n", "\n", content)
+            content = re.sub(r"\n{3,}", "\n\n", content).rstrip()
 
         # 尝试注入技术面图板（支持多标的，板块分析每只个股各一张；失败静默）
         panels = _maybe_build_tech_panels(
-            unique, tool_evidence=tool_evidence,
+            unique, tool_evidence=tool_evidence, code_hint=code_hint,
             prefer_index_symbols=_prefer_index_symbols(template or {}),
         )
         unique.extend(panels)
 
         if unique:
+            # 上限保护：一次 run 里 iwc_query 可能被调十几次，每次都可能产出对比图，
+            # 不设上限会把报告尾部堆成图表墙（正文被挤没）。图板优先保留，
+            # 基础图只留最近 N 张（越靠后越接近最终结论）。
+            keep = _MAX_REPORT_CHARTS
+            if keep > 0 and len(unique) > keep:
+                panels_kept = panels[-keep:]
+                room = max(0, keep - len(panels_kept))
+                base = [m for m in unique if m not in panels]
+                unique = (base[len(base) - room:] if room else []) + panels_kept
             content = content.rstrip() + "\n\n" + " ".join(unique)
         return content
     except Exception:
         logger.debug("report_builder: 图表标记归集失败，保留原 content", exc_info=True)
         return content
+
+
+_CHART_MARK_RE = re.compile(r"@@CHART:[0-9a-f-]+@@")
+
+# 报告尾部图表总上限：技术面图板优先，基础图只留最近几张。
+# 取值参照历史上「一份大盘日报 ≈ 10 张图」的既有观感（10-30 那次 run 落 10 条片段）。
+_MAX_REPORT_CHARTS = 10
+
+
+def _chart_evidence_from_conversation(conversation) -> str:
+    """从 agent 对话里回收图表标记（fork 路径专用）。
+
+    ⚠️ 为什么必须有：图表标记是 ``agents/react/tool_node_base.py`` 追加到**工具消息正文**
+    里的（``📊 已自动生成图表: N 张 @@CHART:uuid@@``），而 fork 路径（PRD-A9 §14）把报告
+    prompt 直接拼在对话尾部，不再单独传 ``tool_evidence``。若不在这里回收，
+    ``_merge_chart_markers`` 只能看到 LLM **自己复述**的标记——而 LLM 几乎从不抄这串 UUID，
+    结果就是每份走 fork 的报告都零图表（2026-10-14 引入 fork 后实测：10-11 之后再无
+    ``@@CHART``；10-30 那次 run 里 chart_fragments 明明落了 9 条，报告正文却一张没有）。
+
+    只回收**含标记**的消息，不把整轮工具输出搬进内存；任何异常都退化成空串（不阻断出报告）。
+    """
+    if not conversation:
+        return ""
+    parts: list[str] = []
+    try:
+        for msg in conversation:
+            content = getattr(msg, "content", None)
+            if content is None and isinstance(msg, dict):
+                content = msg.get("content")
+            if isinstance(content, list):      # 多模态分段：拼 text 片段
+                content = " ".join(
+                    str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content
+                )
+            if not content:
+                continue
+            text = str(content)
+            if _CHART_MARK_RE.search(text):
+                parts.append(text)
+    except Exception:
+        logger.debug("report_builder: 从对话回收图表标记失败，退回空证据", exc_info=True)
+    return "\n".join(parts)
+
+
+# 对话线索取样上限：只用于正则捞 6 位代码，没必要把整轮对话搬进内存
+_SYMBOL_HINT_MAX_CHARS = 20000
+
+
+def _conversation_symbol_hints(conversation) -> str:
+    """从对话里回收「标的线索」（用户提问 + 工具入参），供技术面图板选主图。
+
+    与 ``_chart_evidence_from_conversation`` 的分工必须分清楚：
+
+    - 那个函数只回收**含 @@CHART 标记**的消息，用于归集**已经生成的图表片段**；
+    - 本函数回收**用户提问**与**工具调用入参**（不含工具输出正文），用于在
+      「一个图表片段都没有」时仍然能触发**本地 K 线技术面图板**。
+
+    ⚠️ 为什么必须分开（2026-11-02 实测）：fork 路径把
+    ``tool_evidence=_chart_evidence_from_conversation(...)`` 传下去，上游一旦没产出片段
+    （主力数据源从 mx_data_query 换成 iwc_query、或妙想免费额度耗尽），它就是空串，
+    而 ``_maybe_build_tech_panels`` 拿到空证据直接 return [] —— **图表链路两层同时归零**，
+    报告连一张本地 K 线图板都没有。工具入参里有 ``{"code": "512890"}``、用户提问里有
+    「512890 + 515450」，这些才是标的的可靠来源。
+
+    异常一律退化成空串（不阻断出报告）。
+    """
+    if not conversation:
+        return ""
+    parts: list[str] = []
+    total = 0
+    try:
+        for msg in conversation:
+            chunks: list[str] = []
+
+            content = getattr(msg, "content", None)
+            if content is None and isinstance(msg, dict):
+                content = msg.get("content")
+            if isinstance(content, list):          # 多模态分段
+                content = " ".join(
+                    str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content
+                )
+            if content:
+                chunks.append(str(content))
+
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls is None and isinstance(msg, dict):
+                tool_calls = msg.get("tool_calls")
+            for tc in tool_calls or []:
+                try:
+                    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+                    if args is None:
+                        continue
+                    chunks.append(
+                        args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+                    )
+                except Exception:
+                    continue
+
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                parts.append(chunk)
+                total += len(chunk)
+                if total >= _SYMBOL_HINT_MAX_CHARS:
+                    return "\n".join(parts)[:_SYMBOL_HINT_MAX_CHARS]
+    except Exception:
+        logger.debug("report_builder: 从对话回收标的线索失败，退回空线索", exc_info=True)
+    return "\n".join(parts)[:_SYMBOL_HINT_MAX_CHARS]
 
 
 def _rough_token_count(text: str) -> int:
@@ -289,8 +450,284 @@ def _visual_section_titles(template: dict) -> str:
     return "、".join(titles)
 
 
+def _nonfork_meta(reason: str = "no_conversation") -> dict:
+    """未走 fork 时的埋点（PRD-A11 FR-7）。
+
+    三条报告调用在非 fork 路径下都**必须**打点，否则看板的 ``fork_ratio`` 会
+    因为"缺字段"而虚高——看不出是"没 fork"还是"没记录"。
+    """
+    return {"fork_kind": "standalone", "fork_skip_reason": reason}
+
+
+def _meta_with_node(metadata: dict | None, node: str) -> dict:
+    """复制 metadata 并补 ``node``，使 trace 能按 label 归因（不修改调用方字典）。"""
+    from utils.logger import with_trace_node
+    return with_trace_node(metadata, node)
+
+
+def build_shared_system(template: dict) -> str:
+    """构建报告链路三条调用共用的 system 前缀（PRD-A9 §3.1）。
+
+    三条调用 = report-select（证据下钻选择）/ report-fast（正文生成）/ dashboard（仪表盘）。
+    它们在同一次 run 内连续执行，**共用同一份 system 即可命中 provider 的前缀缓存**。
+
+    两条不变量（破坏任一条都会让缓存重新归零）：
+
+    1. **只依赖 template**（模板 JSON），不掺入任何运行期数据 → 同一模板跨 run 字节稳定。
+    2. **不读 section['_status']** → 同一模板在任何数据完整度下长度恒定。
+       原实现遇到 ``_status == "skip"`` 会直接不渲染该 section，导致 system 长度随
+       本轮工具命中情况漂移（实测同一模板两次 run 的前缀指纹不同、cached=0）。
+
+    分支差异（原「路径 A 长文版式要求」vs「路径 B 简洁优先要求」）**下沉到 user[0]**，
+    不留在 system——它们是任务指令而非平台约定，且 user[0] 紧随 system 之后，模型照样能读到。
+
+    返回的字符串会被 ``llm_output["prefix_sha256"]`` 指纹化，单测可据此锁死「三调用一致」。
+    """
+    parts: list = []
+
+    parts.append(template.get("role") or "你是一名资深证券分析师。")
+    parts.append(
+        "你正在为「选股雷达」（A 股智能分析系统）撰写分析报告。"
+        "所有结论必须引用原始数据，禁止编造未在数据中出现的数字与事实。"
+    )
+
+    # ── 报告结构（全部 section，不因 _status 跳过；跳过信息由调用方写进 user[0]）──
+    # 措辞沿用改动前路径 A 的原文（既有测试锁了「输出结构」），避免引入措辞层面的质量风险
+    sections = template.get("sections", [])
+    if sections:
+        parts.append("\n## 输出结构（按此结构组织报告，每个板块有字数限制）")
+        for section in sections:
+            parts.append(f"\n### {section['title']}")
+            bits = []
+            if section.get("prompt"):
+                bits.append(section["prompt"])
+            if section.get("max_words"):
+                bits.append(f"字数限制：{section['max_words']}字以内")
+            if not section.get("required", False):
+                # 措辞沿用改动前路径 A 原文（test_stock_analysis_backup_tools 锁了
+                # 「禁止在本板块内重复罗列补齐方案」），只搬位置不改写
+                bits.append(
+                    "本板块必须输出；数据不足时本板块只写一句「数据缺失：<字段>」，"
+                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」一次性说明，"
+                    "禁止省略或整块留空，禁止在本板块内重复罗列补齐方案"
+                )
+            if bits:
+                parts.append("要求：" + "；".join(bits))
+
+    # ── 核心要求（两条路径合并，取并集；均为平台级硬约束）──
+    parts.append(
+        "\n## 核心要求\n"
+        "1. 所有结论必须引用【原始工具数据 / 原始素材】中的具体数字和事实\n"
+        "2. 禁止编造任何未在原始数据中提及的信息\n"
+        "3. 必须同时列出正面和负面事实，不能只说一面\n"
+        "4. 补充交叉验证分析（各维度是否共振/矛盾）\n"
+        "5. 数据不足的板块必须写一句「数据缺失：<字段>」，并在报告末尾用「数据缺口声明」"
+        "统一汇总（缺什么 + 怎么补），不能跳过也不能编造\n"
+        "6. 术语区分（不得混淆）：**主动截断**（输出过长、数据已被工具取到但未全量载入上下文，"
+        "原文标有「主动截断」「已省略中间 N 字符」）必须写成「主动截断（可补取）」，"
+        "**不得**写成「数据缺失」；只有工具**明确返回错误/空结果/接口失败**才算「数据缺失」。"
+        "也不得由某段被截断推断其它周期/字段缺失"
+    )
+
+    framework = template.get("analysis_framework")
+    if framework:
+        parts.append("\n## 分析判读框架（拿到数据后按此逻辑判断，报告结论必须体现这些判读逻辑）")
+        if framework.get("summary"):
+            parts.append(f"- {framework['summary']}")
+        for rule in framework.get("rules", []):
+            parts.append(f"- {rule}")
+
+    cross_checks = template.get("cross_checks", [])
+    if cross_checks:
+        parts.append("\n## 交叉验证规则（综合研判板块必须遵守）")
+        for check in cross_checks:
+            parts.append(f"- {check.get('rule', '')}")
+
+    report_fmt = template.get("report_format", {})
+    if report_fmt:
+        parts.append("\n## 格式规范")
+        for rule in report_fmt.values():
+            parts.append(f"- {rule}")
+
+    qa_rules = template.get("qa_rules", [])
+    if qa_rules:
+        # 标题沿用改动前 _append_template_qa_rules 的原文（既有测试锁了它）
+        parts.append("\n## 本模板质量要求（软约束）")
+        parts.append("以下规则用于提高报告质量。若原始数据不足，请明确标注缺口，不要编造。")
+        for rule in qa_rules:
+            parts.append(f"- {rule}")
+
+    parts.append("\n## 合规要求\n- 数据不足的板块必须标注\n- 风险提示必须前置，不隐瞒潜在风险")
+
+    return "\n".join(parts)
+
+
+def build_report_tail(template: dict) -> str:
+    """报告**专属**任务指令 —— conversation fork 形态下追加在对话前缀之后。
+
+    与 :func:`build_shared_system` 的区别：
+      - ``build_shared_system`` = 平台角色 + 分析框架 + 报告专属指令，**整份**当 system，
+        让 report-select / report-fast / dashboard 三条调用互为热前缀（PRD-A9 §3.1）。
+      - ``build_report_tail`` **只取报告专属部分**，用于「复用 agent 已发热的对话前缀 +
+        尾部追加任务指令」的 fork 形态（见 :func:`build_conversation_messages`）。
+
+    为什么必须拆：agent 的 system 是 REACT_SYSTEM_PROMPT（1,544 字符），与
+    build_shared_system（3,549 字符）是两份完全不同的文本。fork 时位置 0 必须是
+    agent 那份才能命中缓存，因此报告专属指令只能搬到尾部。
+
+    拆出去意味着 report-fast **不再**与 report-select / dashboard 共享前缀
+    （那两条仍走 build_shared_system）。用 ~2.4k 尾部全价 token 换 ~20k 以上的
+    热对话前缀，净收益为正。
+    """
+    parts: list = ["\n## 现在请撰写分析报告\n",
+                   "以下面这段对话中你已获取的原始工具数据为准，撰写完整分析报告。"
+                   "数据已在上下文中，无需重复列出工具原始输出，但所有结论必须引用其中的具体数字与事实。"]
+
+    sections = template.get("sections", [])
+    if sections:
+        parts.append("\n## 输出结构（按此结构组织报告，每个板块有字数限制）")
+        for section in sections:
+            parts.append(f"\n### {section['title']}")
+            bits = []
+            if section.get("prompt"):
+                bits.append(section["prompt"])
+            if section.get("max_words"):
+                bits.append(f"字数限制：{section['max_words']}字以内")
+            if not section.get("required", False):
+                bits.append(
+                    "本板块必须输出；数据不足时本板块只写一句「数据缺失：<字段>」，"
+                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」一次性说明，"
+                    "禁止省略或整块留空，禁止在本板块内重复罗列补齐方案"
+                )
+            if bits:
+                parts.append("要求：" + "；".join(bits))
+
+    parts.append(
+        "\n## 核心要求\n"
+        "1. 所有结论必须引用【原始工具数据 / 原始素材】中的具体数字和事实\n"
+        "2. 禁止编造任何未在原始数据中提及的信息\n"
+        "3. 必须同时列出正面和负面事实，不能只说一面\n"
+        "4. 补充交叉验证分析（各维度是否共振/矛盾）\n"
+        "5. 数据不足的板块必须写一句「数据缺失：<字段>」，并在报告末尾用「数据缺口声明」"
+        "统一汇总（缺什么 + 怎么补），不能跳过也不能编造\n"
+        "6. 术语区分（不得混淆）：**主动截断**（输出过长、数据已被工具取到但未全量载入上下文，"
+        "原文标有「主动截断」「已省略中间 N 字符」）必须写成「主动截断（可补取）」，"
+        "**不得**写成「数据缺失」；只有工具**明确返回错误/空结果/接口失败**才算「数据缺失」。"
+        "也不得由某段被截断推断其它周期/字段缺失"
+    )
+
+    cross_checks = template.get("cross_checks", [])
+    if cross_checks:
+        parts.append("\n## 交叉验证规则（综合研判板块必须遵守）")
+        for check in cross_checks:
+            parts.append(f"- {check.get('rule', '')}")
+
+    report_fmt = template.get("report_format", {})
+    if report_fmt:
+        parts.append("\n## 格式规范")
+        for rule in report_fmt.values():
+            parts.append(f"- {rule}")
+
+    qa_rules = template.get("qa_rules", [])
+    if qa_rules:
+        parts.append("\n## 本模板质量要求（软约束）")
+        parts.append("以下规则用于提高报告质量。若原始数据不足，请明确标注缺口，不要编造。")
+        for rule in qa_rules:
+            parts.append(f"- {rule}")
+
+    parts.append("\n## 合规要求\n- 数据不足的板块必须标注\n- 风险提示必须前置，不隐瞒潜在风险")
+
+    return "\n".join(parts)
+
+
+def _skipped_sections_note(template: dict) -> str:
+    """把本轮被跳过的板块写成一句 user 侧说明。
+
+    原实现直接在 system 里不渲染 `_status == "skip"` 的 section，
+    既让 system 长度随数据完整度漂移（破缓存），也让模型「看不到该板块存在」
+    而在正文里凭空补写。改为：system 始终渲染全部板块（结构稳定），
+    再由 user[0] 明确告知本轮哪些板块不用写。
+    """
+    skipped = [s["title"] for s in template.get("sections", [])
+               if s.get("_status") == "skip"]
+    if not skipped:
+        return ""
+    return ("\n\n## 本轮无需输出的板块\n"
+            "以下板块本轮数据缺失，**直接不写**（不要留空、不要用「数据缺失」占位）：\n"
+            + "\n".join(f"- {t}" for t in skipped))
+
+
+def _length_profile_note(template: dict) -> str:
+    """篇幅口径提示（原先按分支写在 system 里，现下沉到 user[0]）。
+
+    **标题与措辞沿用改动前原文**（既有测试分别锁了「长文与版式要求」与「简洁优先」），
+    只是换了所在位置，避免引入措辞层面的质量风险。
+
+    - ``min_report_tokens > 0`` 的模板：给足篇幅但禁止注水
+    - ``min_report_tokens == 0`` 的轻量模板：反向要求，简洁优先
+    """
+    min_tok = _min_report_tokens(template)
+    max_w = _max_report_words(template)
+    if min_tok > 0:
+        head = "## 长文与版式要求"
+        line = (f"- 全文目标 {min_tok} token 级别即可，不追求越长越好，禁止为凑篇幅注水。\n"
+                "- 优先把篇幅给「核心结论」「行动方案」：结论要方向+价位，行动要触发条件+失效条件。\n"
+                "- 表格/矩阵/条件树只在能承载判断时使用，禁止为版式新增空洞表格或重复风险提示。\n"
+                "- 关键结论必须结构化，禁止用大段纯文字硬堆。")
+        if max_w:
+            line += f"\n- 全文不超过 {max_w} 字，超过即为注水。"
+    else:
+        head = "## 篇幅要求（重要）"
+        line = ("- **简洁优先**：只输出用户明确要求的内容。能用一行表格或一句话说清，就绝不分节展开。\n"
+                "- **禁止补充用户没要的板块**：分析、建议、候选排序、仓位、交易纪律、投资视角、"
+                "风险矩阵、小白版翻译等一律不写。\n"
+                "- 必须标注数据口径（具体交易日 / 数据源），取不到就写「数据缺失：<字段>」。")
+    return head + "\n" + line
+
+
+def build_conversation_messages(template: dict, conversation, *,
+                                conversation_tools=None,
+                                tail_builder=None) -> list | None:
+    """conversation fork：复用 agent 已发热的对话前缀，任务指令**尾部追加**。
+
+    形态::
+
+        [tools 数组 · 与 agent 逐字节相同 · 位置 0]
+        [agent 的 system · 与 agent 相同]
+        [...完整对话历史...]
+        [尾部: 本次任务指令]
+
+    **能命中缓存的原因**：agent 最后一次 LLM 调用发出的 payload 就是上面除尾部之外的
+    全部内容，且刚刚被 provider 缓存过。本次调用只需为尾部付全价。
+
+    **必须绑定同一份 tools 数组**（``conversation_tools``）：位置 0 变了，
+    整条前缀立即归零。full 工具面（``TOOL_SURFACE_MODE=full``）是它的必要前置——
+    strict 档 tools 随技能批变动，绑定也无从对齐。
+
+    :param tail_builder: 可选，``() -> str``。默认用 :func:`build_report_tail`。
+        PRD-A11 FR-3：下钻选择 / 扩写复用同一个前缀族，各自换自己的尾部指令。
+
+    返回 ``None`` 表示不适用（无对话/ 无工具），调用方回落到证据注入路径。
+    这是**能力判定**而非开关：plan / pdor / agent_group 的报告输入是跨 step 聚合，
+    单条对话里本就不存在这批工具结果，强行 fork 反而更差。
+    """
+    if not conversation or not conversation_tools:
+        return None
+
+    tail = tail_builder() if tail_builder else build_report_tail(template)
+    if not tail:
+        return None
+    # ⚠️ 用 user 而非 system 承载尾部指令：agent 最后一次调用的消息序列必然以
+    # tool 结果结尾（拿到数据后循环结束），而「tool 结果紧跟 system」在部分
+    # provider 上是非法序列；user 紧跟 tool 则到处都合法。
+    # 尾部的角色对缓存没有影响 —— 它在最末尾，本来就是全价新 token。
+    msgs = list(conversation)
+    return [*msgs, ("user", tail)]
+
+
 def _expand_report_if_short(content: str, template: dict, user_input: str,
-                            llm, log, budget=None, metadata=None, run_config=None) -> str:
+                            llm, log, budget=None, metadata=None, run_config=None,
+                            *, conversation=None, conversation_tools=None) -> str:
     """报告过短时扩写一次，补足深度和图表化结构。"""
     from utils.llm_factory import tracked_invoke
 
@@ -301,23 +738,60 @@ def _expand_report_if_short(content: str, template: dict, user_input: str,
 
     log.info("A", f"报告篇幅不足，触发扩写: {current_tokens}/{min_tokens} token")
     sections = _visual_section_titles(template)
-    messages = [
-        ("system", "你是资深证券分析师和中文报告编辑。只能基于原报告已有事实扩写，禁止编造新数据。"),
-        ("user", "\n".join([
-            f"用户问题：{user_input}",
-            f"当前报告约 {current_tokens} token，低于最低目标 {min_tokens} token。",
-            "请在不改变原结论、不编造新数据的前提下扩写为完整长报告。",
-            "扩写要求：",
-            f"- 全文不少于 {min_tokens} token 级别。",
-            "- 保留并强化这些板块：" + sections,
-            "- 必须增加 Markdown 表格、情景矩阵、条件树或 Mermaid flowchart。",
-            "- 数据不足处写「数据缺失」并解释对结论的影响。",
-            "- 不要输出改写说明，直接输出最终报告。",
-            "\n原报告：",
-            content,
-        ])),
-    ]
-    resp = tracked_invoke(llm, messages, log, label="report-expand", budget=budget, metadata=metadata, run_config=run_config)
+    tail = "\n".join([
+        "## 本次任务\n你是资深证券分析师和中文报告编辑。只能基于原报告已有事实扩写，禁止编造新数据。",
+        f"用户问题：{user_input}",
+        f"当前报告约 {current_tokens} token，低于最低目标 {min_tokens} token。",
+        "请在不改变原结论、不编造新数据的前提下扩写为完整长报告。",
+        "扩写要求：",
+        f"- 全文不少于 {min_tokens} token 级别。",
+        "- 保留并强化这些板块：" + sections,
+        "- 只在确有对比维度时补 Markdown 表格；**不得为凑篇幅生成 Mermaid / 条件树 / 关系图 / 操作树**（除非原报告 1.0 里已有）。",
+        "- 数据不足处写「数据缺失」并解释对结论的影响。",
+        # PRD-A11 FR-3 / Q6：走 fork 后扩写能看见工具结果 → 必须收紧"不许编造"的边界，
+        # 否则它会拿前缀里的原始数字"补写"出报告 1.0 里没有的结论。
+        "- **只允许引用上面对话里已出现的数字**；报告 1.0 里没有的数字不得补写。"
+        "确实需要新数据时，输出 {\"need_tools\": [...]} 说明要补什么，而不是编造。",
+        "- 不要输出改写说明，直接输出最终报告。",
+        "\n原报告：",
+        content,
+    ])
+
+    # PRD-A11 FR-3：扩写也走 fork —— 原实现只拿到「报告 1.0 全文」，
+    # 看不见任何工具结果与模板契约，这正是「基于 1.0 写废话」的机制性成因。
+    fork_meta: dict = {}
+    messages = None
+    if conversation and conversation_tools:
+        messages = build_conversation_messages(
+            template, conversation, conversation_tools=conversation_tools,
+            tail_builder=lambda: tail)
+        if messages is not None:
+            from agents.shared.llm_fork import fork_metadata
+            from agents.shared.prompt_prefix import make_fork_prefix
+            fork_meta = fork_metadata(
+                make_fork_prefix(conversation, conversation_tools, source="report"),
+                (messages, conversation_tools))
+            # ⚠️ fork 必须把**同一份** tools 数组绑回实例（位置 0 是前缀的一部分）。
+            # 实测（2026-10-17，同一 run 逐调用比对 trace）：同一个消息前缀，
+            # report-fast 绑了 52 个工具 / 12,813 字符 → cached 31,872（93%）；
+            # report-expand 没绑 → cached 2,048（7%，正好是 provider 最小块）——
+            # 少了 tools 就是前缀错位，整条前缀归零。
+            # 绑定方式与 report-fast 同款（失败回落无工具，仍可用对话前缀）。
+            # ⚠️ 只在 fork 分支内绑：下面 `if messages is None` 的兜底路径是 [system, user] 两条新消息，
+            # 没有任何前缀可对齐，多带 8k tools 纯亏。
+            try:
+                llm = llm.bind_tools(conversation_tools)
+            except Exception as e:
+                log.warning("A", f"扩写 fork 绑定工具失败，改用无工具调用: {e}")
+    if messages is None:
+        messages = [
+            ("system", "你是资深证券分析师和中文报告编辑。只能基于原报告已有事实扩写，禁止编造新数据。"),
+            ("user", tail),
+        ]
+        fork_meta = _nonfork_meta("no_conversation")
+    resp = tracked_invoke(llm, messages, log, label="report-expand", budget=budget,
+                          metadata={**_meta_with_node(metadata, "report-expand"), **fork_meta},
+                          run_config=run_config)
     expanded = resp.content if hasattr(resp, "content") else str(resp)
     return expanded or content
 
@@ -382,8 +856,23 @@ def _parse_need_indices(raw_json, max_index: int) -> list:
     return out
 
 
-def _build_selection_prompt(items: list, user_input: str, raw_result: str) -> list:
-    """阶段一 prompt：用户问题 + 分析草稿（全文，不截断）+ 编号工具索引。"""
+def _build_selection_prompt(items: list, user_input: str, raw_result: str,
+                           template: dict | None = None, *,
+                           conversation=None, conversation_tools=None) -> list:
+    """阶段一 prompt：用户问题 + 分析草稿（全文，不截断）+ 编号工具索引。
+
+    **两条路径**（PRD-A11 FR-3）：
+
+    - **fork 档**（有 ``conversation`` + ``conversation_tools``）：复用 agent 已热的
+      完整对话前缀，尾部只追加筛选指令。与 report-fast / dashboard 属**同一前缀族**，
+      于是三条调用共享整条前缀（实测：原路径只有 2,009 tok 共享，正文那条前缀达 20~45K）。
+    - **回落档**（无对话）：保留 PRD-A9 §3.1 的 ``build_shared_system`` system —— 
+      多步模式（plan/pdor/group）没有单条对话可复用，这份 system 仍是它们之间唯一的
+      共享手段，不能丢。
+
+    ``template`` 为 None 时（仅单测/调试直接调用）退回空模板——此时 system 会很短，
+    属于降级路径，生产链路一定会传进来。
+    """
     lines = []
     for i, it in enumerate(items, 1):
         text = _text(it.get("output"))
@@ -395,9 +884,10 @@ def _build_selection_prompt(items: list, user_input: str, raw_result: str) -> li
             f"{i}. {it['name']} | 参数:{args or '—'} | 长度:{len(text)}{tag} | 预览:{preview or '（空）'}"
         )
 
-    system = (
-        "你是报告撰写前的证据筛选器。输入包含：用户问题、agent 已写好的分析草稿、"
-        "以及本次运行收集到的全部工具结果索引（每条带序号）。\n"
+    user = (
+        "## 本次任务\n"
+        "你是报告撰写前的**证据筛选器**，不是报告撰写者。输入包含：用户问题、"
+        "agent 已写好的分析草稿、以及本次运行收集到的全部工具结果索引（每条带序号）。\n"
         "任务：挑出「为写出高质量最终报告，需要载入全文」的工具结果序号。\n"
         "原则：\n"
         "1. 按「报告会直接引用」的标准选择：与用户问题、分析草稿结论直接相关的原始数据必选；"
@@ -408,15 +898,23 @@ def _build_selection_prompt(items: list, user_input: str, raw_result: str) -> li
         "4. 未入选不等于丢弃：下游会把未入选调用以「未载入（可补取）」显式标注，"
         "不会造成数据缺失误报；因此请按相关性做真实筛选，不要为保险起见全选。\n"
         "5. 数量不设上限：需要几个选几个。\n"
-        '只输出严格 JSON，不要任何其他文字：{"need_tools": [序号, ...]}'
-    )
-    user = (
-        f"## 用户问题\n{user_input}\n\n"
-        f"## 分析草稿（全文）\n{raw_result or '（本轮没有中间草稿，请仅凭问题与索引选择）'}\n\n"
-        f"## 工具结果索引\n" + "\n".join(lines)
+        '6. 只输出严格 JSON，不要任何其他文字：{"need_tools": [序号, ...]}'
+        '\n\n## 用户问题\n' + user_input
+        + '\n\n## 分析草稿（全文）\n'
+        + (raw_result or '（本轮没有中间草稿，请仅凭问题与索引选择）')
+        + "\n\n## 工具结果索引\n" + "\n".join(lines)
         + '\n\n请输出 JSON：{"need_tools": [序号, ...]}'
     )
-    return [("system", system), ("user", user)]
+    # fork 档：同一条已热对话前缀 + 尾部筛选指令（与 report-fast / dashboard 同族）
+    if conversation and conversation_tools:
+        forked = build_conversation_messages(
+            template, conversation, conversation_tools=conversation_tools,
+            tail_builder=lambda: user)
+        if forked is not None:
+            return forked
+    # 回落：筛选器需要 template 参数才能与 report-fast 共用 system，
+    # 生产链路由 _build_drilldown_evidence 透传。
+    return [("system", build_shared_system(template or {})), ("user", user)]
 
 
 def _format_remaining_calls(items: list, selected_indices: set) -> str:
@@ -453,8 +951,19 @@ def _format_remaining_calls(items: list, selected_indices: set) -> str:
 
 
 async def _select_tool_indices(items: list, user_input: str, raw_result: str,
-                               budget, log, metadata, run_config) -> Optional[list]:
-    """阶段一：LLM 按序号选择。返回 1-based 序号列表；None = 放弃下钻（退回全量）。"""
+                               budget, log, metadata, run_config,
+                               template: dict | None = None, *,
+                               conversation=None, conversation_tools=None) -> Optional[list]:
+    """阶段一：LLM 按序号选择。返回 1-based 序号列表；None = 放弃下钻（退回全量）。
+
+    ``template`` 透传给 _build_selection_prompt，让 report-select 的 system
+    与 report-fast 字节一致（PRD-A9 §3.1）。
+
+    PRD-A11 FR-3：``conversation`` 非空时改走 fork —— 与 report-fast / dashboard 属
+    同一前缀族。实测原路径（build_shared_system）只有 2,009 tok 与正文共享，
+    而正文那条前缀已 20~45K；且异族调用会触发 provider 侧缓存驱逐
+    （PRD-A11 §2.12：两次 report-fast 命中 0% 都发生在异族调用插入之后）。
+    """
     total_chars = sum(len(_text(it.get("output"))) for it in items)
     min_tools = int(getattr(Config, "REPORT_DRILLDOWN_MIN_TOOLS", 8) or 8)
     min_chars = int(getattr(Config, "REPORT_DRILLDOWN_MIN_CHARS", 12000) or 12000)
@@ -470,11 +979,22 @@ async def _select_tool_indices(items: list, user_input: str, raw_result: str,
             pass
 
     from utils.llm_factory import get_report_llm, llm_json_with_retry
-    messages = _build_selection_prompt(items, user_input, raw_result)
+    messages = _build_selection_prompt(items, user_input, raw_result, template,
+                                       conversation=conversation,
+                                       conversation_tools=conversation_tools)
+    fork_meta: dict = _nonfork_meta("no_conversation")
+    if conversation and conversation_tools and len(messages) > 1:
+        from agents.shared.llm_fork import fork_metadata
+        from agents.shared.prompt_prefix import make_fork_prefix
+        fork_meta = fork_metadata(
+            make_fork_prefix(conversation, conversation_tools, source="report"),
+            (messages, conversation_tools))
     try:
         raw = llm_json_with_retry(
             get_report_llm(), messages, log, label="report-select",
-            max_retries=1, budget=budget, metadata=metadata, run_config=run_config,
+            max_retries=1, budget=budget,
+            metadata={**_meta_with_node(metadata, "report-select"), **fork_meta},
+            run_config=run_config,
         )
     except BudgetExceeded:
         raise
@@ -489,12 +1009,21 @@ async def _select_tool_indices(items: list, user_input: str, raw_result: str,
 
 
 async def _build_drilldown_evidence(items: list, user_input: str, raw_result: str,
-                                    budget, log, metadata, run_config) -> str:
-    """下钻证据装配：选中全文 + 未入选状态清单；任何异常 → 全量（零回归）。"""
+                                    budget, log, metadata, run_config,
+                                    template: dict | None = None, *,
+                                    conversation=None,
+                                    conversation_tools=None) -> str:
+    """下钻证据装配：选中全文 + 未入选状态清单；任何异常 → 全量（零回归）。
+
+    ``template`` 透传给 report-select，使其 system 与 report-fast 完全一致（PRD-A9 §3.1）。
+    ``conversation`` 透传给 report-select，使其走 fork（PRD-A11 FR-3）。
+    """
     if not getattr(Config, "REPORT_DRILLDOWN_ENABLED", True) or not items:
         return _format_tool_calls(items)
     selected = await _select_tool_indices(
-        items, user_input, raw_result, budget, log, metadata, run_config)
+        items, user_input, raw_result, budget, log, metadata, run_config,
+        template=template, conversation=conversation,
+        conversation_tools=conversation_tools)
     if not selected:
         return _format_tool_calls(items)
     sel_set = set(selected)
@@ -521,11 +1050,55 @@ def _append_template_qa_rules(parts: list, template: dict):
         parts.append(f"- {rule}")
 
 
+def _package_report(content: str, template: dict, has_rich_raw: bool, log=None) -> dict:
+    """把 LLM 正文封装成 ReportDocument（fork 与证据注入两条路径共用）。
+
+    抽出来是为了让 fork 分支不重复这段模式 A/B 分派逻辑——两条路径的**输入构造**
+    不同，但**输出契约**必须逐字节一致，否则 fork 开着关着报告结构会变。
+    """
+    if has_rich_raw:
+        return {
+            "title": template.get("name", "分析报告"),
+            "summary": _extract_first_section(content),
+            "sections": [ReportSection(
+                id="full_report", title="分析报告",
+                content=content, status="ok",
+            )],
+            "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
+        }
+    sections = _parse_report_sections(content, template)
+    # 兜底：解析出 0 个板块但 LLM 输出内容充足时，按完整报告处理，
+    # 避免 sections 为空导致 format_report 只输出标题+免责声明、正文全部丢失。
+    if not sections and content and len(content) > 200:
+        # ⚠️ 必须用调用方传入的 RadarLogger（log），不能用模块级 logging logger：
+        # 后者会把 "A" 当成 % 格式化参数（"not all arguments converted"），
+        # pytest 的 logging 插件在格式化该记录时抛错并冒泡，改变返回路径。
+        (log or logger).warning(
+            f"报告板块解析失败(0/{len(template.get('sections', []))})，回退为完整报告输出")
+        return {
+            "title": template.get("name", "分析报告"),
+            "summary": _extract_first_section(content),
+            "sections": [ReportSection(
+                id="full_report", title="分析报告",
+                content=content, status="ok",
+            )],
+            "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
+        }
+    return {
+        "title": template.get("name", "分析报告"),
+        "summary": _extract_summary(sections),
+        "sections": sections,
+        "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
+    }
+
+
 async def build(template: dict, slot_results: dict, user_input: str,
                 budget=None, logger_obj=None, raw_result: str = "",
                 tool_calls: list = None, selected_skills: list = None,
                 metadata=None, run_config=None, step_results: list = None,
-                raw_result_is_seed: bool = False) -> dict:
+                raw_result_is_seed: bool = False,
+                conversation=None, conversation_tools=None,
+                fork_sink: dict | None = None) -> dict:
     """
     快速模式报告合成。
 
@@ -538,6 +1111,13 @@ async def build(template: dict, slot_results: dict, user_input: str,
         —— 仅 agent_group 使用（它的原始数据走条目/下钻通道，raw_result 只是选择依据）。
         ⚠️ 默认 False = 保持既有行为：React / Unified / Plan / PDOR 模式
         （它们的 raw_result 是报告草稿，必须注入）。改这个默认值会同时影响 5 个模式。
+
+    conversation / conversation_tools（PRD-A9 §14，fork 形态）：
+        传入 agent 的完整对话与其绑定的同一份工具数组后，report-fast 改为
+        「复用该已热前缀 + 尾部追加报告指令」，并**跳过 report-select**（工具结果
+        已在对话里，无需再选一次载什么）。任一为空则自动回落证据注入路径 ——
+        这是能力判定不是开关，plan/pdor/group 的跨 step 聚合天然不适用。
+
     返回 ReportDocument dict: {"title", "summary", "sections": [ReportSection], "disclaimer"}
     """
     log = logger_obj or logger
@@ -552,6 +1132,47 @@ async def build(template: dict, slot_results: dict, user_input: str,
 
         has_rich_raw = raw_result and len(raw_result) > 500
 
+        # ── fork 形态：复用 agent 已热前缀 ────────────────────────────
+        fork_messages = build_conversation_messages(
+            template, conversation, conversation_tools=conversation_tools)
+        if fork_messages is not None:
+            log.info("A", f"conversation fork: 复用 {len(fork_messages) - 1} 条对话前缀，"
+                          f"绑定 {len(conversation_tools)} 个工具，跳过 report-select")
+            from agents.shared.llm_fork import fork_metadata
+            from agents.shared.prompt_prefix import make_fork_prefix
+            # PRD-A11 FR-7：把「这次 fork 共享了多少前缀」写进 trace。之后任何人问
+            # 「report-fast 到底 fork 了没有」，都能从 steps.extra 直接读，不用猜。
+            fork_meta = fork_metadata(
+                make_fork_prefix(conversation, conversation_tools, source="report"),
+                (fork_messages, conversation_tools))
+            llm = get_report_llm()
+            try:
+                llm = llm.bind_tools(conversation_tools)
+            except Exception as e:      # 绑定失败则退回无工具（仍可用对话前缀）
+                log.warning("A", f"fork 绑定工具失败，改用无工具调用: {e}")
+            resp = tracked_invoke(
+                llm, fork_messages, log, label="report-fast", budget=budget,
+                metadata={**_meta_with_node(metadata, "report-fast"), **fork_meta},
+                run_config=run_config)
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            report_llm = get_report_llm()
+            content = _expand_report_if_short(
+                content, template, user_input, report_llm, log, budget=budget,
+                metadata=_meta_with_node(metadata, "report-expand"),
+                run_config=run_config,
+                conversation=conversation, conversation_tools=conversation_tools)
+            # fork 路径没有单独的 tool_evidence，图表标记要从对话的工具消息里回收，
+            # 否则报告正文永远不会出现 @@CHART（图表全丢）。
+            # code_hint 是「没有任何图表片段时」的独立兜底：从用户提问与工具入参里
+            # 捞标的代码，让本地 K 线技术面图板照样能出图（2026-11-02 修复）。
+            content = _merge_chart_markers(
+                content,
+                tool_evidence=_chart_evidence_from_conversation(conversation),
+                code_hint=_conversation_symbol_hints(conversation),
+                template=template,
+            )
+            return _package_report(content, template, has_rich_raw, log)
+
         # 格式化原始工具调用结果（默认走「索引→序号下钻」聚焦证据；失败自动退回全量）
         tool_evidence = ""
         if tool_calls:
@@ -565,7 +1186,9 @@ async def build(template: dict, slot_results: dict, user_input: str,
             log.info("A", f"工具输出大小: {raw_sizes}, 总计={sum(raw_sizes)}字符")
             items = _tool_items(tool_calls)
             tool_evidence = await _build_drilldown_evidence(
-                items, user_input, raw_result, budget, log, metadata, run_config)
+                items, user_input, raw_result, budget, log, metadata, run_config,
+                template=template, conversation=conversation,
+                conversation_tools=conversation_tools)
             if tool_evidence:
                 log.info("A", f"工具证据（格式化后）: {len(tool_evidence)} 字符")
 
@@ -576,11 +1199,22 @@ async def build(template: dict, slot_results: dict, user_input: str,
             step_results=step_results,
             raw_result_is_seed=raw_result_is_seed,
         )
-        resp = tracked_invoke(get_report_llm(), messages, log, label="report-fast", budget=budget, metadata=metadata, run_config=run_config)
+        # PRD-A11：把本次 report-fast **实际发出的 payload** 冻结下来，随结果回到
+        # report_enhance_node → 写进 state，供**下一个节点（仪表盘）复用同一前缀**。
+        # 「报告在前、仪表盘在后」且只隔约 1 秒 —— 实测立即复用可命中（正常网络约 3/4）。
+        # 这是 plan/pdor/group 这类「跨 step 聚合」模式唯一能拿到的同 run 预热源。
+        if fork_sink is not None:
+            fork_sink["messages"] = list(messages)
+            fork_sink["tools"] = []
+        resp = tracked_invoke(get_report_llm(), messages, log, label="report-fast", budget=budget,
+                              metadata={**_meta_with_node(metadata, "report-fast"),
+                                        **_nonfork_meta("no_conversation")}, run_config=run_config)
         content = resp.content if hasattr(resp, "content") else str(resp)
         report_llm = get_report_llm()
         content = _expand_report_if_short(
-            content, template, user_input, report_llm, log, budget=budget, metadata=metadata, run_config=run_config
+            content, template, user_input, report_llm, log, budget=budget,
+            metadata=_meta_with_node(metadata, "report-expand"), run_config=run_config,
+            conversation=conversation, conversation_tools=conversation_tools
         )
 
         # 图表标记归集：从工具证据中收集萃取生成的 @@CHART:uuid@@ 标记。
@@ -597,36 +1231,9 @@ async def build(template: dict, slot_results: dict, user_input: str,
 
         if has_rich_raw:
             # 模式 A：LLM 输出是结构化增强后的完整报告，直接使用
-            return {
-                "title": template.get("name", "分析报告"),
-                "summary": _extract_first_section(content),
-                "sections": [ReportSection(
-                    id="full_report", title="分析报告",
-                    content=content, status="ok",
-                )],
-                "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
-            }
-        # 模式 B：按模板板块解析
-        sections = _parse_report_sections(content, template)
-        # 兜底：解析出 0 个板块但 LLM 输出内容充足时，按完整报告处理，
-        # 避免 sections 为空导致 format_report 只输出标题+免责声明、正文全部丢失。
-        if not sections and content and len(content) > 200:
-            log.warning("A", f"报告板块解析失败(0/{len(template.get('sections', []))})，回退为完整报告输出")
-            return {
-                "title": template.get("name", "分析报告"),
-                "summary": _extract_first_section(content),
-                "sections": [ReportSection(
-                    id="full_report", title="分析报告",
-                    content=content, status="ok",
-                )],
-                "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
-            }
-        return {
-            "title": template.get("name", "分析报告"),
-            "summary": _extract_summary(sections),
-            "sections": sections,
-            "disclaimer": "以上分析仅供参考，不构成投资建议。市场有风险，投资需谨慎。",
-        }
+            return _package_report(content, template, has_rich_raw, log)
+        # 模式 B：按模板板块解析（与 fork 路径共用同一封装，输出契约逐字节一致）
+        return _package_report(content, template, has_rich_raw, log)
     except BudgetExceeded:
         raise
     except Exception as e:
@@ -637,131 +1244,70 @@ async def build(template: dict, slot_results: dict, user_input: str,
 def _build_prompt(template: dict, slot_results: dict, user_input: str,
                   raw_result: str = "", tool_evidence: str = "",
                   step_results: list = None, raw_result_is_seed: bool = False) -> list:
-    """构建报告合成 prompt。
+    """构建报告合成 prompt（PRD-A9 §3.1：system 前缀与运行期数据彻底解耦）。
 
     核心原则：原始工具数据 > 第一次总结 > 模板结构
     LLM 能自己从原始数据中提取关键信息，不需要规则预处理
+
+    **布局不变量**（改动前务必读 CLAUDE 式注释里的实测结论）：
+      ``[system = build_shared_system(template)]`` ← 只依赖模板，跨 run 字节稳定
+      ``[user[0]]``                          ← 任务指令 + 篇幅口径 + 本轮跳过板块
+      ``[user[1:]]``                         ← 原始数据（每次不同，不参与缓存）
+    report-select / report-fast / dashboard 三条调用共享同一份 system，
+    同一次 run 内连续执行即可命中 provider 前缀缓存。
     """
-    role = template.get("role", "你是一名资深证券分析师。")
     horizon = template.get("time_horizon", {}).get("default", "short")
     horizon_config = template.get("time_horizon", {}).get("presets", {}).get(horizon, {})
 
     # 判断模式：raw_result 足够丰富时，以它为主；否则以插槽数据为主
     has_rich_raw = raw_result and len(raw_result) > 500
 
+    # ── user[0]：本次任务的专属指令（不进 system，避免前缀随分支漂移）──
+    head = [_length_profile_note(template)]
+
     if has_rich_raw:
-        # ── 消息按类型拆分，不混合 ──
-
-        # system[0]: 角色 + 输出结构（稳定，可缓存）
-        sys_parts = [
-            "你是一名资深证券分析师。你的任务是基于原始工具数据和已有分析报告，"
-            "重新组织为标准结构。所有结论必须引用原始数据，禁止编造未提及的信息。",
-            f"\n## 输出结构（按此结构组织报告，每个板块有字数限制）",
-        ]
-        for section in template.get("sections", []):
-            if section.get("_status") == "skip":
-                continue
-            title = section["title"]
-            max_words = section.get("max_words")
-            data_slots = section.get("data_slots", [])
-            core_slots = section.get("core_slots", [])
-            required = section.get("required", False)
-            sys_parts.append(f"### {title}")
-            prompt_parts = []
-            if section.get("prompt"):
-                prompt_parts.append(section["prompt"])
-            if max_words:
-                prompt_parts.append(f"字数限制：{max_words}字以内")
-            if not required:
-                # 措辞与模板 qa_rules「必须完整输出全部板块」对齐：
-                # `required` 约束的是**数据是否为硬要求**，不是「板块能否省略」。
-                # 原措辞「数据不足可跳过」与 qa_rules 直接冲突，会让模型静默丢板块。
-                # 2026-09-21 收敛：缺失提示**只在本板块留一句**，缺什么/怎么补统一写进
-                # 末尾「数据缺口声明」——避免同一缺口在正文+表格+风险矩阵+声明里各写一遍
-                # （实测一份报告里 4 类缺口被写了 22 次，观感上像"满屏缺失"）。
-                prompt_parts.append(
-                    "本板块必须输出；数据不足时本板块只写一句「数据缺失：<字段>」，"
-                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」一次性说明，"
-                    "禁止省略或整块留空，禁止在本板块内重复罗列补齐方案"
-                )
-            if prompt_parts:
-                sys_parts.append("要求：" + "；".join(prompt_parts))
-
-        # system[1]: 核心要求 + 分析判读框架 + 交叉验证 + 格式规范 + QA 规则
-        req_parts = []
-        req_parts.append("## 核心要求")
-        req_parts.append("1. 所有结论必须引用【原始工具数据 / 原始素材】中的具体数字和事实")
-        req_parts.append("2. 禁止编造任何未在原始数据中提及的信息")
-        req_parts.append("3. 必须同时列出正面和负面事实，不能只说一面")
-        req_parts.append("4. 补充交叉验证分析（各维度是否共振/矛盾）")
-        req_parts.append("5. 数据不足的板块必须在板块内写一句「数据缺失：<字段>」，并在报告末尾用「数据缺口声明」统一汇总（缺什么 + 怎么补），不能跳过也不能编造")
-        # 术语边界（2026-09-22）：主动截断 ≠ 数据缺失。原始工具输出里若出现
-        # 「主动截断 / 已省略中间 N 字符」，说明数据**已取到**、只是未全量载入上下文，
-        # 应标为「主动截断（可补取）」；只有工具返回错误/空结果才叫「数据缺失」。
-        # 实测踩过：把「省略日K中段 24,735 字符」错写成「周K/月K 数据缺失（数据源截断）」。
-        req_parts.append(
-            "6. 术语区分（不得混淆）：**主动截断**（输出过长、数据已被工具取到但未全量载入上下文，"
-            "原文标有「主动截断」「已省略中间 N 字符」）必须写成「主动截断（可补取）」，"
-            "**不得**写成「数据缺失」；只有工具**明确返回错误/空结果/接口失败**才算「数据缺失」。"
-            "也不得由某段被截断推断其它周期/字段缺失"
-        )
-
-        framework = template.get("analysis_framework")
-        if framework:
-            req_parts.append("\n## 分析判读框架（拿到数据后按此逻辑判断，报告结论必须体现这些判读逻辑）")
-            if framework.get("summary"):
-                req_parts.append(f"- {framework['summary']}")
-            for rule in framework.get("rules", []):
-                req_parts.append(f"- {rule}")
-
-        cross_checks = template.get("cross_checks", [])
-        if cross_checks:
-            req_parts.append("\n## 交叉验证要求（综合研判板块必须包含）")
-            for check in cross_checks:
-                req_parts.append(f"- {check.get('rule', '')}")
-
-        report_fmt = template.get("report_format", {})
-        if report_fmt:
-            req_parts.append("\n## 格式规范")
-            for key, rule in report_fmt.items():
-                req_parts.append(f"- {rule}")
-
-        qa_rules = template.get("qa_rules", [])
-        if qa_rules:
-            req_parts.append("\n## 质量门禁")
-            for rule in qa_rules:
-                req_parts.append(f"- {rule}")
-
-        # user[0]: 分析任务说明
-        # user[1]: 原始工具数据（tool evidence，独立消息）
-        # ai[*]: 各 step 结果（PDOR 模式）或 user[2]: raw_result（ReAct 模式）
-        # user[最后]: 补充结构化数据 + 时间框架 + 用户问题
         if step_results:
-            task_desc = (
-                "## 分析任务\n"
+            head.append(
+                "## 本次任务\n"
                 "以下是多个步骤的分析结果，每个步骤侧重不同维度。"
-                "请综合所有步骤的信息，按标准结构重新组织为一份完整报告。\n"
+                "请综合所有步骤的信息，按上述标准结构重新组织为一份完整报告。\n"
                 "**禁止直接复制任何一个步骤的报告，必须合并所有步骤的增量信息。**"
             )
         else:
-            task_desc = "## 分析任务\n请将以下原始工具数据和已有分析报告重新组织为标准结构。"
-        messages = [
-            ("system", "\n".join(sys_parts)),
-            ("system", "\n".join(req_parts)),
-            ("user", task_desc),
-        ]
+            head.append(
+                "## 本次任务\n"
+                "请基于原始工具数据和已有分析报告，按上述标准结构重新组织为完整报告。"
+            )
+        head.append(
+            "注意：本条系统消息里的「报告结构」是本模板的**完整**结构，"
+            "即使本轮某板块无数据也要保留其位置（按核心要求第 5 条写缺失标注）。"
+        )
+    else:
+        head.append("## 本次任务\n请按照上述模板结构生成分析报告。")
 
+    head.append(
+        f"## 时间框架\n当前分析框架：{horizon_config.get('label', '短线')}"
+        f"（{horizon_config.get('description', '')}）"
+    )
+
+    skipped_note = _skipped_sections_note(template)
+    messages = [
+        ("system", build_shared_system(template)),
+        ("user", "\n\n".join(head) + skipped_note),
+    ]
+
+    if has_rich_raw:
+        # user[1]: 原始工具数据（独立消息，便于下钻聚焦）
         if tool_evidence:
             messages.append(("user", f"## 原始工具数据（所有结论必须基于此）\n{tool_evidence}"))
 
         # PDOR 模式：每个 step 结果作为独立 AI message
         if step_results:
             for sr in step_results:
-                step_num = sr.get("step", "?")
-                skill = sr.get("skill", "")
-                purpose = sr.get("purpose", "")
-                result = sr.get("result", "")
-                messages.append(("ai", f"### Step {step_num} [{skill}]: {purpose}\n{result}"))
+                messages.append(("ai", (
+                    f"### Step {sr.get('step', '?')} [{sr.get('skill', '')}]: "
+                    f"{sr.get('purpose', '')}\n{sr.get('result', '')}"
+                )))
         elif not (raw_result_is_seed and tool_evidence):
             # 注入 raw_result 作为原始素材。
             # 唯一的例外：agent_group 传 raw_result_is_seed=True —— 它的 raw_result
@@ -772,125 +1318,43 @@ def _build_prompt(template: dict, slot_results: dict, user_input: str,
             # 2026-10-01 事故：原实现 `if step_results / else raw_result` 使 group 恒拿不到底版。
             messages.append(("user", f"## 原始素材（优先引用，所有结论必须基于此）\n{raw_result}"))
 
-        extra_slots = []
-        for slot_name, sr in slot_results.items():
-            if isinstance(sr, SlotResult) and sr.interpretation:
-                extra_slots.append(f"- {slot_name}: {sr.interpretation}")
-
-        final_parts = []
+        extra_slots = [f"- {k}: {v.interpretation}" for k, v in slot_results.items()
+                       if isinstance(v, SlotResult) and v.interpretation]
+        tail = []
         if extra_slots:
-            final_parts.append("## 补充结构化数据\n" + "\n".join(extra_slots))
-        final_parts.append(f"## 时间框架\n{horizon_config.get('label', '短线')}（{horizon_config.get('description', '')}）")
-        final_parts.append(f"## 用户问题\n{user_input}")
-        messages.append(("user", "\n\n".join(final_parts)))
-
+            tail.append("## 补充结构化数据\n" + "\n".join(extra_slots))
+        tail.append(f"## 用户问题\n{user_input}")
+        messages.append(("user", "\n\n".join(tail)))
         return messages
 
-    else:
-        # ── 系统消息：角色 + 稳定模板内容（最大化缓存前缀命中） ──
-        _min_tok = _min_report_tokens(template)
-        _max_w = _max_report_words(template)
-        if _min_tok > 0:
-            _len_line = f"- 全文目标 {_min_tok} token 级别即可，不追求越长越好，禁止为凑篇幅注水。\n- 优先把篇幅给「核心结论」「行动方案」：结论要方向+价位，行动要触发条件+失效条件。\n- 表格/矩阵/条件树只在能承载判断时使用，禁止为版式新增空洞表格或重复风险提示。\n- 关键结论必须结构化，禁止用大段纯文字硬堆。"
-            if _max_w:
-                _len_line += f"\n- 全文不超过 {_max_w} 字，超过即为注水。"
-            sys_parts = [
-                role,
-                f"\n## 长文与版式要求\n{_len_line}",
-            ]
-        else:
-            # 轻量模板（min_report_tokens=0）：反向要求——短就是对的
-            sys_parts = [
-                role,
-                "\n## 篇幅要求（重要）\n"
-                "- **简洁优先**：只输出用户明确要求的内容。能用一行表格或一句话说清，就绝不分节展开。\n"
-                "- **禁止补充用户没要的板块**：分析、建议、候选排序、仓位、交易纪律、投资视角、"
-                "风险矩阵、小白版翻译等一律不写。\n"
-                "- 必须标注数据口径（具体交易日 / 数据源），取不到就写「数据缺失：<字段>」。",
-            ]
+    # ── 插槽模式：各板块数据放 user 侧（slot 状态本就在 user，原实现已如此）──
+    parts = ["## 分析任务\n请按照上述模板结构生成分析报告。"]
+    if tool_evidence:
+        parts.append(f"## 原始工具数据\n{tool_evidence}")
 
-        # 输出结构（稳定模板内容，放入系统消息）
-        sys_parts.append("\n## 报告结构")
-        for section in template.get("sections", []):
-            if section.get("_status", "ok") == "skip":
+    for section in template.get("sections", []):
+        status = section.get("_status", "ok")
+        if status == "skip":
+            continue
+        section_lines = []
+        if status in ("degraded", "partial"):
+            section_lines.append(f"注意：{section.get('_note', '')}")
+        for slot_name in section.get("data_slots", []):
+            sr = slot_results.get(slot_name)
+            if not sr or not isinstance(sr, SlotResult):
                 continue
-            sys_parts.append(f"\n### {section['title']}")
-            sys_parts.append(f"要求：{section['prompt']}")
-            if section.get("max_words"):
-                sys_parts.append(f"字数限制：{section['max_words']}字以内")
-            if not section.get("required", False):
-                # 2026-09-21 口径收敛（与上面 req_parts / template_store 同一口径）：
-                # 缺失只在本板块留一句最短标注，缺什么与怎么补统一进末尾「数据缺口声明」。
-                sys_parts.append(
-                    "数据不足时本板块只写一句「数据缺失：<字段>」，"
-                    "缺哪些字段与如何补齐统一放到报告末尾的「数据缺口声明」说明，"
-                    "禁止在本板块内重复罗列补齐方案"
-                )
+            if sr.method in ("json", "table", "regex", "derived"):
+                section_lines.append(f"- {slot_name}: {sr.interpretation}")
+            else:
+                section_lines.append(f"- {slot_name}: {json.dumps({'value': sr.value, 'status': sr.status, 'interpretation': sr.interpretation}, ensure_ascii=False)}")
+        if section_lines:
+            parts.append(f"\n### {section['title']} 数据\n" + "\n".join(section_lines))
 
-        # 交叉验证规则（稳定模板内容，放入系统消息）
-        cross_checks = template.get("cross_checks", [])
-        if cross_checks:
-            sys_parts.append("\n## 交叉验证规则（综合研判板块必须遵守）")
-            for check in cross_checks:
-                sys_parts.append(f"- {check.get('rule', '')}")
-
-        # 格式规范（稳定模板内容，放入系统消息）
-        report_fmt = template.get("report_format", {})
-        if report_fmt:
-            sys_parts.append("\n## 格式规范")
-            for key, rule in report_fmt.items():
-                sys_parts.append(f"- {rule}")
-
-        # QA 规则（稳定模板内容，放入系统消息）
-        _append_template_qa_rules(sys_parts, template)
-
-        # 分析判读框架（稳定模板内容，放入系统消息）
-        framework = template.get("analysis_framework")
-        if framework:
-            sys_parts.append("\n## 分析判读框架（拿到数据后按此逻辑判断，报告结论必须体现这些判读逻辑）")
-            if framework.get("summary"):
-                sys_parts.append(f"- {framework['summary']}")
-            for rule in framework.get("rules", []):
-                sys_parts.append(f"- {rule}")
-
-        sys_parts.append("\n## 合规要求\n- 数据不足的板块必须标注")
-
-        # ── 用户消息：动态数据（每次请求不同） ──
-        parts = [
-            "## 分析任务\n请按照以下模板结构生成分析报告。",
-            f"\n## 时间框架\n当前分析框架：{horizon_config.get('label', '短线')}（{horizon_config.get('description', '')}）",
-            f"\n## 用户问题\n{user_input}",
-        ]
-
-        if tool_evidence:
-            parts.append(f"\n## 原始工具数据\n{tool_evidence}")
-
-        # 各板块的动态数据（状态标注 + 插槽数据）
-        for section in template.get("sections", []):
-            status = section.get("_status", "ok")
-            if status == "skip":
-                continue
-
-            section_lines = []
-            if status == "degraded":
-                section_lines.append(f"注意：{section.get('_note', '数据不足')}")
-            elif status == "partial":
-                section_lines.append(f"注意：{section.get('_note', '')}")
-
-            for slot_name in section.get("data_slots", []):
-                sr = slot_results.get(slot_name)
-                if sr:
-                    if isinstance(sr, SlotResult):
-                        if sr.method in ("json", "table", "regex", "derived"):
-                            section_lines.append(f"- {slot_name}: {sr.interpretation}")
-                        else:
-                            section_lines.append(f"- {slot_name}: {json.dumps({'value': sr.value, 'status': sr.status, 'interpretation': sr.interpretation}, ensure_ascii=False)}")
-
-            if section_lines:
-                parts.append(f"\n### {section['title']} 数据\n" + "\n".join(section_lines))
-
-    return [("system", "\n".join(sys_parts)), ("user", "\n".join(parts))]
-
+    parts.append(f"\n## 用户问题\n{user_input}")
+    return [
+        ("system", build_shared_system(template)),
+        ("user", "\n\n".join(head) + skipped_note + "\n\n" + "\n\n".join(parts)),
+    ]
 
 def _normalize_heading(line: str) -> str:
     """归一化 markdown 标题行，去掉中文/阿拉伯序号前缀。

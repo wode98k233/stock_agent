@@ -3,7 +3,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +15,26 @@ from utils.app_paths import get_db_path
 _SQLITE_PARAM_CHUNK_SIZE = 500
 
 
+_UTC_NOW_LOCK = threading.Lock()
+_UTC_NOW_LAST: datetime | None = None
+
+
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """严格递增的 UTC ISO 时间戳（同一进程内）。
+
+    Windows 上 datetime.now() 的粒度约 15.6ms（实测连续 2000 次调用只产生 3 个不同值），
+    同一 tick 内连续落多条消息会拿到完全相同的 created_at，list_messages 的
+    「ORDER BY created_at ASC, id ASC」就退化为按 id 排：澄清问答后的最终回答
+    （复用开跑占位消息、完成时重新落 created_at）会被排到反问之前，历史顺序变成
+    问题→回答→反问→作答。这里保证单调递增，同 tick 内的先后仍由 id（写入顺序）决定。
+    """
+    global _UTC_NOW_LAST
+    with _UTC_NOW_LOCK:
+        now = datetime.now(timezone.utc)
+        if _UTC_NOW_LAST is not None and now <= _UTC_NOW_LAST:
+            now = _UTC_NOW_LAST + timedelta(microseconds=1)
+        _UTC_NOW_LAST = now
+    return now.isoformat()
 
 
 def make_uuid(prefix: str) -> str:
@@ -286,18 +304,19 @@ class WebStorage:
             diff_schema(self._conn, d.tables, d.special_migrations)
             self._conn.commit()
 
-    def create_dialog(self, title: str = "新对话", mode: str = "react_stock") -> dict[str, Any]:
+    def create_dialog(self, title: str = "新对话", mode: str = "react_stock", origin: str = "user") -> dict[str, Any]:
         now = utc_now()
         dialog_uuid = make_uuid("dlg")
         title = (title or "新对话").strip() or "新对话"
+        origin = (origin or "user").strip() or "user"
         with self._lock:
             conn = self._conn
             conn.execute(
                 """
-                INSERT INTO web_dialogs(dialog_uuid, title, current_mode, created_at, updated_at)
-                VALUES(?,?,?,?,?)
+                INSERT INTO web_dialogs(dialog_uuid, title, current_mode, origin, created_at, updated_at)
+                VALUES(?,?,?,?,?,?)
                 """,
-                (dialog_uuid, title, mode, now, now),
+                (dialog_uuid, title, mode, origin, now, now),
             )
             conn.commit()
         return self.get_dialog(dialog_uuid)
@@ -306,7 +325,7 @@ class WebStorage:
         with self._lock:
             conn = self._conn
             row = conn.execute(
-                "SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at FROM web_dialogs WHERE dialog_uuid=?",
+                "SELECT dialog_uuid,title,current_mode,title_auto,origin,created_at,updated_at FROM web_dialogs WHERE dialog_uuid=?",
                 (dialog_uuid,),
             ).fetchone()
         return dict(row) if row else None
@@ -316,7 +335,7 @@ class WebStorage:
             conn = self._conn
             rows = conn.execute(
                 """
-                SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at
+                SELECT dialog_uuid,title,current_mode,title_auto,origin,created_at,updated_at
                 FROM web_dialogs
                 ORDER BY updated_at DESC
                 LIMIT ?
@@ -331,7 +350,7 @@ class WebStorage:
             conn = self._conn
             rows = conn.execute(
                 """
-                SELECT dialog_uuid,title,current_mode,title_auto,created_at,updated_at
+                SELECT dialog_uuid,title,current_mode,title_auto,origin,created_at,updated_at
                 FROM web_dialogs
                 WHERE created_at>=? AND created_at<?
                 ORDER BY created_at DESC
@@ -385,6 +404,7 @@ class WebStorage:
         trace_run_id: str | None = None,
         error: str | None = None,
         extra: str | None = None,
+        attachments: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         message_uuid = make_uuid("msg")
@@ -394,9 +414,10 @@ class WebStorage:
                 """
                 INSERT INTO web_messages(
                     message_uuid, dialog_uuid, role, content, status, mode, task_id,
-                    log_uuid, log_file, trace_run_id, error, extra, created_at, updated_at
+                    log_uuid, log_file, trace_run_id, error, extra, attachments,
+                    created_at, updated_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     message_uuid,
@@ -411,6 +432,7 @@ class WebStorage:
                     trace_run_id,
                     error,
                     extra,
+                    attachments,
                     now,
                     now,
                 ),
@@ -424,7 +446,7 @@ class WebStorage:
             row = conn.execute(
                 """
                 SELECT message_uuid,dialog_uuid,role,content,status,mode,task_id,
-                       log_uuid,log_file,trace_run_id,error,extra,created_at,updated_at
+                       log_uuid,log_file,trace_run_id,error,extra,attachments,created_at,updated_at
                 FROM web_messages
                 WHERE message_uuid=?
                 """,
@@ -438,7 +460,7 @@ class WebStorage:
             rows = conn.execute(
                 """
                 SELECT message_uuid,dialog_uuid,role,content,status,mode,task_id,
-                       log_uuid,log_file,trace_run_id,error,extra,created_at,updated_at
+                       log_uuid,log_file,trace_run_id,error,extra,attachments,created_at,updated_at
                 FROM web_messages
                 WHERE dialog_uuid=?
                 ORDER BY created_at ASC, id ASC
@@ -1148,3 +1170,103 @@ class PortfolioStorage:
             "eastmoney_etf_count": etf_rows["c"] if etf_rows else 0,
             "source_counts": source_counts,
         }
+
+    # ── 账户历史快照（ADR-008）──────────────────────────────────────────────
+
+    def save_daily_snapshot(self, view: dict[str, Any], source: str = "open",
+                            on_date: str | None = None) -> dict[str, Any] | None:
+        """把一次持仓视图落成当日快照（同日多次调用按 upsert 覆盖）。
+
+        view 是 ``build_positions_view`` 的返回；没有持仓时直接返回 None，不写空行。
+        覆盖而不是「当天只写一次」：用户不总在收盘时在线，越晚写越接近日终。
+        """
+        items = [p for p in (view.get("items") or []) if (p.get("qty") or 0) > 0]
+        if not items:
+            return None
+        account = view.get("account") or {}
+        summary = view.get("summary") or {}
+        now = datetime.now()
+        day = on_date or now.strftime("%Y-%m-%d")
+        stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        mv_total = sum((p.get("market_value") or 0) for p in items)
+        total_asset = account.get("total_asset")
+        if total_asset is None:
+            # 没有东财账户缓存时退化为「持仓市值 + 可用资金」
+            total_asset = mv_total + (account.get("avail_cash") or 0)
+        today_pnl = account.get("today_pnl")
+        if today_pnl is None:
+            today_pnl = summary.get("today_pnl")
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO portfolio_snapshot (snapshot_date, total_asset, avail_cash,"
+                " positions_market_value, today_pnl, realized_pnl, position_count,"
+                " recorded_at, source, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(snapshot_date) DO UPDATE SET"
+                "   total_asset=excluded.total_asset,"
+                "   avail_cash=excluded.avail_cash,"
+                "   positions_market_value=excluded.positions_market_value,"
+                "   today_pnl=excluded.today_pnl,"
+                "   realized_pnl=excluded.realized_pnl,"
+                "   position_count=excluded.position_count,"
+                "   recorded_at=excluded.recorded_at,"
+                "   source=excluded.source,"
+                "   updated_at=excluded.updated_at",
+                (day, total_asset, account.get("avail_cash"), mv_total, today_pnl,
+                 summary.get("realized_pnl"), len(items), stamp, source, stamp, stamp))
+            self._conn.execute(
+                "DELETE FROM portfolio_snapshot_position WHERE snapshot_date=?", (day,))
+            self._conn.executemany(
+                "INSERT INTO portfolio_snapshot_position (snapshot_date, stock_code,"
+                " stock_name, market, qty, avg_cost, price, market_value, pnl, pnl_pct,"
+                " etf_flag) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(day, p.get("stock_code"), p.get("stock_name"), p.get("market") or "cn",
+                  p.get("qty"), p.get("avg_cost"), p.get("price"), p.get("market_value"),
+                  p.get("float_pnl"), p.get("float_pnl_pct"), 1 if p.get("etf_flag") else 0)
+                 for p in items])
+            self._conn.commit()
+        return {"snapshot_date": day, "recorded_at": stamp, "position_count": len(items)}
+
+    def list_snapshots(self, days: int = 180) -> list[dict[str, Any]]:
+        """按日期升序返回账户快照，附带当日涨跌幅（相对上一交易日总资产）。"""
+        days = max(1, min(int(days or 180), 3650))
+        with self._lock:
+            rows = [dict(r) for r in self._conn.execute(
+                "SELECT snapshot_date, total_asset, avail_cash, positions_market_value,"
+                " today_pnl, realized_pnl, position_count, recorded_at, source"
+                " FROM portfolio_snapshot ORDER BY snapshot_date DESC LIMIT ?", (days,))]
+        rows.reverse()
+        out = []
+        prev = None
+        for r in rows:
+            chg = None
+            ta = r.get("total_asset")
+            if prev and prev > 0 and ta is not None:
+                chg = (ta - prev) / prev
+            out.append({**r, "chg_pct": chg})
+            if ta is not None:
+                prev = ta
+        return out
+
+    def snapshot_positions(self, day: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT stock_code, stock_name, market, qty, avg_cost, price,"
+                " market_value, pnl, pnl_pct, etf_flag"
+                " FROM portfolio_snapshot_position WHERE snapshot_date=?"
+                " ORDER BY market_value DESC", (day,))]
+
+    def snapshot_positions_range(self, days: int = 90) -> list[dict[str, Any]]:
+        """区间内所有持仓明细（构成流用，一次拿完避免逐天请求）。"""
+        days = max(1, min(int(days or 90), 3650))
+        with self._lock:
+            rows = [dict(r) for r in self._conn.execute(
+                "SELECT p.snapshot_date, p.stock_code, p.stock_name, p.market_value,"
+                " p.qty, p.etf_flag FROM portfolio_snapshot_position p"
+                " JOIN (SELECT snapshot_date FROM portfolio_snapshot"
+                "       ORDER BY snapshot_date DESC LIMIT ?) s"
+                "   ON s.snapshot_date = p.snapshot_date"
+                " ORDER BY p.snapshot_date, p.market_value DESC", (days,))]
+        return rows

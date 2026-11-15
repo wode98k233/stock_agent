@@ -1,0 +1,35 @@
+/* 引擎能力清单面板 —— 颜色走 variables.css，不硬编码 */
+.cap-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0; pointer-events: none;
+  transition: opacity .18s ease; z-index: 110; }
+.cap-overlay.open { opacity: 1; pointer-events: auto; }
+.cap-panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(920px, 94vw);
+  background: var(--bg, #fff); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,.12);
+  transform: translateX(102%); transition: transform .2s ease; z-index: 111; display: flex; flex-direction: column; }
+.cap-panel.open { transform: translateX(0); }
+.cap-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.cap-title { font-weight: 600; color: var(--text); }
+.cap-title span { font-size: 12px; color: var(--muted); font-weight: 500; }
+.cap-head-actions { display: flex; gap: 8px; }
+.cap-body { flex: 1; overflow: auto; padding: 14px 16px 40px; }
+.cap-section { margin-bottom: 20px; }
+.cap-section-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.cap-section-desc { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.cap-kv { font-size: 12px; color: var(--text-secondary); line-height: 1.8; margin-bottom: 2px; word-break: break-all; }
+.cap-ul { margin: 2px 0 2px 18px; }
+.cap-empty { font-size: 12px; color: var(--muted); padding: 8px 0; }
+.cap-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--detail-bg, #fafafa); }
+.cap-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.cap-badge { font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
+.cap-badge.approved { color: var(--brand); border-color: var(--brand); }
+.cap-badge.rejected { color: var(--danger, #c0392b); }
+.cap-mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--muted); }
+.cap-actions { display: flex; gap: 8px; margin-top: 8px; }
+.cap-btn { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--detail-bg, #fff); color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.cap-btn:hover { border-color: var(--brand); color: var(--brand); }
+.cap-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.cap-msg { font-size: 12px; padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; line-height: 1.7; }
+.cap-msg-info { background: var(--detail-bg, #f6f7f8); color: var(--text-secondary); }
+.cap-msg-ok { background: var(--brand-bg-light, #f0faf2); color: var(--brand-strong, var(--brand)); }
+.cap-msg-error { background: var(--danger-bg, rgba(220,53,69,.12)); color: var(--danger, #c0392b); }

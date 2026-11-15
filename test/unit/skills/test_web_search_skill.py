@@ -1,9 +1,10 @@
-"""`web_search` 核心技能 单元测试（2026-10-04 新增）。
+"""`web_search` 核心技能 单元测试（2026-10-04 新增，2026-10-18 扩到两个工具）。
 
-技能把 `tools/search/service.py` 的通用网搜能力暴露为独立工具。本测试锁住：
-1. 技能目录结构被正确识别（`build_tools` 存在，工具名 = `web_search`）；
-2. 工具**委托给服务层**（不得绕过 `service.run_web_search` 自行装配）；
-3. 参数（`max_results` / `days`）正确透传；
+技能把 `tools/search/service.py` 的通用网搜能力与 `tools/search/deepseek_fetch.py`
+的抓取能力暴露为两个工具。本测试锁住：
+1. 技能目录结构被正确识别（`build_tools` 存在，工具 = `web_search` + `web_fetch`）；
+2. 工具**委托给服务层**（不得绕过 `service.run_web_search` / `deepseek_fetch.fetch_web_page` 自行实现）；
+3. 参数（`max_results` / `days` / `max_chars`）正确透传；
 4. 已登记在 `agents/report_templates/index.json::skills` 且启用。
 """
 import importlib.util
@@ -27,6 +28,14 @@ def _make_skill():
     return _load_skill_module().WebSearchSkill(logging.getLogger("test-web-search"))
 
 
+def _tool(name):
+    """按名字取工具（`build_langchain_tools` 按名排序，不能靠下标）。"""
+    for t in _make_skill().build_langchain_tools():
+        if t.name == name:
+            return t
+    raise AssertionError(f"技能没暴露 {name}")
+
+
 # ── ① 技能结构 ───────────────────────────────────────────────
 
 def test_skill_files_exist():
@@ -34,15 +43,22 @@ def test_skill_files_exist():
     assert (_REPO_ROOT / "tools/skills/web_search/main.py").exists()
 
 
-def test_build_tools_exposes_single_web_search_tool():
-    tools = _make_skill().build_langchain_tools()
-    assert [t.name for t in tools] == ["web_search"]
+def test_build_tools_exposes_search_and_fetch():
+    """联网检索技能 = 搜索（给摘要）+ 抓取（给原文），两个工具成对出现。"""
+    names = sorted(t.name for t in _make_skill().build_langchain_tools())
+    assert names == ["web_fetch", "web_search"]
 
 
 def test_tool_docstring_documents_params():
     """LangChain 用 docstring 生成工具描述，参数必须写清楚（否则 LLM 不会传）。"""
     doc = _make_skill().web_search.__doc__ or ""
     for token in ("query", "max_results", "days"):
+        assert token in doc, f"docstring 缺少参数说明: {token}"
+
+
+def test_fetch_docstring_documents_params():
+    doc = _make_skill().web_fetch.__doc__ or ""
+    for token in ("url", "max_chars"):
         assert token in doc, f"docstring 缺少参数说明: {token}"
 
 
@@ -91,10 +107,37 @@ def test_tool_invocation_returns_json_string(monkeypatch):
                         {"query": query, "success": True, "result_count": 1,
                          "results": [{"title": "T"}], "provider": "MX"})
 
-    tool = _make_skill().build_langchain_tools()[0]
-    raw = tool.invoke({"query": "白酒 动销", "max_results": 2, "days": 7})
+    raw = _tool("web_search").invoke({"query": "白酒 动销", "max_results": 2, "days": 7})
     payload = json.loads(raw)
     assert payload["result_count"] == 1
+
+
+# ── ②b 抓取工具委托给 Fetch 层 ───────────────────────────────
+
+def test_web_fetch_delegates_to_loader(monkeypatch):
+    calls = {}
+    import tools.search.deepseek_fetch as fetch_mod
+
+    def _fake_fetch(url, max_chars=None, api_key=None):
+        calls.update(url=url, max_chars=max_chars)
+        return {"url": url, "success": True, "title": "T", "content": "正文",
+                "char_count": 2, "truncated": False, "billed": True}
+
+    monkeypatch.setattr(fetch_mod, "fetch_web_page", _fake_fetch)
+    payload = json.loads(_make_skill().web_fetch("https://example.com/a", 1200))
+
+    assert payload["success"] is True and payload["content"] == "正文"
+    assert calls == {"url": "https://example.com/a", "max_chars": 1200}
+
+
+def test_web_fetch_via_langchain_entry(monkeypatch):
+    import tools.search.deepseek_fetch as fetch_mod
+
+    monkeypatch.setattr(fetch_mod, "fetch_web_page",
+                        lambda url, max_chars=None, api_key=None:
+                        {"url": url, "success": True, "content": "x", "billed": False})
+    payload = json.loads(_tool("web_fetch").invoke({"url": "https://example.com/b"}))
+    assert payload["url"] == "https://example.com/b"
 
 
 # ── ③ 注册与启用 ─────────────────────────────────────────────

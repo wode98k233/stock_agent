@@ -108,23 +108,32 @@ async def _execute_agent(user_input: str, ctx: CLIContext) -> CommandResult:
             register=ctx.skill_register,
         )
 
-        response = await agent.run(
-            user_input,
-            registry,
-            ctx.memory,
-            logger,
-            progress_callback=progress_callback,
+        # 策略会话闸门（模式无关）：命中则本轮不进任何模式的图（设计文档 §5.1）
+        from agents.shared.strategy_gate import intercept_strategy_turn
+        _gate = await intercept_strategy_turn(
+            user_input=user_input, dialog_uuid="local", mode=ctx.agent_mode,
+            progress_callback=progress_callback, logger=logger, memory=ctx.memory,
         )
-
-        # 场景模式 fallback
-        if not response and ctx.agent_mode == "scenario":
-            agent = AgentFactory.get("react_stock")
+        if _gate is not None:
+            response = _gate
+        else:
             response = await agent.run(
-                user_input, registry, ctx.memory, logger,
+                user_input,
+                registry,
+                ctx.memory,
+                logger,
                 progress_callback=progress_callback,
             )
-            if response:
-                ctx.agent_mode = "react_stock"
+
+            # 场景模式 fallback
+            if not response and ctx.agent_mode == "scenario":
+                agent = AgentFactory.get("react_stock")
+                response = await agent.run(
+                    user_input, registry, ctx.memory, logger,
+                    progress_callback=progress_callback,
+                )
+                if response:
+                    ctx.agent_mode = "react_stock"
 
         # 记忆归档
         if response:

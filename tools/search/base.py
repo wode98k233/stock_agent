@@ -45,6 +45,11 @@ class SearchResponse:
     success: bool = True
     error_message: Optional[str] = None
     search_time: float = 0.0
+    # 本次搜索是否让**上游按次计费**（目前只有 DeepSeek 官方搜索是这样）。
+    # 非空 = 已计费，值是价目 `services` 段的键（如 "deepseek-search"）。
+    # ⚠️ 由 provider 自己声明、聚合器原样透传，工具节点据此回填成本（见 tools/search/billing.py）。
+    # 免 Key 源（MX/Parallel/Exa/SearXNG）永远留空 —— 它们不按次收费。
+    billed_service: str = ""
 
     def to_dicts(self) -> List[dict]:
         return [r.to_dict() for r in self.results]

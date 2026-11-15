@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from config import Config
@@ -14,6 +15,10 @@ from server.storage import WebStorage
 from memory.sdk import MemorySDK, MemoryConfig, _build_embedding_fn, set_sdk
 
 _logger = logging.getLogger(__name__)
+
+# 进程启动时刻（模块导入即进程启动）：长报告中断清理用它区分「本进程仍在跑」与
+# 「上个进程遗留」。不能用扫描时刻，否则会把清理前刚启动的报告误判为中断。
+_PROCESS_STARTED_AT = datetime.now()
 
 # 启动期 embedding 冷启动最长等待秒数（Ollama 首次拉起 bge-m3 约 1~2 分钟）。
 # 超过此值则降级为纯 FTS5，避免冷启动失败时永久阻塞对话。
@@ -185,8 +190,10 @@ def _schedule_market_dashboard_prewarm():
     async def _prewarm():
         await asyncio.sleep(5)
         try:
-            from server import market_dashboard_service as svc
-            await asyncio.to_thread(svc.build_snapshot)
+            # 走路由的 warm_snapshot：它会把结果写进路由侧快照缓存，
+            # 用户第一次打开页面就是缓存命中（秒开），而不是再同步跑一遍。
+            from server.routes.market_dashboard import warm_snapshot
+            await asyncio.to_thread(warm_snapshot)
             _logger.info("[MarketDashboard] 快照预热完成")
         except Exception:
             _logger.warning("[MarketDashboard] 快照预热失败（忽略，前端会自行加载）", exc_info=True)
@@ -247,6 +254,18 @@ def bootstrap_web() -> WebAppState:
             _logger.warning("[Backtest] 清理中断回测失败: %s", e)
     threading.Thread(target=_cleanup_interrupted_runs, daemon=True,
                      name="backtest-interrupted-cleanup").start()
+    # 清理重启前未收尾的长报告：上个进程被杀 → status 永远停在 writing（任务列表
+    # 一直显示「(未命名) writing 0/0」）。幂等、只跑一次，放后台线程不占启动关键路径。
+    def _cleanup_interrupted_deep_reports():
+        try:
+            from server.deep_report_service import cleanup_interrupted_reports_once
+            count = cleanup_interrupted_reports_once(process_started_at=_PROCESS_STARTED_AT)
+            if count:
+                _logger.info("[DeepReport] 清理中断报告: %s 份 → partial", count)
+        except Exception as e:
+            _logger.warning("[DeepReport] 清理中断报告失败: %s", e)
+    threading.Thread(target=_cleanup_interrupted_deep_reports, daemon=True,
+                     name="deep-report-interrupted-cleanup").start()
     runtime = TaskRuntime()
     agent_context = WebAgentContext(
         skill_register=result.skill_register,

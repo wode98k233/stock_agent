@@ -1,0 +1,151 @@
+/* 定价目录编辑器（成本 / 计价）—— 颜色一律走 variables.css，不硬编码 */
+.pc-open-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  flex-wrap: wrap;
+}
+.pc-open-hint { font-size: 12px; color: var(--muted); }
+.pc-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+  /* ⚠️ 必须高于配置面板（.config-panel 是 100）：本面板是从配置面板里打开的，
+     否则会被它整块盖住（真机实测：截出来全是配置面板）。 */
+  z-index: 110;
+}
+.pc-overlay.open { opacity: 1; pointer-events: auto; }
+
+.pc-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: min(1080px, 94vw);
+  background: var(--bg, #fff);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  transform: translateX(102%);
+  transition: transform 0.2s ease;
+  z-index: 111;
+  display: flex;
+  flex-direction: column;
+}
+.pc-panel.open { transform: translateX(0); }
+
+.pc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.pc-title { font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.pc-title span { font-size: 12px; font-weight: 500; color: var(--muted); }
+.pc-head-actions { display: flex; gap: 8px; align-items: center; }
+
+.pc-body { flex: 1; overflow: auto; padding: 14px 16px 40px; }
+.pc-section { margin-bottom: 22px; }
+.pc-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pc-section-desc { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+.pc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pc-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.pc-table td { padding: 3px 6px; border-bottom: 1px solid var(--border-light, var(--border)); vertical-align: middle; }
+.pc-table tr.pc-expired td { background: var(--warn-bg, rgba(214, 158, 46, 0.12)); }
+.pc-actions { white-space: nowrap; }
+
+.pc-in {
+  width: 100%;
+  min-width: 64px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--detail-bg, #fff);
+  color: var(--text);
+  font-size: 12px;
+}
+.pc-in:disabled { opacity: 0.5; }
+.pc-table td .pc-in[type="number"] { min-width: 78px; }
+
+.pc-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--detail-bg, #fff);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pc-btn:hover { border-color: var(--brand); color: var(--brand); }
+.pc-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.pc-btn.primary:hover { background: var(--brand-hover, var(--brand)); color: #fff; }
+
+.pc-model-block { margin-bottom: 16px; }
+/* 模型 key / 别名两列要看得全（真机截图里 key 被截成 deepseek-v4.1） */
+.pc-model-block .pc-table td:first-child { min-width: 150px; }
+.pc-model-block .pc-table td:nth-child(2) { min-width: 168px; }
+.pc-model-head { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.pc-model-name { font-weight: 600; font-size: 13px; color: var(--text); }
+.pc-model-billing { font-size: 11px; color: var(--muted); }
+.pc-hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+.pc-empty { font-size: 12px; color: var(--muted); padding: 8px 6px; }
+
+/* 按次计费服务（Search / Fetch）：计费示例列现算 1 次 / 100 次 —
+   ⚠️ 它是个 <td>，必须清掉 .pc-hint 的上边距，否则整行被顶下去。 */
+.pc-svcdemo { margin-top: 0; white-space: nowrap; }
+#pcServices .pc-table td .pc-in[type="number"] { min-width: 96px; }
+#pcServices code { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary); }
+
+.pc-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+.pc-row > label { width: 92px; color: var(--text-secondary); flex-shrink: 0; }
+.pc-row .pc-in { width: 140px; }
+.pc-weekdays { display: flex; gap: 8px; }
+.pc-wd { display: inline-flex; align-items: center; gap: 3px; color: var(--text-secondary); }
+.pc-windows { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pc-win { display: inline-flex; align-items: center; gap: 4px; }
+.pc-win .pc-in { width: 74px; }
+
+.pc-msg { font-size: 12px; padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; line-height: 1.7; }
+.pc-msg ul { margin: 4px 0 0 16px; }
+.pc-msg-info { background: var(--detail-bg, #f6f7f8); color: var(--text-secondary); }
+.pc-msg-ok { background: var(--brand-bg-light, #f0faf2); color: var(--brand-strong, var(--brand)); }
+.pc-msg-warn { background: var(--warn-bg, rgba(214, 158, 46, 0.14)); color: var(--text-secondary); }
+.pc-msg-error { background: var(--danger-bg, rgba(220, 53, 69, 0.12)); color: var(--danger, #c0392b); }
+
+.pc-trial {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: var(--detail-bg, #fafafa);
+}
+.pc-trial-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.pc-trial-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg, #fff); }
+.pc-trial-title { font-size: 11px; color: var(--muted); }
+.pc-trial-money { font-size: 18px; font-weight: 600; color: var(--brand); margin: 2px 0; }
+.pc-trial-sub { font-size: 11px; color: var(--text-secondary); }

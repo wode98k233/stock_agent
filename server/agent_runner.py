@@ -53,6 +53,8 @@ class WebAgentContext:
     def _replay_history(memory, dialog_uuid: str, storage):
         if not memory.enabled:
             return
+        from utils.memory import strip_history_markers
+
         msgs = storage.list_messages(dialog_uuid)
         # 排除最后一条 user 消息（当前轮，会由 classify_input 单独添加）
         if msgs and msgs[-1]["role"] == "user":
@@ -67,7 +69,9 @@ class WebAgentContext:
                 and message.get("content")
                 and message.get("status") == "completed"
             ):
-                memory.append_turn(pending_user, message["content"])
+                # 只保留报告正文：图表 UUID / 仪表盘 JSON 对模型无意义，重放会白烧 token
+                memory.append_turn(pending_user,
+                                   strip_history_markers(message["content"]))
                 pending_user = None
 
     def clear_memory(self, dialog_uuid: str):
@@ -111,9 +115,11 @@ def _archive_memory(context, user_input: str, response: str,
         if sdk is None:
             logger.warning("[archive] SKIP: memory_sdk is None on context")
             return
+        from utils.memory import strip_history_markers
         current_dialog_uuid.set(str(dialog_uuid))
         current_session_id.set(str(dialog_uuid))  # 一个 dialog 就是一个 session
-        sdk.archive(user_input, response, None, logger=logger)
+        # 长期记忆也不存图表/仪表盘标记：检索回注时同样会白烧 token
+        sdk.archive(user_input, strip_history_markers(response), None, logger=logger)
         logger.info(f"[archive] OK: backend={sdk.backend.name()} count={sdk.backend.count()} query={user_input[:50]}")
     except Exception as e:
         logger.error(f"[archive] FAIL: {e}")
@@ -130,12 +136,32 @@ async def run_web_agent_query(
     budget_decision_callback: Optional[Callable[[dict], str]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     title_callback: Optional[Callable[[str], None]] = None,
+    trace_run_callback: Optional[Callable[[str], None]] = None,
     title_source: str = "",
+    turn_type: str = "auto",
 ) -> AgentRunResult:
     logger, log_uuid, budget_ctx, log_file = get_logger(user_input)
+    # 直接调用方（测试/CLI）可能传 None 或大小写混杂，先归一，避免闸门判断被空值绕过
+    turn_type = str(turn_type or "auto").strip().lower()
     _captured_trace_run_id: str | None = None
+    _trace_run_notified = False
 
     memory = context.get_memory(dialog_uuid, storage)
+
+    def _notify_trace_run() -> None:
+        """run 一建立就回传调用方（Web 层用它把 trace 轮询器绑定到本任务的 run）。
+
+        缺了这一步，轮询器只能猜「最近一条 running run」，会因库里陈旧 running 行
+        （进程被杀导致 end_run 未执行的残留）而把上一次/别的任务的执行过程推给前端。
+        """
+        nonlocal _trace_run_notified
+        if _trace_run_notified or not _captured_trace_run_id or trace_run_callback is None:
+            return
+        _trace_run_notified = True
+        try:
+            trace_run_callback(_captured_trace_run_id)
+        except Exception:
+            pass
 
     def _wrapped_callback(event: ProgressEvent):
         nonlocal _captured_trace_run_id
@@ -147,6 +173,7 @@ async def run_web_agent_query(
                     _captured_trace_run_id = recorder._root
             except Exception:
                 pass
+        _notify_trace_run()
         if progress_callback:
             progress_callback(event)
 
@@ -187,17 +214,50 @@ async def run_web_agent_query(
         except Exception:
             pass
 
-        agent = _get_agent_factory().get(mode)
-        agent.on_startup()
-        registry = SkillRegistry(logger, memory, context.skill_register)
-        response = await agent.run(
-            user_input,
-            registry,
-            memory,
-            logger,
-            progress_callback=_wrapped_callback,
-            dialog_uuid=dialog_uuid,
-        )
+        # 策略会话闸门（模式无关）：命中则本轮不进任何模式的图，由会话执行器接管
+        # 设计文档 §5.1：报告与策略是两种「轮次」，不是两个 agent。
+        # ⚠️ 「普通」是硬开关：用户选了普通就绝不进策略闸门，不能靠启发式识别把它
+        # 绑架成策略回测（2026-11-02 真机：问「现在该不该买」被送进池子回测）。
+        _gate = None
+        _is_strategy_turn = False
+        if turn_type != "chat":
+            from agents.shared.strategy_gate import intercept_strategy_turn
+            _gate = await intercept_strategy_turn(
+                user_input=user_input,
+                dialog_uuid=dialog_uuid,
+                mode=mode,
+                progress_callback=_wrapped_callback,
+                logger=logger,
+                memory=memory,
+                cancel_check=cancel_check,
+            )
+            _is_strategy_turn = _gate is not None
+        # C 批：策略执行器自建的 trace run_id（显式绑定，不是「猜最近 run」）。
+        # 取不到就留空——宁可这一轮没有过程记录，也不能挂到别的对话的 run 上。
+        _strategy_trace_run_id = ''
+        if _is_strategy_turn:
+            try:
+                from agents.shared.strategy_trace import last_turn_run_scope
+                _strategy_trace_run_id = str(last_turn_run_scope.get() or '')
+            except Exception:
+                pass
+        if _gate is not None:
+            response = _gate
+        else:
+            agent = _get_agent_factory().get(mode)
+            agent.on_startup()
+            registry = SkillRegistry(logger, memory, context.skill_register)
+            response = await agent.run(
+                user_input,
+                registry,
+                memory,
+                logger,
+                progress_callback=_wrapped_callback,
+                dialog_uuid=dialog_uuid,
+            )
+
+        # 兜底补发：极端情况下（一次进度事件都没有）run 建立后未被回传
+        _notify_trace_run()
 
         # 记忆归档：agent 执行完毕后写入语义+情景记忆
         _archive_memory(context, user_input, response, dialog_uuid, logger, budget_ctx)
@@ -207,7 +267,14 @@ async def run_web_agent_query(
             session_stats.accumulate(budget_ctx)
 
         from utils.agent_trace.db import find_latest_trace_run_id  # 函数内懒导入（避免拖慢启动）
-        trace_run_id = _captured_trace_run_id or find_latest_trace_run_id()
+        # ⚠️ 策略轮绝不能兜底去取「全库最新 run」：策略轮走会话闸门，本轮不跑 agent 图，
+        # find_latest_trace_run_id() 会命中**别的对话**的陈旧 run（分库跨月回退时尤其致命），
+        # 于是「执行过程」显示成上周的 43 节点周报，且那条 run 的 token 会被错记到本对话
+        # 名下、污染月历统计。C 批起策略执行器**自建并显式回传** run id，这里直接取。
+        if _is_strategy_turn:
+            trace_run_id = _strategy_trace_run_id
+        else:
+            trace_run_id = _captured_trace_run_id or find_latest_trace_run_id()
 
         # 转换为相对路径（相对于 logs 目录）
         relative_log_file = None

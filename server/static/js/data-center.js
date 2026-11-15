@@ -217,6 +217,22 @@
             <div class="dc-stat"><div class="label">回测记录</div><div class="value">${stats.backtest?.backtest_runs || 0}</div></div>`;
         }
 
+        // 回测数据就绪度（设计文档 §12）：文案口径由服务端 get_backtest_readiness 生成
+        const rdEl = document.getElementById('dcBacktestReadiness');
+        if (rdEl) {
+          const rd = stats.backtest_readiness || {};
+          if (!rd.runs && !rd.gap_tasks && !rd.gap_runs && !rd.refilled) {
+            rdEl.innerHTML = '';
+          } else {
+            rdEl.innerHTML =
+              '<div class="dc-readiness-line">' + this._esc(rd.hint || '') + '</div>'
+              + ((rd.gap_runs || 0) > 0
+                ? '<div class="dc-readiness-sub">其中 ' + rd.gap_runs
+                  + ' 次回测的体检结论是「数据有缺口」——这些结论要打折看</div>'
+                : '');
+          }
+        }
+
         // 数据库表概览
         const tablesEl = document.getElementById('dcTableOverview');
         if (tablesEl && stats.tables?.length > 0) {
@@ -357,7 +373,7 @@
         const tbody = document.getElementById('dcTaskList');
         if (!tbody) return;
         if (tasks.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">暂无采集任务</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px;">暂无采集任务</td></tr>';
           return;
         }
         tbody.innerHTML = tasks.map(t => {
@@ -369,6 +385,7 @@
           return `<tr data-task-id="${t.task_id}">
             <td><code style="font-family:var(--font-mono);font-size:12px">${t.task_id}</code></td>
             <td>${this._taskTypeName(t.task_type)}</td>
+            <td>${this._originLabel(t)}</td>
             <td><span class="dc-badge ${t.status}"><span class="dot"></span>${this._statusName(t.status)}</span></td>
             <td style="min-width:180px;"><div class="dc-task-progress" style="font-size:12px;color:var(--text-secondary)">${t.processed_count}/${t.total_count} · ${pct}%</div><div class="dc-progress"><div class="fill" style="width:${pct}%"></div></div></td>
             <td class="dc-task-detail" style="font-size:12px;color:var(--text-secondary)">${detail}</td>
@@ -436,6 +453,20 @@
       if (detailEl && task.status === 'running') {
         detailEl.textContent = `正在处理: ${task.current_code || ''} ${task.current_name || ''}`;
       }
+    }
+
+    _esc(s) {
+      // 本文件原本没有转义工具；「来源」列要拼 ref_id（任意字符）故补一个（Plan 4 任务 5 步骤 5.2）
+      return String(s == null ? '' : s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+    }
+
+    _originLabel(t) {
+      const o = t.origin || '';
+      if (o === 'backtest_gap') {
+        return '<span class="dc-origin gap" title="来自回测数据缺口：' + this._esc(t.ref_id || '') + '">回测补数</span>';
+      }
+      if (o === 'manual' || o === '') return '<span class="dc-origin">手动</span>';
+      return '<span class="dc-origin">' + this._esc(o) + '</span>';
     }
 
     _taskTypeName(type) {

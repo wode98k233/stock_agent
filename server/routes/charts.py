@@ -25,6 +25,13 @@ async def sync_kline_data_static(payload: KlineSyncRequest):
     return await sync_kline_data(payload)
 
 
+# 静态路径必须注册在 /api/chart/{chart_id} 之前，否则 "search" 会被当成 chart_id 匹配走。
+# 2026-11-04 实测：前端 K 线搜索框每次都弹「搜索失败，可直接回车按代码加载」——就是这里被遮蔽。
+@router.get("/api/chart/search")
+async def search_stock_static(keyword: str = Query(..., min_length=1, description="股票代码或名称")):
+    return await search_stock(keyword)
+
+
 # ============================================================
 # Chart Fragments（agent 报告图表片段，见 docs/superpowers/specs/2026-07-06-chart-fragments-design.md）
 # ============================================================
@@ -54,6 +61,65 @@ async def delete_chart_fragment(chart_id: str):
     with _chart_db() as conn:
         conn.execute("DELETE FROM chart_fragments WHERE id=?", (chart_id,))
     return {"ok": True}
+
+
+@router.get("/api/chart/ta/{code}")
+async def get_ta_annotations(
+    code: str,
+    days: int = Query(default=250, ge=60, le=1000, description="取多少根日线算标注（与 K 线图一致）"),
+    start_date: str = Query(default=None, description="自定义区间起点 YYYY-MM-DD（优先于 days）"),
+    end_date: str = Query(default=None, description="自定义区间终点 YYYY-MM-DD"),
+    adjust: str = Query(default="qfq", description="复权类型：必须与 K 线图一致，否则标注线会整体错位"),
+    market: str = Query(default=None, description="市场类型: INDEX 指数, BOARD 板块, 其他/空 个股"),
+):
+    """K 线技术面标注（算法生成的测量线，不是交易信号）。
+
+    八层：斐波那契回撤 / 通道 / 扇形、自动趋势线+楔形、支撑阻力带、
+    波段结构 HH·HL·LH·LL、线性回归通道 ±2σ、跳空缺口。
+
+    纯几何计算，全部基于本地日线；结果里带 ``based_on``（依据哪几个摆动点）
+    与 ``touches``（被几个点验证），前端据此标注"算法生成"。
+
+    复权口径必须与 ``/api/chart/kline`` 一致：图上蜡烛是前复权价，标注若用原始价，
+    线会凭空浮在蜡烛外面。返回 ``dates`` 与标注索引一一对应，前端按日期映射回
+    图上的 bar，窗口差一两根时也不会整层错位。
+
+    ``start_date``/``end_date`` 与 K 线图同源：用户自定义区间（如 6.29 至今）时，
+    标注必须在同一窗口上算，否则摆动点、趋势线都会跑到图外。
+    """
+    from tools.ta_annotations import build_annotations
+    from utils.cache.market_data_db import get_index_daily, get_stock_daily
+
+    is_index = market == "INDEX"
+    is_board = (not is_index) and (market == "BOARD" or str(code).startswith("board_"))
+    use_range = bool(start_date or end_date)
+
+    def _load() -> pd.DataFrame:
+        if is_index:
+            return get_index_daily(code, start_date=start_date, end_date=end_date)
+        if use_range:
+            df_local = get_stock_daily(code, start_date=start_date, end_date=end_date)
+        else:
+            df_local = get_stock_daily(code, limit=days)
+        if (df_local is None or df_local.empty) and not is_board:
+            return get_index_daily(code, start_date=start_date, end_date=end_date)
+        return df_local
+
+    df = await asyncio.to_thread(_load)
+    if df is None or df.empty:
+        return {"ok": False, "reason": f"本地无 {code} 的日线数据", "layers": {}}
+    if not use_range:
+        df = df.tail(days)
+    df = df.reset_index(drop=True)
+
+    if adjust != "none" and not is_index and not is_board:
+        df = _apply_adjust(df, code, adjust)
+
+    result = await asyncio.to_thread(build_annotations, df, None)
+    result["code"] = code
+    result["adjust"] = adjust
+    result["dates"] = [str(d) for d in df["trade_date"].tolist()]
+    return result
 
 
 @router.get("/api/chart/kline/{code}")
@@ -177,10 +243,11 @@ def _get_kline_sync(code: str, days: int, start_date: str, end_date: str, adjust
     for _, row in df.iterrows():
         kline_data.append({
             'date': row['trade_date'],
-            'open': round(float(row['open']), 2) if pd.notna(row['open']) else None,
-            'high': round(float(row['high']), 2) if pd.notna(row['high']) else None,
-            'low': round(float(row['low']), 2) if pd.notna(row['low']) else None,
-            'close': round(float(row['close']), 2) if pd.notna(row['close']) else None,
+            # 价格保留 4 位：ETF/低价股在 0.5~2 元区间，2 位小数会把均线压成台阶
+            'open': round(float(row['open']), 4) if pd.notna(row['open']) else None,
+            'high': round(float(row['high']), 4) if pd.notna(row['high']) else None,
+            'low': round(float(row['low']), 4) if pd.notna(row['low']) else None,
+            'close': round(float(row['close']), 4) if pd.notna(row['close']) else None,
             'volume': int(row['volume']) if pd.notna(row['volume']) else 0,
             'amount': round(float(row['amount']), 2) if pd.notna(row['amount']) else 0,
             'turnover_rate': round(float(row['turnover_rate']), 2) if pd.notna(row.get('turnover_rate')) else None,
@@ -275,40 +342,47 @@ def _maybe_refresh_board_kline(code: str, df) -> bool:
 
 
 def _apply_adjust(df: pd.DataFrame, code: str, adjust: str) -> pd.DataFrame:
-    """应用复权因子"""
+    """应用复权因子。
+
+    两个坑（2026-11-12 审计）：
+
+    1. 库里 ``stock_adjust_factor`` 历史上是空壳（只有 5 只票、因子全是 1.0），
+       qfq 等于不复权。这里先按需补齐（``utils/cache/adjust_factors.py``：
+       从腾讯 qfq/none 反推，并判定本地序列是原始价还是已经是前复权）。
+    2. 因子只覆盖部分日期时，左连接会让**同一条 K 线里部分 bar 复权、部分不复权**，
+       均线在中途断成两段。所以合并后前后向填充，再用「最新一根」归一到 1。
+    """
+    if df is None or df.empty:
+        return df
+
     from utils.cache.market_data_db import get_market_data_db
 
-    # 获取复权因子
+    df = df.sort_values("trade_date").reset_index(drop=True)
+
+    try:
+        from utils.cache.adjust_factors import ensure_factors
+        ensure_factors(code, df[["trade_date", "close"]])
+    except Exception:  # noqa: BLE001 - 因子反推失败不该让图打不开
+        pass
+
+    factor_col = "fore_adjust_factor" if adjust == "qfq" else "back_adjust_factor"
+
+    # 只取需要的因子列；区间之外的日期由 apply_factor_series 的 ffill/bfill 兜住
     with get_market_data_db() as conn:
-        dates = df['trade_date'].tolist()
-        placeholders = ','.join(['?'] * len(dates))
-        sql = f"""SELECT trade_date, fore_adjust_factor, back_adjust_factor
+        dates = df["trade_date"].astype(str).tolist()
+        placeholders = ",".join(["?"] * len(dates))
+        sql = f"""SELECT trade_date, {factor_col} AS factor
                   FROM stock_adjust_factor
                   WHERE code = ? AND trade_date IN ({placeholders})
                   ORDER BY trade_date"""
-        factor_df = pd.read_sql_query(sql, conn, params=[code] + dates)
+        factor_df = pd.read_sql_query(sql, conn, params=[str(code)] + dates)
 
-    if factor_df.empty:
+    if factor_df.empty or factor_df["factor"].notna().sum() == 0:
         return df
 
-    # 合并复权因子
-    df = df.merge(factor_df, on='trade_date', how='left')
+    from utils.cache.adjust_factors import apply_factor_series
 
-    # 选择复权因子
-    if adjust == "qfq":
-        factor_col = 'fore_adjust_factor'
-    else:  # hfq
-        factor_col = 'back_adjust_factor'
-
-    # 应用复权
-    if factor_col in df.columns and df[factor_col].notna().any():
-        latest_factor = df[factor_col].iloc[-1]
-        if latest_factor and latest_factor > 0:
-            for col in ['open', 'high', 'low', 'close', 'pre_close']:
-                if col in df.columns:
-                    df[col] = df[col] * df[factor_col] / latest_factor
-
-    return df
+    return apply_factor_series(df, factor_df)
 
 
 def _calc_indicators(df: pd.DataFrame) -> dict:
@@ -571,6 +645,9 @@ class StrategyScanRequest(BaseModel):
     end_date: Optional[str] = None
     adjust_type: str = 'qfq'
     days: int = 120
+    # 'INDEX' → 从 index_daily 取数。裸码 000001 在 stock_daily/index_daily 里
+    # 是两个标的（平安银行 / 上证指数），不传 market 会扫错标的。
+    market: Optional[str] = None
 
 
 @router.post("/api/chart/strategy-signals")
@@ -599,10 +676,11 @@ def _scan_strategy_sync(req: StrategyScanRequest) -> dict:
         params=req.params,
         adjust_type=req.adjust_type,
         days=req.days,
+        market=req.market or "",
     )
 
 
-@router.get("/api/chart/search")
+# Registered above before the dynamic /api/chart/{chart_id} route.
 async def search_stock(keyword: str = Query(..., min_length=1, description="股票代码或名称")):
     """搜索股票（用于 K 线图选择）
 
@@ -641,21 +719,40 @@ async def search_stock(keyword: str = Query(..., min_length=1, description="股�
         )
         results = [dict(row) for row in c.fetchall()]
 
-        # 从 stock_daily 补充（stock_info 中没有的）
-        c.execute(
-            """SELECT DISTINCT code
-               FROM stock_daily
-               WHERE code LIKE ?
-               ORDER BY
-                 CASE WHEN code = ? THEN 0 WHEN code LIKE ? THEN 1 ELSE 2 END,
-                 code
-               LIMIT 20""",
-            (f"%{keyword}%", keyword, f"{keyword}%")
-        )
+        # 同一只票可能在 stock_info 里同时存在 002230 与 sz002230 两条（历史同步遗留），
+        # 只按字面去重会让下拉框出现两条同名记录（2026-11-04 实测）。
+        _bare = lambda x: re.sub(r"^(sh|sz|bj)[\.:]?", "", str(x), flags=re.IGNORECASE)
+        _seen, _deduped = set(), []
+        for _r in results:
+            _b = _bare(_r["code"])
+            if _b in _seen:
+                continue
+            _seen.add(_b)
+            _deduped.append(_r)
+        results = _deduped
+
+        # 从 stock_daily 补充（stock_info 中没有的）。
+        # 注意：stock_daily 有 389 万行，LIKE '%x%' 无法走前缀索引，只能整索引扫描，
+        # 实测 257ms（2026-11-05 profiler 确认是它占总耗时的绝大部分）。
+        # 它只在 stock_info 一条都没命中时才兜底；否则每次搜一个完整代码都要白扫一遍。
         existing_codes = {r['code'] for r in results}
-        for row in c.fetchall():
+        existing_bare = {_bare(r['code']) for r in results}
+        _daily_rows = []
+        if not results:
+            c.execute(
+                """SELECT DISTINCT code
+                   FROM stock_daily
+                   WHERE code LIKE ?
+                   ORDER BY
+                     CASE WHEN code = ? THEN 0 WHEN code LIKE ? THEN 1 ELSE 2 END,
+                     code
+                   LIMIT 20""",
+                (f"%{keyword}%", keyword, f"{keyword}%")
+            )
+            _daily_rows = c.fetchall()
+        for row in _daily_rows:
             code = row['code']
-            if code in existing_codes:
+            if code in existing_codes or _bare(code) in existing_bare:
                 continue
             # 推断市场
             if code.startswith(('6', '9')):

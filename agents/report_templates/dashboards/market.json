@@ -3,6 +3,7 @@
   "display_name": "市场决策仪表盘",
   "description": "大盘温度、板块轮动、涨跌家数",
   "scenario_tag": "市场决策仪表盘",
+  "derive_decision_from_groups": false,
   "checklist_dimensions": ["大盘趋势", "资金流向", "市场情绪", "板块轮动"],
   "sections": [
     {"id": "signal_row", "renderer": "signal_row", "required": true, "fields": ["decision_type", "confidence_level", "sentiment_score"]},

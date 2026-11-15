@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深度报告 · Stock Radar</title>
+<style>
+  :root{--bg:#f6f7f9;--panel:#fff;--line:#e3e6ea;--text:#1c2430;--muted:#667085;--brand:#176b5b;--soft:#e8f4f1}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:#fff;border-bottom:1px solid var(--line)}
+  header b{font-size:15px}
+  .muted{color:var(--muted);font-size:12px}
+  .wrap{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;padding:16px;height:calc(100vh - 52px)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+  .card h3{margin:0;padding:12px 14px;font-size:13px;border-bottom:1px solid var(--line);color:var(--muted)}
+  .form{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+  input,select,textarea{padding:7px 9px;border:1px solid var(--line);border-radius:8px;font:inherit;width:100%}
+  button{border:0;border-radius:8px;padding:8px 14px;background:var(--brand);color:#fff;font:inherit;cursor:pointer}
+  button.ghost{background:#fff;color:var(--text);border:1px solid var(--line)}
+  button[disabled]{opacity:.5;cursor:not-allowed}
+  .list{overflow:auto;flex:1}
+  .item{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+  .item:hover{background:#fafbfc}
+  .item.on{background:var(--soft)}
+  .item .t{font-weight:600;font-size:13px}
+  .pill{font-size:11px;padding:1px 7px;border-radius:999px;background:#eef1f5;color:var(--muted)}
+  .pill.done{background:#e8f7ee;color:#16a34a}
+  .pill.run{background:var(--soft);color:var(--brand)}
+  .pill.err{background:#fdeaea;color:#dc2626}
+  .bar{height:6px;background:#e9edf2;border-radius:999px;overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--brand),#2aa08a)}
+  .main{display:flex;flex-direction:column}
+  .main .head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line)}
+  iframe{flex:1;border:0;width:100%;background:#fff}
+  .log{padding:8px 14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);max-height:120px;overflow:auto;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <b>深度报告</b><span class="muted">长报告后台任务（独立于对话）</span>
+  <button class="ghost" id="dlMd" disabled style="margin-left:auto">下载 .md</button>
+  <button class="ghost" id="dlPdf" disabled>导出 PDF</button>
+  <a class="muted" href="/" style="margin-left:12px">返回对话</a>
+</header>
+
+<div class="wrap">
+  <section class="card">
+    <h3>新建 / 历史</h3>
+    <div class="form">
+      <input id="universe" placeholder="标的（如：白酒板块）">
+      <input id="req" placeholder="用户原话（可空）">
+      <select id="tpl">
+        <option value="">加载模板中…</option>
+      </select>
+      <label class="muted">先生成前
+        <input id="secs" type="number" min="1" max="30" value="10" style="width:64px;display:inline-block"> 节（默认全部；调小用于快速验证）
+      </label>
+      <label class="muted"><input type="checkbox" id="fetch" style="width:auto"> 开启取数（子代理）</label>
+      <div class="muted" id="dialogHint" style="line-height:1.5"></div>
+      <button id="start">开始生成</button>
+      <span class="muted" id="hint"></span>
+    </div>
+    <div class="list" id="list"></div>
+  </section>
+
+  <section class="card main">
+    <div class="head">
+      <span id="title" class="muted">选择左侧报告</span>
+      <span class="pill" id="status"></span>
+      <button class="ghost" id="cancel" disabled style="margin-left:auto">取消</button>
+    </div>
+    <iframe id="frame" title="阅读页"></iframe>
+    <div class="log" id="log"></div>
+  </section>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const TERMINAL = new Set(['done', 'partial', 'failed', 'cancelled']);
+const params = new URLSearchParams(location.search);
+// 对话卡片入口：从对话页「深度报告」按钮进入时 URL 会带 ?dialog_uuid=<当前对话>，
+// 生成时透传给 POST，后端在该对话里落一张卡片（手工访问也可带 ?dialog=...）。
+const dialogUuid = (params.get('dialog_uuid') || params.get('dialog') || '').trim();
+
+let cur = null, es = null, frameKey = '', metaTimer = null;
+let missingCount = 0, gotBusinessEvent = false;
+const MAX_MISSING = 3;   // POST 返回与后台线程建报告行有竞态：没收到任何事件前，404 不算「不存在」
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function initCardHint(){
+  const el = $('#dialogHint');
+  if (!el) return;
+  if (dialogUuid) {
+    el.textContent = `已关联对话 ${dialogUuid.slice(0, 8)}…：生成完成后卡片会写入该对话（回到对话页点开即可看到）。`;
+  } else {
+    el.textContent = '在对话中生成卡片：从对话页左侧「深度报告」进入本页（URL 自动带 dialog_uuid），生成完成后卡片会出现在该对话里。';
+  }
+}
+
+function loadFrame(url){
+  const f = $('#frame');
+  f.removeAttribute('srcdoc');   // srcdoc 优先级高于 src，不清掉会一直显示占位
+  f.src = url;
+}
+
+function showFrameNotice(text){
+  const f = $('#frame');
+  f.removeAttribute('src');
+  f.srcdoc = `<div style="font:14px/1.8 -apple-system,sans-serif;color:#667085;padding:40px">${esc(text)}</div>`;
+}
+
+function pillClass(st){
+  if (st === 'done') return 'pill done';
+  if (st === 'failed' || st === 'cancelled') return 'pill err';
+  if (st === 'partial') return 'pill err';
+  return 'pill run';
+}
+
+function appendLog(line){
+  const el = $('#log');
+  el.textContent = line + '\n' + el.textContent.split('\n').slice(0, 8).join('\n');
+}
+
+function closeStream(){
+  if (es) {
+    try { es.close(); } catch (e) { /* ignore */ }
+    es = null;
+  }
+}
+
+async function loadList(){
+  try {
+    const r = await fetch('/api/deep-reports?limit=50').then(r=>r.json());
+    const rows = r.data || [];
+    $('#list').innerHTML = rows.map(x => `
+      <div class="item ${x.rid===cur?'on':''}" data-rid="${x.rid}">
+        <div class="t">${esc(x.title || '(未命名)')} <span class="${pillClass(x.status)}">${esc(x.status)}</span></div>
+        <div class="muted">${esc(x.universe || '')} · ${x.sections_done||0}/${x.sections_total||0} 节 · ${x.words||0} 字</div>
+        <div class="bar"><i style="width:${x.progress||0}%"></i></div>
+      </div>`).join('') || '<div class="muted" style="padding:12px">还没有报告</div>';
+    document.querySelectorAll('.item').forEach(el => el.onclick = () => open(el.dataset.rid));
+  } catch (e) {
+    console.warn('[deep-report] 列表加载失败', e);
+  }
+}
+
+// iframe 版本键：只在阶段/版本变化时重载，避免每个事件都换 URL 导致反复刷新
+function frameKeyOf(d){
+  return [cur, d.stage || '', d.status || '', d.sections_done || 0, d.words || 0].join('|');
+}
+
+// 返回 true 表示「没有后续了」（终态或报告不存在），调用方可以关流
+async function refreshMeta(){
+  if (!cur) return true;
+  let resp;
+  try {
+    resp = await fetch(`/api/deep-reports/${encodeURIComponent(cur)}`);
+  } catch (e) {
+    return false;   // 网络抖动：保持流，等 EventSource 自己重连
+  }
+  if (resp.status === 404) {
+    // 刚提交时后台线程可能还没建行（见后端 /events 的宽限）；收到过任何业务事件后 404 才算真没了
+    missingCount += 1;
+    if (!gotBusinessEvent && missingCount < MAX_MISSING) return false;
+    $('#status').textContent = '不存在';
+    $('#status').className = 'pill err';
+    $('#cancel').disabled = true;
+    closeStream();
+    return true;
+  }
+  missingCount = 0;
+  if (!resp.ok) return false;
+  let body = null;
+  try { body = await resp.json(); } catch (e) { return false; }
+  const d = (body && body.data) || {};
+  $('#status').textContent = d.status || '';
+  $('#status').className = pillClass(d.status);
+  const terminal = TERMINAL.has(d.status);
+  $('#cancel').disabled = terminal;
+  const canExport = ['done', 'partial'].includes(d.status);
+  $('#dlMd').disabled = !canExport;
+  $('#dlPdf').disabled = !canExport;
+  if (['done', 'partial'].includes(d.status)) {
+    const key = frameKeyOf(d);
+    if (key !== frameKey) {
+      frameKey = key;
+      // 版本号随内容变化：同一版本重复 refresh 不会再触发 iframe 重载
+      loadFrame(`/api/deep-reports/${encodeURIComponent(cur)}/html?v=${encodeURIComponent(key)}`);
+    }
+  } else if (d.status === 'failed' || d.status === 'cancelled') {
+    showFrameNotice(`报告未完成（${d.status}）${d.error ? '：' + d.error : ''}`);
+  }
+  return terminal;
+}
+
+function scheduleMeta(){
+  if (metaTimer) return;
+  metaTimer = setTimeout(() => { metaTimer = null; refreshMeta(); }, 250);
+}
+
+function open(rid){
+  rid = String(rid || '');
+  if (!rid) return;
+  cur = rid;
+  frameKey = '';
+  missingCount = 0;
+  gotBusinessEvent = false;
+  $('#title').textContent = rid;
+  // 打开历史报告时同步下拉与标的（否则会停在列表里第一个模板，造成误解）
+  try {
+    fetch(`/api/deep-reports/${encodeURIComponent(rid)}`).then(x => x.json()).then(body => {
+      const d = (body && body.data) || {};
+      if (d.template_id) {
+        const sel = $('#tpl');
+        if ([...sel.options].some(o => o.value === d.template_id)) sel.value = d.template_id;
+      }
+      if (d.universe) $('#universe').value = d.universe;
+    }).catch(() => {});
+  } catch (e) {}
+  $('#log').textContent = '';
+  $('#dlMd').disabled = true;
+  $('#dlPdf').disabled = true;
+  showFrameNotice('生成中……完成后自动载入阅读页');
+  $('#cancel').disabled = false;
+  loadList();
+  closeStream();
+  es = new EventSource(`/api/deep-reports/${encodeURIComponent(rid)}/events?since_id=0`);
+  bindEvents();
+  refreshMeta();
+}
+
+function bindEvents(){
+  ['phase','section','subagent','progress','done','error'].forEach(t => {
+    es.addEventListener(t, ev => {
+      if (!ev.data) return;                    // 浏览器的原生 error 事件没有 data，别当成业务错误
+      let d = {};
+      try { d = JSON.parse(ev.data || '{}'); } catch (e) { return; }
+      gotBusinessEvent = true;
+      if (t === 'progress') appendLog(`进度 ${d.progress}%（${d.sections_done}/${d.sections_total} 节）`);
+      else if (t === 'section') appendLog(`章节 ${d.index}/${d.total} ${d.status} ${d.title||''}`);
+      else if (t === 'subagent') appendLog(`取数 ${d.index}/${d.total} ${d.slot} → ${d.status}（${d.items||0} 项）`);
+      else if (t === 'phase') appendLog(`阶段 ${d.stage || ''}${d.progress != null ? ' ' + d.progress + '%' : ''}`);
+      else if (t === 'done') {
+        // 终态：服务端随后收流；这里必须主动 close，否则 EventSource 自动重连会反复重放 done → iframe 反复重载
+        appendLog(`完成：${d.status}，${d.words||0} 字`);
+        closeStream();
+        loadList();
+        refreshMeta();
+        return;
+      } else if (t === 'error') {
+        // 业务 error 是终态（大纲/线程失败、未知 rid）；按快照决定是否收流
+        appendLog(`错误：${d.message || ''}`);
+        refreshMeta().then(stop => { if (stop) closeStream(); });
+        return;
+      }
+      scheduleMeta();
+    });
+  });
+  // 原生 error：断线或「服务端正常收流」都会触发；确认终态/报告已删就关流，避免每 3s 无限重连
+  es.addEventListener('error', ev => {
+    if (ev.data) return;   // 业务 error 已由上面的监听处理
+    refreshMeta().then(stop => { if (stop) closeStream(); });
+  });
+}
+
+$('#start').onclick = async () => {
+  const body = {
+    universe: $('#universe').value.trim() || '银行板块',
+    request: $('#req').value.trim(),
+    template_id: $('#tpl').value,
+    max_sections: Number($('#secs').value) || null,
+    fetch: $('#fetch').checked,
+  };
+  if (dialogUuid) body.dialog_uuid = dialogUuid;
+  $('#hint').textContent = dialogUuid ? '已提交：完成后卡片会出现在对话里…' : '已提交，后台生成中…';
+  $('#start').disabled = true;
+  try {
+    const r = await fetch('/api/deep-reports', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}).then(r=>r.json());
+    if (r.data && r.data.rid) {
+      await loadList();
+      open(r.data.rid);
+    } else {
+      $('#hint').textContent = r.msg || '提交失败';
+    }
+  } catch (e) {
+    $('#hint').textContent = '提交失败：' + (e && e.message || e);
+  } finally {
+    $('#start').disabled = false;
+  }
+};
+
+$('#cancel').onclick = async () => {  if (!cur) return;
+  try {
+    const r = await fetch(`/api/deep-reports/${encodeURIComponent(cur)}/cancel`, {method:'POST'}).then(r=>r.json());
+    const cancelled = !!(r && r.data && r.data.cancelled);
+    appendLog(cancelled ? '已请求取消（章节边界生效）' : '没有运行中的任务（可能已完成或已取消）');
+    if (!cancelled) refreshMeta();   // 已完成/已取消：顺手刷新终态，别停在上一个状态
+  } catch (e) {
+    appendLog('取消失败：' + (e && e.message || e));
+  }
+};
+
+window.addEventListener('beforeunload', closeStream);
+
+// ── 导出：md 走附件下载，PDF 由后端 Chromium 打印阅读页 ──
+$('#dlMd').onclick = () => {
+  if (cur) window.location.href = `/api/deep-reports/${encodeURIComponent(cur)}/markdown`;
+};
+$('#dlPdf').onclick = () => {
+  if (!cur) return;
+  $('#dlPdf').disabled = true;
+  $('#dlPdf').textContent = '生成 PDF…';
+  window.location.href = `/api/deep-reports/${encodeURIComponent(cur)}/pdf`;
+  setTimeout(() => { $('#dlPdf').disabled = false; $('#dlPdf').textContent = '导出 PDF'; }, 8000);
+};
+
+// 模板下拉：从后端加载（不在前端写死某一个行业）
+async function loadTemplates(){
+  try {
+    const r = await fetch('/api/deep-reports/templates').then(x => x.json());
+    const list = (r && r.data) || [];
+    if (!list.length) return;
+    const sel = $('#tpl');
+    sel.innerHTML = '';
+    for (const t of list) {
+      const o = document.createElement('option');
+      o.value = t.id;
+      o.textContent = t.name || t.id;
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 保持占位 */ }
+}
+
+initCardHint();
+loadTemplates();
+loadList();
+setInterval(loadList, 5000);
+</script>
+</body>
+</html>

@@ -130,6 +130,7 @@ def merge_tools_for_skills(
     logger=None,
     log_tag: str = "E",
     fallback_skill: str = "",
+    for_binding: bool = False,
 ) -> list:
     """Load tools for plan skills and template-selected skills, deduped by tool name.
 
@@ -142,7 +143,34 @@ def merge_tools_for_skills(
     是工具面的唯一权威——`selected_skills` 是 capability 映射与模板 fallback 的混合体，
     默认不混入，避免工具面膨胀。要让某个兜底技能的工具可用，应把它写进模板的
     `skill_plan`（Planner 据此生成 plan step），而不是在这里追加。
+
+    :param for_binding: **调用方是"要拿这批工具去 bind_tools 发给模型"吗**。
+
+        为 True 且 ``TOOL_SURFACE_MODE=full`` 时**直接返回全量工具**（PRD-A11，2026-10-16 修）。
+
+        为什么必须区分：full 档的全部意义是「tools 数组（请求 payload 的位置 0）跨轮/跨 run
+        **逐字节稳定**」，provider 的前缀缓存才命中。而按 ``plan_skills`` 挑子集时，
+        工具面随每个问题变化 —— 实测 unified_plan 内层 agent 首调只命中 512 tok
+        （≈仅 cache_prefix），而 react_stock 走全量装载命中 4,096 tok（含 tools 前段）。
+        react 侧由 ``ReactDIContainer._maybe_load_full_surface`` 保证全量，
+        plan/unified/pdor 侧必须走同一个口子。
+
+        ⚠️ **默认 False 是刻意的**：``activate_skills`` 也调本函数，但它要的是
+        「这些技能**拥有**哪些工具」的记账信息，不是"要绑哪些工具"。让它返回全量会把
+        state 里的 ``all_tool_names`` 变成恒等于全部工具（第一次改就踩了这个坑，
+        16 个用例当场挂掉）。strict 档行为完全不变 —— 那一档本就不指望跨轮共享前缀。
     """
+    try:
+        if for_binding and is_full_surface():
+            tools = registry.get_all_tools()
+            if logger:
+                logger.info(log_tag,
+                            f"full 档：直接装载全部 {len(tools)} 个工具"
+                            f"（不按技能挑子集，保证位置 0 稳定）")
+            return tools
+    except Exception:
+        pass          # 拿不到模式就按原逻辑走，绝不因判断失败而中断
+
     tools = []
     seen = set()
     skill_names = normalize_skill_names(skills)
@@ -238,11 +266,17 @@ def _load_tools_for_skill(registry, skill_name: str, selected_skills, logger,
 
 def activate_skills(registry, tools_ref: list, skill_names,
                     selected_skills=None, logger=None, market: str = "",
-                    allow_all_fallback: bool = True) -> list:
+                    allow_all_fallback: bool = True,
+                    mutate_tools: bool = True) -> list:
     """按**多个**技能装载工具并原子替换 tools_ref（按工具名去重、保序）。
 
     批量装载入口（react 一次装候选前 N 个技能）。首个非空技能名用于
     `_note_active_skill`（配额分桶的「当前技能」标识）。语义与 `activate_skill` 一致。
+
+    ``mutate_tools=False``（PRD-A9 §2，``TOOL_SURFACE_MODE`` 非 strict 时）：
+    只做归属判定与日志，不动 ``tools_ref``。tools 数组是缓存前缀的位置 0，
+    全量常驻形态下切批必须走这条路，否则每轮 clear()+extend() 会让整条前缀作废。
+    返回值仍是「该批技能覆盖的工具名」，供日志/trace 使用。
     """
     names = [s for s in (skill_names or []) if s]
     _note_active_skill(names[0] if names else "")
@@ -258,6 +292,9 @@ def activate_skills(registry, tools_ref: list, skill_names,
     if market:
         from tools.tool_capabilities import filter_tools_for_market
         acc, _ = filter_tools_for_market(acc, market)
+    if not mutate_tools:
+        # 全量常驻：tools_ref 已一次性装载完毕，这里绝不能碰
+        return [t.name for t in acc]
     tools_ref.clear()
     tools_ref.extend(acc)
     return [t.name for t in acc]
@@ -265,9 +302,40 @@ def activate_skills(registry, tools_ref: list, skill_names,
 
 def activate_skill(registry, tools_ref: list, skill_name: str,
                    selected_skills=None, logger=None, market: str = "",
-                   allow_all_fallback: bool = True) -> list:
+                   allow_all_fallback: bool = True,
+                   mutate_tools: bool = True) -> list:
     """单技能封装（router/gap / 旧调用点保持不变）。"""
     return activate_skills(
         registry, tools_ref, [skill_name], selected_skills=selected_skills,
         logger=logger, market=market, allow_all_fallback=allow_all_fallback,
+        mutate_tools=mutate_tools,
     )
+
+
+def tool_surface_mode() -> str:
+    """工具面形态：full / strict。
+
+    与 :func:`activate_tool_mode` 正交——这里只回答「tools 数组会不会变」。
+    取值非法时回落 full：未知配置不得静默退回最差形态。
+    """
+    try:
+        from config import Config
+        mode = (getattr(Config, "TOOL_SURFACE_MODE", "full") or "full").lower()
+    except Exception:
+        return "full"
+    return mode if mode in ("full", "strict") else "full"
+
+
+def activate_tool_mode() -> str:
+    """usage_guide 投递方式：model / router / off。"""
+    try:
+        from config import Config
+        mode = (getattr(Config, "SKILL_ACTIVATE_TOOL_MODE", "model") or "model").lower()
+    except Exception:
+        return "model"
+    return mode if mode in ("model", "router", "off") else "model"
+
+
+def is_full_surface() -> bool:
+    """tools 是否全量常驻。"""
+    return tool_surface_mode() == "full"

@@ -152,6 +152,10 @@ class BaseAgentNode:
             logger.info("R", "接近迭代上限，不绑定工具，强制 LLM 生成总结")
         else:
             llm_with_tools = self.llm.bind_tools(all_tools) if all_tools else self.llm
+        # PRD-A9 §14：记录本次实际发出的消息与工具，供报告 fork 复用（整段命中）
+        if exec_state is not None:
+            exec_state.last_llm_messages = list(messages)
+            exec_state.last_llm_tools = list(all_tools)
         response = await ainvoke_with_retry(llm_with_tools, messages, config=config,
                                             logger=logger, label=self.llm_label)
 
@@ -288,6 +292,7 @@ class AgentNode(BaseAgentNode):
                 budget=budget,
                 parent_run_id=parent_run_id,
                 run_config=config,
+                tools=self.tools,   # PRD-A11 FR-2：压缩 fork 需要绑同一份 tools
             )
 
         return messages
@@ -353,6 +358,8 @@ class ClassifyNode:
         if result.get("clarified_input"):
             # ReactAgentState 用 user_input（非 input）；模板路由继续用未 enrich 的 raw_user_input
             out["user_input"] = result["clarified_input"]
+        if result.get("task_spec"):
+            out["task_spec"] = result["task_spec"]
         return out
 
 
@@ -409,16 +416,87 @@ class SelectSkillsNode:
         metadata = {"node": node_name} if node_name else None
 
         catalog_prompt = SkillPromptBuilder.build_catalog_prompt(self.skill_registry)
-        prompt = get_skill_selector_prompt(catalog_prompt, template) + market_constraint_prompt(market)
+        # FR-5.1：模板信息量分档。compact 用结构化摘要（实测模板部分 2811→464 tok，
+        # 技能名 100% 保留；离线风险已由 probe_selector_compact_risk.py 两项证据排除）。
+        prompt = get_skill_selector_prompt(
+            catalog_prompt, template,
+            mode=getattr(Config, "SKILL_SELECTOR_PROMPT_MODE", "compact"),
+        ) + market_constraint_prompt(market)
 
         # 注入对话历史，使多轮追问能引用上文
         history = self.memory.get_history() if self.memory and self.memory.enabled else []
-        messages = [
-            ("system", prompt),
-            *history,
-            ("user", user_input),
-        ]
-        result = llm_json_with_retry(self.llm, messages, logger, label="skill-selector", budget=budget, metadata=metadata, run_config=config)
+
+        # ── 主前缀共享（PRD-A11 FR-10）──────────────────────────────────
+        # 关键：用与 PrepareNode **同一个构造器**拼主前缀，把选择指令放到尾部。
+        # 于是两个 payload 共享**同一段头部**，但**不是**严格前缀 —— 实测共同前缀
+        # 只有 2 条，第 2 条起分叉（各自的步骤 system 占同一个槽位，天然不同）：
+        #     select_skills : [REACT][history][guidance][user][选择指令]
+        #     agent 首调    : [REACT][history][guidance][user][技能详情][…]
+        #                      ↑ 共同到第 1 条（0-based）为止；第 2 条是
+        #                        选择器指令 10,232 字符 ↔ 技能详情 7,922 字符
+        # 收益口径因此是「头部 + 位置 0 的 tools 数组被写热、后续命中」（实测
+        # select_skills cached=8,576、agent 首调 cached=10,624），**不是**「后发的
+        # 全额命中」：选择器指令那 ~10,232 字符（≈3,410 token）agent 用不上。
+        # ⚠️ 不能更强：两者是**不同的步骤角色**，必须问不同的问题；把选择器指令留在
+        # agent 上下文里等于平白塞进一条 JSON 输出指令，得不偿失。上限就是「主前缀
+        # 头部 + tools 数组」，现状已吃满。
+        # 量取口径：scripts/devtools/probe_prefix.py monotonicity（逐条逐字节比对）。
+        #
+        # ⚠️ 三条前置缺一不可（漏一条前缀即分叉、fork 白做）：
+        #   ① history 必须走与 prepare 相同的 clean_history_messages
+        #      （旧实现用未清洗的 memory.get_history()）
+        #   ② guidance 必须是同一份 build_guidance 输出
+        #   ③ 必须绑**同一份** tools 数组（tools 是 payload 位置 0）
+        # 只有 full 档才成立：strict 档 prepare 会往 system 里拼「## 可用工具」，
+        # 与这里的 system 不同 → 前缀分叉，故 strict 档自动回落旧形态。
+        from agents.shared.prompt_prefix import (append_tail_system,
+                                                 build_main_prefix_messages)
+        from agents.shared.tool_utils import is_full_surface
+        _fork_ok = (getattr(Config, "SKILL_SELECTOR_FORK", True)
+                    and is_full_surface() and bool(self.tools_ref)
+                    and _skill_detail_delivery() == "tail")
+        if _fork_ok:
+            from agents.react.utils import clean_history_messages
+            from agents.shared.llm_fork import build_fork_payload, fork_metadata
+            from agents.shared.prompt_prefix import make_fork_prefix
+            guidance = ""
+            if Config.REPORT_ENABLE_ANALYSIS_ENGINE and template:
+                try:
+                    from agents.analysis.template_store import build_guidance
+                    guidance = build_guidance(template, user_input) or ""
+                except Exception as e:
+                    logger.debug("R", f"select_skills 构造 guidance 失败（前缀将不含它）: {e}")
+            base = build_main_prefix_messages(
+                history=clean_history_messages(history, user_input),
+                guidance=guidance, user_input=user_input)
+            prefix = make_fork_prefix(base, list(self.tools_ref), source="select_skills")
+            payload = build_fork_payload(prefix, prompt)
+            if payload is not None:
+                _, fork_tools = payload
+                llm_with_tools = self.llm
+                try:
+                    llm_with_tools = self.llm.bind_tools(fork_tools)
+                except Exception as e:
+                    logger.warning("R", f"select_skills 绑 tools 失败，改用无工具: {e}")
+                metadata = {**(metadata or {}), **fork_metadata(prefix, payload)}
+                messages = append_tail_system(base, prompt)
+                result = llm_json_with_retry(
+                    llm_with_tools, messages, logger, label="skill-selector",
+                    budget=budget, metadata=metadata, run_config=config)
+            else:
+                messages = [("system", prompt), *history, ("user", user_input)]
+                result = llm_json_with_retry(
+                    self.llm, messages, logger, label="skill-selector",
+                    budget=budget, metadata=metadata, run_config=config)
+        else:
+            messages = [
+                ("system", prompt),
+                *history,
+                ("user", user_input),
+            ]
+            result = llm_json_with_retry(
+                self.llm, messages, logger, label="skill-selector",
+                budget=budget, metadata=metadata, run_config=config)
 
         selected = []
         reason = ""
@@ -463,18 +541,25 @@ class SelectSkillsNode:
 
         # 批量装载：一次装候选前 N 个技能的工具（N<=0 = 全量）。见
         # docs/superpowers/plans/2026-09-22-react-skill-batch-loading.md
-        from config import Config
-        from agents.shared.tool_utils import activate_skills
+        # ⚠️ 不要再写 `from config import Config` —— 模块第 40 行已导入，
+        # 函数内重复导入会把 Config 变成**局部变量**，使函数前半段的引用
+        # 报 UnboundLocalError（2026-10-16 踩过）。
+        from agents.shared.tool_utils import activate_skills, is_full_surface
         _n = getattr(Config, "REACT_SKILL_BATCH_SIZE", 3)
         loaded_skills = candidate_skills if _n <= 0 else candidate_skills[:_n]
         _ref = self.tools_ref if self.tools_ref is not None else []
+        # 全量常驻形态：tools 已由 DI 容器一次性装载，此处只做归属判定与记录，
+        # 绝不能 clear()+extend() —— tools 是缓存前缀的位置 0，一改就整条作废。
+        _full = is_full_surface()
         names = activate_skills(
             self.skill_registry, _ref, loaded_skills,
             selected_skills=candidate_skills, logger=logger,
             market=market, allow_all_fallback=False,
+            mutate_tools=not _full,
         )
         all_tools = list(_ref)
-        logger.info("R", f"批量装载技能 {loaded_skills} → {len(names)} 个工具")
+        logger.info("R", f"批量装载技能 {loaded_skills} → {len(names)} 个工具"
+                         + ("（全量常驻，未换绑）" if _full else ""))
 
         self._record_skill_event(selected, reason, market, all_tools, active_skill, candidate_skills)
 
@@ -503,6 +588,18 @@ class SelectSkillsNode:
             self.logger.debug("R", f"技能选择事件记录失败（忽略）: {e}")
 
 
+def _skill_detail_delivery() -> str:
+    """技能详情投递位置（PRD-A11 FR-11）：``tail``（默认）/ ``system_mid``（回退档）。
+
+    尾部投递让 ``[REACT system][history][guidance][user]`` 成为**稳定前缀**，
+    可被 select_skills / skill-router / planner 预热；中段投递会在 REACT 之后立刻分叉。
+    """
+    try:
+        return (getattr(Config, "SKILL_DETAIL_DELIVERY", "tail") or "tail").lower()
+    except Exception:
+        return "tail"
+
+
 class PrepareNode:
     """准备节点（可复用实例）"""
 
@@ -517,14 +614,23 @@ class PrepareNode:
         logger = self.logger
         all_tools = self.tools
 
-        tool_descriptions = "\n".join(
-            f"- **{t.name}**: {t.description}" for t in all_tools
-        )
-        system_prompt = REACT_SYSTEM_PROMPT + "\n\n## 可用工具\n\n" + tool_descriptions
+        # full 档：全部工具已在 tools 数组里（位置 0），provider 会把它渲染进
+        # function schema。再拼一份「## 可用工具」等于把同一段 name+description
+        # 在同一次请求里写两遍——实测 51 个工具重复 4,435 字符 ≈ 2,957 token/调用，
+        # 纯浪费。此处只保留技能目录（工具集之外的信息），工具清单交给 tools 数组。
+        from agents.shared.tool_utils import is_full_surface
+        if is_full_surface():
+            system_prompt = REACT_SYSTEM_PROMPT
+        else:
+            tool_descriptions = "\n".join(
+                f"- **{t.name}**: {t.description}" for t in all_tools
+            )
+            system_prompt = REACT_SYSTEM_PROMPT + "\n\n## 可用工具\n\n" + tool_descriptions
 
         # 注入已装载技能的使用指南（L1 用法层；批量时逐个注入，去重保序）
         _loaded = state.get("loaded_skills") or (
             [state.get("active_skill")] if state.get("active_skill") else [])
+        detail_parts: list[str] = []
         if self.skill_registry:
             _seen = set()
             for _sk in _loaded:
@@ -533,7 +639,8 @@ class PrepareNode:
                 _seen.add(_sk)
                 detail = SkillPromptBuilder.build_tools_detail_prompt(self.skill_registry, _sk)
                 if detail:
-                    system_prompt += "\n\n" + detail
+                    detail_parts.append(detail)
+        skill_detail = "\n\n".join(detail_parts)
 
         # 模板 guidance 作为独立动态 system 消息，放在历史之后
         guidance = ""
@@ -549,13 +656,29 @@ class PrepareNode:
 
         history = self.memory.get_history()
         cleaned_history = clean_history_messages(history, user_input)
-        messages = [
-            ("system", system_prompt),
-            *cleaned_history,
-        ]
-        if guidance:
-            messages.append(("system", guidance))
-        messages.append(("user", user_input))
+
+        # ── 主前缀构造器（PRD-A11 FR-10/FR-11）──────────────────────────
+        # 形态： [REACT system][history][guidance][user]   ← 与 agent 之前的副调用共享
+        #        [技能详情]                                ← 尾部追加
+        #
+        # ⚠️ 技能详情**必须走尾部**，不能拼进 system 中段（曾经就是那样）：
+        # 它一变，[REACT system] 之后立刻与 select_skills / skill-router / planner
+        # 的前缀分叉 —— 实测 agent 首调只命中 4,096/11,806（≈35%），且紧随的
+        # report/dashboard 也只能各自开新前缀。
+        from agents.shared.prompt_prefix import (append_tail_system,
+                                                 build_main_prefix_messages)
+        messages = build_main_prefix_messages(
+            history=cleaned_history, guidance=guidance, user_input=user_input,
+            system_prompt=system_prompt,
+        )
+        # 回退档：SKILL_DETAIL_DELIVERY=system_mid 时保持旧行为（拼进中段）
+        if skill_detail and _skill_detail_delivery() == "system_mid":
+            idx = next((i for i, m in enumerate(messages)
+                        if isinstance(m, tuple) and m[0] == "system"), 0)
+            role, text = messages[idx]
+            messages[idx] = (role, f"{text}\n\n{skill_detail}")
+        elif skill_detail:
+            messages = append_tail_system(messages, skill_detail)
         return {"messages": messages}
 
 
@@ -596,7 +719,7 @@ class PartialSummaryNode:
 class TemplateReportNode:
     """模板报告节点（委托 shared ReportEnhanceNode，适配 ReactAgentState）"""
 
-    def __init__(self, exec_state=None, budget=None, logger=None):
+    def __init__(self, exec_state=None, budget=None, logger=None, tools_ref=None):
         from agents.shared.report_enhance_node import ReportEnhanceNode
 
         class _ReactReportEnhance(ReportEnhanceNode):
@@ -606,9 +729,23 @@ class TemplateReportNode:
                 self_inner._exec_state = exec_state
                 self_inner._budget = budget
                 self_inner._logger = ensure_radar(logger)
+                self_inner._tools_ref = tools_ref
 
             def extract_tool_calls(self_inner, state):
                 return exec_state.tool_calls if exec_state else []
+
+            def extract_conversation(self_inner, state):
+                """PRD-A9 §14：复用 agent 已发热的对话前缀 + 同一份工具数组。
+
+                ``exec_state.tools_ref`` 与 AgentNode 绑定的是**同一个 list 对象**
+                （DI 容器创建时传入），因此这里拿到的数组与 agent 最后一次调用
+                逐字节一致 —— 这正是位置 0 能命中的前提。
+                """
+                msgs = getattr(exec_state, "last_llm_messages", None)
+                tools = getattr(exec_state, "last_llm_tools", None)
+                if not msgs or not tools:
+                    return None, None
+                return list(msgs), list(tools)
 
             def extract_raw_result(self_inner, state, step_results):
                 return state.get("final_result", "")

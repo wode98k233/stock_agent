@@ -356,6 +356,17 @@
 }
 .dm-card-head h2 { font-size: 14.5px; font-weight: 600; }
 .dm-hint { font-size: 11.5px; color: var(--dm-text-3); }
+
+/* ===== 数据监控：回测覆盖率巡检（Plan 4 任务 6） ===== */
+.dm-btcov { margin: 10px 0 14px; padding: 10px 12px; border: 1px solid var(--border-light);
+  border-left: 3px solid var(--warning); border-radius: var(--radius); background: var(--dm-bg-2, #fff); }
+.dm-btcov-h { font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+.dm-btcov-line { font-size: 12px; color: var(--dm-text-2, var(--text-secondary)); }
+.dm-btcov-list { margin-top: 6px; }
+.dm-btcov-row { display: flex; gap: 10px; align-items: center; font-size: 11.5px; padding: 2px 0; }
+.dm-btcov-row .pct { color: var(--warning); font-weight: 600; }
+.dm-btcov-row .bars, .dm-btcov-row .when { color: var(--dm-text-3, var(--text-secondary)); }
+
 .dm-link-more {
   font-size: 12px; color: var(--brand); cursor: pointer; font-weight: 500;
   border: none; background: none;
@@ -596,4 +607,13 @@
 .cr-strip-seg.lv-2 { background: #fdf3e3; color: #8a4b0a; }
 .cr-strip-seg.lv-3 { background: #fde8d7; color: #b7460a; }
 .cr-strip-seg.lv-4 { background: #fde2e2; color: #b91c1c; }
+
+/* ===== 数据同步：回测数据就绪度（Plan 4 任务 5） ===== */
+.dc-readiness { margin: 10px 0 2px; padding: 10px 12px; border: 1px solid var(--border-light);
+  border-left: 3px solid var(--brand); border-radius: var(--radius); background: var(--panel, #fff); }
+.dc-readiness-line { font-size: 12.5px; }
+.dc-readiness-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }
+.dc-origin { font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: var(--border-light); color: var(--text-secondary); }
+.dc-origin.gap { background: var(--warning-bg); color: var(--warning); }
 

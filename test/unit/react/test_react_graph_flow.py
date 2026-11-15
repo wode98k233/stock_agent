@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+import pytest
 
 
 class FakeReactLLM:
@@ -164,3 +165,8 @@ def test_react_graph_runs_with_mocked_llm_and_tool_result(mock_logger):
     assert "sector_timing" in captured["post_processing"]["template_id"]
     assert captured["post_processing"]["selected_skills"] == ["mx_data"]
     assert captured["post_processing"]["raw_result"] == "原始报告：绿色电力板块资金分歧，不宜重仓建仓。"
+
+@pytest.fixture(autouse=True)
+def _pin_strict_tool_surface(strict_surface):
+    """本文件锁的是 strict 档语义，pin 住形态使其不随全局默认漂移。"""
+    return strict_surface

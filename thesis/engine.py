@@ -1378,6 +1378,54 @@ class ThesisEngine:
             note=spec.get("note", ""),
         ), {spec["metric"]: rank, spec.get("raw_metric", spec["metric"] + "_raw"): mom}
 
+    def _factor_frame_ma_rank(self, spec, ctx, defn, params, thresholds, warnings):
+        """指数日线相对**自算长期均线**的百分比偏离（frames 版）。
+
+        为什么不复用 `vs_ma_rank`：那个读 `ctx["series"]`（macro 长表）——黄金/铜/猪的
+        主标的都走 macro 通道（`au_sge`/`cu_main`/`hog_spot_index`）。而宽基指数走
+        `market_data_db.index_daily`（frames），两条通道不通用：拿 macro 序列硬套
+        只会得到「历史不足」，位置维度永远是空的。
+
+        spec: frame（数据别名）、metric、raw_metric、ma_days、min_samples、
+              unit、label、thresholds_key
+        """
+        df = ctx["frames"].get(spec.get("frame"))
+        if df is None or getattr(df, "empty", True) or "close" not in getattr(df, "columns", []):
+            return self._make_factor(
+                key=spec["key"], name=spec["name"], value=None, unit=spec.get("unit", "%"),
+                score=None, detail="该指数无日线数据", source=spec.get("source", "—"),
+                asof="—",
+            ), {spec["metric"]: None}
+        closes = [float(x) for x in df["close"].tolist() if x is not None and float(x) > 0]
+        ma_days = int(spec.get("ma_days", params.get("ma_days", 250)))
+        min_n = int(spec.get("min_samples", params.get("min_samples_for_position_rank", 250)))
+        if len(closes) < ma_days + min_n:
+            return self._make_factor(
+                key=spec["key"], name=spec["name"], value=None, unit=spec.get("unit", "%"),
+                score=None,
+                detail="历史不足（需 %d 期，现 %d）" % (ma_days + min_n, len(closes)),
+                source=spec.get("source", "—"), asof="—",
+            ), {spec["metric"]: None}
+        gaps = []
+        for i in range(ma_days - 1, len(closes)):
+            ma = sum(closes[i - ma_days + 1:i + 1]) / ma_days
+            if ma:
+                gaps.append(round((closes[i] / ma - 1) * 100, 2))
+        gap = gaps[-1]
+        rank = _pct_rank(gaps, gap)
+        ma_now = sum(closes[-ma_days:]) / ma_days
+        label = spec.get("label") or "指数"
+        asof = max(self._date_close_map(df) or {"—": 0})
+        return self._make_factor(
+            key=spec["key"], name=spec["name"], value=gap, unit=spec.get("unit", "%"),
+            score=thesis_defs.score_by_table(gap, thresholds[spec["thresholds_key"]]),
+            detail="%s %.0f 相对近 %d 日均线 %.0f 偏离 %+.2f%%（该偏离处于历史 %.1f%% 分位，样本 %d 期）"
+                   % (label, closes[-1], ma_days, ma_now, gap, rank, len(gaps)),
+            source=spec.get("source", "index_daily 自算"), asof=asof,
+            stale=self._index_is_stale(df, int(params.get("index_stale_days", 5))),
+            note=spec.get("note", ""),
+        ), {spec["metric"]: gap, spec.get("raw_metric", spec["metric"] + "_raw"): round(ma_now, 2)}
+
     def _load_index(self, code: str, days: int, name: str, warnings: list,
                     label: str, params: dict):
         """读指数日线：**行数不足，或落后于最近应有交易日**，都触发一次采集，再读。
@@ -1758,6 +1806,9 @@ ThesisEngine.FACTOR_COMPUTERS = {
     "vs_ma_gap": ThesisEngine._factor_vs_ma_gap,
     "vs_ma_rank": ThesisEngine._factor_vs_ma_rank,
     "momentum_rank": ThesisEngine._factor_momentum_rank,
+    # A股台账（a_share_regime）：宽基指数走 index_daily（frames），
+    # 与 above 的 series 版位置因子不通用，故单列一条 frames 版。
+    "frame_ma_rank": ThesisEngine._factor_frame_ma_rank,
 }
 
 

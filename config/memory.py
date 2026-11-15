@@ -1,0 +1,67 @@
+"""记忆系统（检索 / 嵌入 / 重排）（由 config.py 拆分生成，逐字迁移勿手改）。"""
+
+import os  # noqa: F401
+
+
+class _MemoryMixin:
+    MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+
+    MEMORY_MAX_TOKENS = int(os.getenv("MEMORY_MAX_TOKENS", "30000"))
+    # 上下文洞察：上下文窗口上限（占用率分母）。BY_MODEL 为 JSON，命中优先于上一行。
+
+    JIEBA_ENABLED = os.getenv("JIEBA_ENABLED", "true").lower() == "true"
+
+    STOCK_MEMORY_BACKEND = os.getenv("STOCK_MEMORY_BACKEND", "auto")
+
+    STOCK_MEMORY_EMBEDDING = os.getenv("STOCK_MEMORY_EMBEDDING", "")
+
+    STOCK_MEMORY_EMBEDDING_MODEL = os.getenv("STOCK_MEMORY_EMBEDDING_MODEL", "text-embedding-3-small")
+
+    STOCK_MEMORY_LOCAL_MODEL = os.getenv("STOCK_MEMORY_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5")
+
+    STOCK_MEMORY_API_KEY = os.getenv("STOCK_MEMORY_API_KEY", "")
+
+    STOCK_MEMORY_API_BASE = os.getenv("STOCK_MEMORY_API_BASE", "")
+
+    MEMORY_RETRIEVAL_TOP_K = int(os.getenv("MEMORY_RETRIEVAL_TOP_K", "8"))
+
+    MEMORY_MAX_PROMPT_TOKENS = int(os.getenv("MEMORY_MAX_PROMPT_TOKENS", "1500"))
+
+    MEMORY_MAX_PROMPT_CHARS = int(os.getenv("MEMORY_MAX_PROMPT_CHARS", "6000"))
+
+    MEMORY_MAX_CHUNKS_PER_GROUP = int(os.getenv("MEMORY_MAX_CHUNKS_PER_GROUP", "6"))
+
+    MEMORY_CHUNK_MAX_CHARS = int(os.getenv("MEMORY_CHUNK_MAX_CHARS", "1000"))
+
+    MEMORY_MIN_SIMILARITY = float(os.getenv("MEMORY_MIN_SIMILARITY", "0.30"))
+
+    MEMORY_SIMILARITY_MARGIN = float(os.getenv("MEMORY_SIMILARITY_MARGIN", "0.12"))
+
+    MEMORY_PROFILE_SEMANTIC = os.getenv("MEMORY_PROFILE_SEMANTIC", "true").lower() == "true"
+
+    MEMORY_EPISODIC_RETENTION_DAYS = int(os.getenv("MEMORY_EPISODIC_RETENTION_DAYS", "90"))
+
+    MEMORY_CONFIDENCE_THRESHOLD = float(os.getenv("MEMORY_CONFIDENCE_THRESHOLD", "0.4"))
+
+    MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES = int(os.getenv("MEMORY_AUTO_CLEANUP_INTERVAL_MINUTES", "60"))
+
+    STOCK_MEMORY_EMBEDDING_READY_TIMEOUT = float(os.getenv("STOCK_MEMORY_EMBEDDING_READY_TIMEOUT", "30"))
+
+    STOCK_MEMORY_EMBEDDING_READY_INTERVAL = float(os.getenv("STOCK_MEMORY_EMBEDDING_READY_INTERVAL", "1.5"))
+
+    STOCK_MEMORY_RERANKER = os.getenv("STOCK_MEMORY_RERANKER", "")
+
+    STOCK_MEMORY_RERANKER_MODEL = os.getenv("STOCK_MEMORY_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+
+    STOCK_MEMORY_RERANKER_LOCAL_DIR = os.getenv("STOCK_MEMORY_RERANKER_LOCAL_DIR", "")
+
+    STOCK_MEMORY_RERANKER_API_KEY = os.getenv("STOCK_MEMORY_RERANKER_API_KEY", "")
+
+    STOCK_MEMORY_RERANKER_API_BASE = os.getenv("STOCK_MEMORY_RERANKER_API_BASE", "")
+
+    STOCK_MEMORY_RERANKER_IDLE_TTL = float(os.getenv("STOCK_MEMORY_RERANKER_IDLE_TTL", "120"))
+
+    STOCK_MEMORY_RERANKER_PRELOAD = os.getenv("STOCK_MEMORY_RERANKER_PRELOAD", "false").lower() == "true"
+
+    # ── 动态配置更新 ──
+

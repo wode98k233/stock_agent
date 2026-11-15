@@ -54,6 +54,7 @@ class GroupState(TypedDict):
     _failed_agents: Optional[list]
     _error_message: Optional[str]
     template_id: Optional[str]
+    task_spec: Optional[dict]  # 澄清后固化的任务结构（无则缺省）
     tool_calls: List[Any]
     selected_skills: List[str]
 

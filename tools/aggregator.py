@@ -7,6 +7,7 @@ import json
 import logging
 from contextlib import nullcontext
 from utils.llm_factory import get_llm, llm_json_with_retry
+from utils.logger import with_trace_node
 
 
 def _get_logger(logger):
@@ -209,7 +210,9 @@ def llm_filter_stocks(indicators_list: list, user_condition: str, memory_mgr=Non
     ]
 
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="filter")
+        result = llm_json_with_retry(
+            llm, messages, logger, label="filter",
+            metadata=with_trace_node(None, "filter"))
         if result and 'selected' in result:
             selected_codes = {s['code'] for s in result['selected']}
             reasons = {s['code']: s.get('match_reason', '') for s in result['selected']}
@@ -253,7 +256,9 @@ def llm_rank_stocks(stock_data_list: list, sort_intent: str, top_n: int = 10, me
     ]
 
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="rank")
+        result = llm_json_with_retry(
+            llm, messages, logger, label="rank",
+            metadata=with_trace_node(None, "rank"))
         if result and 'ranked' in result:
             return result['ranked'][:top_n]
         return []
@@ -348,7 +353,9 @@ def _build_macro_report(data: dict, memory_mgr=None, logger=None) -> dict:
         ("user", f"请根据以下宏观数据生成分析报告:\n\n{json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
     ]
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="macro-report")
+        result = llm_json_with_retry(
+            llm, messages, logger, label="macro-report",
+            metadata=with_trace_node(None, "macro-report"))
         if result:
             return result
         return {"report_type": "macro", "title": "宏观分析", "summary": "报告生成失败", "key_findings": []}
@@ -367,7 +374,9 @@ def llm_build_report(stock_data: dict, memory_mgr=None, logger=None) -> dict:
     ]
 
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="report")
+        result = llm_json_with_retry(
+            llm, messages, logger, label="report",
+            metadata=with_trace_node(None, "report"))
         if result:
             return result
         return {'code': stock_data.get('code', ''), 'name': stock_data.get('name', ''),
@@ -399,7 +408,9 @@ def llm_tech_interpret(indicators: dict, memory_mgr=None, logger=None) -> dict:
     ]
 
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="tech_interpret")
+        result = llm_json_with_retry(
+            llm, messages, logger, label="tech_interpret",
+            metadata=with_trace_node(None, "tech_interpret"))
         if result:
             return result
         return {'trend': '数据不足', 'signals': [], 'summary': '无法解读', 'action': '观望'}

@@ -382,10 +382,15 @@ def extract_news_sentiment(bag: dict, ctx: dict) -> Optional[SlotResult]:
             f"新闻内容：\n{news_text[:1500]}"
         )
 
+        # 归因（PRD-A11 FR-7）：本调用跑在 template_report / report_enhance 这类**包装节点**
+        # 内部，直接沿用 ctx 的 metadata 会让 trace 里只剩包装节点名（实测 70 次调用
+        # 全挤在 `template_report ← 模板报告` 下，看不出是情绪抽取）。
+        # with_trace_node 会补上 purpose 并保留原图节点名，两个口径都留痕。
+        from utils.logger import with_trace_node
         result = llm_json_with_retry(
             get_llm(), [("user", prompt)], ctx.get("logger", logger), label="sentiment-extract",
             budget=budget,
-            metadata=ctx.get("metadata"),
+            metadata=with_trace_node(ctx.get("metadata"), "sentiment-extract"),
             run_config=ctx.get("run_config"),
             skip_cache_prefix=True,
         )

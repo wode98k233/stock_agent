@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from server.calendar_service import build_calendar_payload, load_trace_token_stats
+from agents.deep_report.db import DeepReportDB
+from agents.deep_report.models import ReportMeta
+from server.calendar_service import (build_calendar_payload, load_deep_report_days,
+                                     load_trace_token_stats)
 from utils.agent_trace.store import TraceStore, store
 
 
@@ -15,6 +18,11 @@ class _FakeStorage:
 
     def latest_trace_runs_for_dialogs(self, uuids):
         return {u: self._run_id for u in uuids}
+
+
+class _EmptyStorage:
+    def latest_trace_runs_for_dialogs(self, uuids):
+        return {}
 
 
 @pytest.fixture
@@ -70,3 +78,74 @@ def test_build_calendar_payload_dialog_has_reasoning(trace_db_with_reasoning):
     dlg = payload["dialog_days"]["2026-08-14"][0]
     assert dlg["reasoning_tokens"] == 45
     assert dlg["total_tokens"] == 180
+
+
+# ── 长报告并入日历（独立字段 deep_reports，不伪造 web_dialogs） ──
+def _deep_report_meta(rid: str, created_at: str, *, title: str = "",
+                      status: str = "done") -> ReportMeta:
+    return ReportMeta(
+        rid=rid, universe="银行板块", user_request="", template_id="deep_sector_finance",
+        variant="finance", title=title, status=status, created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def test_load_deep_report_days_groups_by_local_date(tmp_path):
+    db = DeepReportDB(str(tmp_path / "deep_report.db"))
+    db.upsert_report(_deep_report_meta("dr1", "2026-08-14 10:00:00", title="银行深度").to_dict())
+    db.upsert_report(_deep_report_meta("dr2", "2026-08-14 23:30:00", title="券商深度",
+                                       status="partial").to_dict())
+    db.upsert_report(_deep_report_meta("dr3", "2026-08-15 09:00:00").to_dict())
+    db.upsert_report(_deep_report_meta("dr4", "2026-07-31 09:00:00").to_dict())
+    db.upsert_report(_deep_report_meta("dr5", "2026-09-01 09:00:00").to_dict())
+
+    days = load_deep_report_days(2026, 8, db=db)
+
+    assert sorted(days) == ["2026-08-14", "2026-08-15"]
+    assert [r["rid"] for r in days["2026-08-14"]] == ["dr1", "dr2"]
+    assert days["2026-08-14"][0]["title"] == "银行深度"
+    assert days["2026-08-14"][1]["status"] == "partial"
+    assert days["2026-08-15"][0]["rid"] == "dr3"
+
+
+def test_build_calendar_payload_includes_deep_reports_separately():
+    storage = _EmptyStorage()
+    with patch("server.calendar_service.load_trading_days", return_value=[]), \
+         patch("server.calendar_service.load_dialog_days", return_value={
+             "2026-08-14": [{"dialog_uuid": "dlg-1", "title": "对话", "mode": "react_stock",
+                             "created_at": "2026-08-14T01:00:00"}],
+         }), \
+         patch("server.calendar_service.load_deep_report_days", return_value={
+             "2026-08-14": [{"rid": "dr1", "title": "银行深度", "status": "done",
+                             "created_at": "2026-08-14 10:00:00"}],
+         }):
+        payload = build_calendar_payload(storage, 2026, 8)
+
+    # 长报告在独立字段里，dialog_days 原样（只有对话，没有伪造记录）
+    assert payload["deep_reports"]["2026-08-14"][0]["rid"] == "dr1"
+    assert [d["dialog_uuid"] for d in payload["dialog_days"]["2026-08-14"]] == ["dlg-1"]
+    assert all("deep_report" not in (d.get("mode") or "") for d in payload["dialog_days"]["2026-08-14"])
+
+
+def test_load_deep_report_days_missing_db_does_not_create_file(tmp_path, monkeypatch):
+    from utils import app_paths
+
+    missing = tmp_path / "no_such_dir" / "deep_report.db"
+    monkeypatch.setattr(app_paths, "get_deep_report_db_path", lambda: str(missing))
+    assert load_deep_report_days(2026, 8) == {}
+    assert not missing.exists()
+
+
+def test_load_deep_report_days_uses_default_db(tmp_path, monkeypatch):
+    """默认路径分支：路径存在时走 get_db()（生产入口，不依赖测试注入 db=）。"""
+    path = tmp_path / "deep_report.db"
+    db = DeepReportDB(str(path))
+    db.upsert_report(_deep_report_meta("dr-default", "2026-08-20 09:00:00").to_dict())
+
+    from utils import app_paths
+    import agents.deep_report.db as dbmod
+    monkeypatch.setattr(app_paths, "get_deep_report_db_path", lambda: str(path))
+    monkeypatch.setattr(dbmod, "get_db", lambda: db)
+
+    days = load_deep_report_days(2026, 8)
+    assert [r["rid"] for r in days["2026-08-20"]] == ["dr-default"]

@@ -26,7 +26,9 @@ _MIN_RAW_RESULT_LENGTH = 300
 async def run_analysis(request: AnalysisRequest, tool_calls: list,
                        raw_result: str = "", metadata=None, run_config=None,
                        step_results: list = None,
-                       raw_result_is_seed: bool = False) -> AnalysisResult:
+                       raw_result_is_seed: bool = False,
+                       conversation=None, conversation_tools=None,
+                       fork_sink: dict | None = None) -> AnalysisResult:
     """
     分析框架后处理主入口。
 
@@ -34,6 +36,9 @@ async def run_analysis(request: AnalysisRequest, tool_calls: list,
     tool_calls: ExecutionState.tool_calls（ReAct/Unified 模式）
     raw_result: Agent 原始输出
     step_results: PDOR 模式的步骤结果列表 [{"step", "skill", "purpose", "result"}]
+    conversation / conversation_tools: PRD-A9 §14 fork 形态。传入 agent 的完整对话
+        与其绑定的同一份工具数组，report-fast 改为复用该已热前缀 + 尾部追加报告指令，
+        并跳过 report-select。为空则自动回落证据注入路径。
     """
     log = request.logger or logger
     diagnostics = {}
@@ -100,7 +105,10 @@ async def run_analysis(request: AnalysisRequest, tool_calls: list,
                             metadata=metadata,
                             run_config=run_config,
                             step_results=step_results,
-                            raw_result_is_seed=raw_result_is_seed)
+                            raw_result_is_seed=raw_result_is_seed,
+                            conversation=conversation,
+                            conversation_tools=conversation_tools,
+                            fork_sink=fork_sink)
 
         content = format_report(report)
         diagnostics["output_length"] = len(content)

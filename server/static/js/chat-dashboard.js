@@ -9,8 +9,10 @@ window.StockRadar.chatDashboard = (() => {
 
   const DASH_COLORS = { buy: "#059669", hold: "#d97706", sell: "#dc2626" };
   const DASH_ICONS = { buy: "🟢", hold: "🟡", sell: "🔴" };
-  const DASH_LABELS = { buy: "BUY", hold: "HOLD", sell: "SELL" };
-  const DASH_SUBS = { buy: "可参与", hold: "观望", sell: "卖出" };
+  /* observe/watch 不是后端的合法 decision_type，但历史数据里出现过（LLM 续写旧块时
+     自造的口径）——缺映射会让卡片直接渲染成 "undefined"（2026-11-06 用户截图）。 */
+  const DASH_LABELS = { buy: "BUY", hold: "HOLD", sell: "SELL", observe: "观察", watch: "观察" };
+  const DASH_SUBS = { buy: "可参与", hold: "观望", sell: "卖出", observe: "观察", watch: "观察" };
   const RISK_LABELS = { high: "高", medium: "中", low: "低" };
   const CHECK_ICONS = { positive: "✅", warning: "⚠️", negative: "❌" };
 
@@ -69,13 +71,87 @@ window.StockRadar.chatDashboard = (() => {
   /* ── 渲染器注册表 ── */
   const SECTION_RENDERERS = {};
 
+  /* ── 工具：条件文案 ── */
+  function _entryText(entry) {
+    if (!entry || !entry.type || entry.type === "none") return "现价可执行";
+    if (entry.type === "unverifiable") return entry.note || "条件待人工确认";
+    const lo = entry.low, hi = entry.high;
+    if (entry.type === "pullback") {
+      if (lo != null && hi != null) return `回踩 ${lo}–${hi}`;
+      if (hi != null) return `回踩 ≤${hi}`;
+      return `回踩 ≤${lo}`;
+    }
+    return `站稳 ${lo != null ? lo : hi}`;
+  }
+
+  function _groupsSummary(groups) {
+    const c = { buy: 0, hold: 0, sell: 0 };
+    let conditional = 0;
+    groups.forEach((g) => {
+      const d = (g.decision || "hold").toLowerCase();
+      if (d in c) c[d] += 1;
+      if (g.entry && g.entry.type && g.entry.type !== "none") conditional += 1;
+    });
+    const parts = [`${groups.length} 个方向`, `看多 ${c.buy} / 观望 ${c.hold} / 看空 ${c.sell}`];
+    if (conditional) parts.push(`${conditional} 条带条件`);
+    return parts.join(" · ");
+  }
+
+  /* group_cards: 多实体方向卡片（1~N 组） */
+  SECTION_RENDERERS.group_cards = (data) => {
+    const groups = Array.isArray(data.groups) ? data.groups.filter((g) => g && g.key) : [];
+    if (!groups.length) return null;
+    const section = _el("div", "dash-section");
+    section.appendChild(_el("div", "dash-section-title",
+      `<span class="dash-section-icon">🧭</span> 方向决策`));
+    const wrap = _el("div", "dash-groups");
+    for (const g of groups) {
+      const dt = (g.decision || "hold").toLowerCase();
+      const color = DASH_COLORS[dt] || DASH_COLORS.hold;
+      const card = _el("div", `dash-group-card ${dt}`);
+      card.appendChild(_el("div", "dash-group-head",
+        `<span class="dash-group-key">${esc(g.key)}</span>` +
+        (g.horizon ? `<span class="dash-group-horizon">${esc(g.horizon)}</span>` : "") +
+        `<span class="dash-group-decision" style="color:${color}">${DASH_ICONS[dt] || ""} ${DASH_LABELS[dt] || ""}${g.confidence != null ? " " + Math.round(g.confidence * 100) + "%" : ""}</span>`));
+      if (g.stance) card.appendChild(_el("div", "dash-group-stance", esc(g.stance)));
+      /* 组级备注：单独一行；与 stance 同文时不重复展示 */
+      if (g.note && g.note !== g.stance) {
+        card.appendChild(_el("div", "dash-group-note", `备注：${esc(g.note)}`));
+      }
+      const cands = Array.isArray(g.candidates) ? g.candidates : [];
+      if (cands.length) {
+        const list = _el("div", "dash-group-cands");
+        for (const c of cands) {
+          const primary = c.code && c.code === g.signal_symbol;
+          list.appendChild(_el("div", `dash-group-cand${primary ? " primary" : ""}`,
+            `<span class="dash-group-dot">${primary ? "●" : "○"}</span>` +
+            `<span class="dash-group-cand-name">${esc(c.name || c.code || "")}</span>` +
+            (c.code ? `<span class="dash-group-cand-code">${esc(c.code)}</span>` : "") +
+            (c.note ? `<span class="dash-group-cand-note">${esc(c.note)}</span>` : "")));
+        }
+        card.appendChild(list);
+      }
+      const foot = [];
+      if (g.position) foot.push(`仓位 ${esc(g.position)}`);
+      foot.push(`触发 ${esc(_entryText(g.entry))}`);
+      if (g.invalidation) foot.push(`失效 ${esc(g.invalidation)}`);
+      card.appendChild(_el("div", "dash-group-foot", foot.join(" · ")));
+      wrap.appendChild(card);
+    }
+    section.appendChild(wrap);
+    return section;
+  };
+
   /* signal_row: 决策信号行 */
   SECTION_RENDERERS.signal_row = (data, _section, dt, color) => {
     const row = _el("div", "dash-signal-row");
+    const groups = Array.isArray(data.groups) ? data.groups.filter((g) => g && g.key) : [];
+    const multi = groups.length >= 2;
+    const sigLabel = multi ? "整体判断" : "决策信号";
     row.appendChild(_el("div", `dash-signal-box decision ${dt}`,
-      `<div class="dash-sig-label">决策信号</div>` +
+      `<div class="dash-sig-label">${sigLabel}</div>` +
       `<div class="dash-sig-value" style="color:${color}">${DASH_ICONS[dt]} ${DASH_LABELS[dt]}</div>` +
-      `<div class="dash-sig-sub">${DASH_SUBS[dt]}</div>`
+      `<div class="dash-sig-sub">${multi ? esc(_groupsSummary(groups)) : DASH_SUBS[dt]}</div>`
     ));
     /* A2 置信度徽标：绿 ≥0.75 / 黄 0.55-0.75 / 灰 <0.55（边框+文字，A 股配色不用红绿大色块）；
        悬停展示 basis 依据；NULL（旧数据）显「未评级」灰字无 tooltip（AC-2） */
@@ -596,6 +672,21 @@ window.StockRadar.chatDashboard = (() => {
         }
       }
       if (!sections) sections = _DEFAULT_SECTIONS;
+    }
+
+    /* groups 通用注入：模板 sections 是静态的，用户问题却是动态的 —— 任何仪表盘都可能
+       一次问多个方向/标的组。数据带 groups 而定义没声明 group_cards 时，插到核心结论之后，
+       让 market/stock 等看板也能展示组级明细（group_cards 对空 groups 自身返回 null）。 */
+    const groups = Array.isArray(data.groups) ? data.groups.filter((g) => g && g.key) : [];
+    const hasGroupSection = sections.some((s) => s.renderer === "group_cards");
+    if (groups.length && !hasGroupSection) {
+      const idx = sections.findIndex((s) => s.renderer === "verdict_text");
+      const at = idx >= 0 ? idx + 1 : 0;
+      sections = [
+        ...sections.slice(0, at),
+        { renderer: "group_cards", fields: ["groups"] },
+        ...sections.slice(at),
+      ];
     }
 
     /* Header */

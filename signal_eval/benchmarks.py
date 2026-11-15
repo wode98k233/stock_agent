@@ -9,17 +9,38 @@
 数据说明（2026-09-06 实测）：stock_board 列表 496 个行业板块齐全；
 stock_board_member 已随第二步管道全量同步；板块K线按需增量补齐
 （utils/cache/market_data_db.py::fetch_and_store_board_kline）。
+
+性能（2026-11 P0）：构建一次要扫 stock_board_member 全表（冷启动实测可到 ~20s）。
+因此构建结果落同库目录的 `bench_mapping.json`（`{"ts": epoch, "mapping": {...}}`），
+7 天内直接复用，不再查库；板块K线代码改用 PK 前缀范围查询避免全表扫。
+写盘失败/目录只读一律忽略，不影响 fail-safe 兜底口径。
 """
+import json
 import logging
+import os
 import re
 import sqlite3
 import threading
+import time
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 BENCH_FALLBACK = "000300"  # 沪深300 兜底
 
 _MAPPING_DB_PATH: str | None = None  # 测试可 patch；None = 默认 get_market_data_db_path()
+
+# 磁盘快照：与 market_data.db 同目录，7 天内有效（板块归属是低频数据）
+_MAPPING_SNAPSHOT = "bench_mapping.json"
+_MAPPING_TTL = 7 * 24 * 3600
+
+# 板块K线代码前缀。范围查询上界 = 前缀最后一字节 +1（'_' 0x5F → '`' 0x60）：
+# SQLite 的 BINARY 比较按 UTF-8 字节序，'board_industry`' 大于任何以
+# 'board_industry_' 开头的串——**含中文板块名**。不能写成追加 chr(0x7f)：
+# 中文首字节 ≥ 0xE0 > 0x7F，那样会把 board_industry_半导体 全部排除掉。
+_BOARD_CODE_PREFIX = "board_industry_"
+_BOARD_CODE_UPPER = _BOARD_CODE_PREFIX[:-1] + chr(ord(_BOARD_CODE_PREFIX[-1]) + 1)
+
 
 # 行业指数关键词表（专一在前：白酒 → 生物医药 → 医药 → 新能源 → 新能源车 → 消费）。
 # 指数必须在 index_daily 采集清单内（backtest/data_collector.py default_indices）。
@@ -74,10 +95,12 @@ def _load_mapping_from_db(db_path: str) -> dict[str, str]:
             # 各板块成分数（专一优先：成分越少越聚焦）
             counts = {r[0]: r[1] for r in conn.execute(
                 "SELECT board_id, COUNT(*) FROM stock_board_member GROUP BY board_id")}
-            # 可用板块K线（board_industry_ 前缀；旧库无 stock_daily 表时视为无）
+            # 可用板块K线（board_industry_ 前缀；旧库无 stock_daily 表时视为无）。
+            # 走 PK(code, trade_date) 的前缀范围，避免对全表做 LIKE 扫描。
             try:
                 board_codes = {r[0] for r in conn.execute(
-                    "SELECT DISTINCT code FROM stock_daily WHERE code LIKE 'board_industry_%'")}
+                    "SELECT DISTINCT code FROM stock_daily WHERE code >= ? AND code < ?",
+                    (_BOARD_CODE_PREFIX, _BOARD_CODE_UPPER))}
             except sqlite3.Error:
                 board_codes = set()
         finally:
@@ -109,8 +132,54 @@ def _load_mapping_from_db(db_path: str) -> dict[str, str]:
     return mapping
 
 
+def _mapping_file_path(db_path: str) -> Path:
+    """磁盘快照路径：与 market_data.db 同目录（显式 db_path 也用它自己的目录）。"""
+    return Path(db_path).parent / _MAPPING_SNAPSHOT
+
+
+def _load_mapping_from_disk(db_path: str) -> dict[str, str] | None:
+    """读磁盘快照：< 7 天且内容非空 → 直接用；缺失/损坏/过期 → None（回落到构建）。"""
+    try:
+        path = _mapping_file_path(db_path)
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        ts = float(payload.get("ts") or 0)
+        if not ts or time.time() - ts > _MAPPING_TTL:
+            return None
+        mapping = payload.get("mapping")
+        if not isinstance(mapping, dict) or not mapping:
+            return None
+        return {str(k): str(v) for k, v in mapping.items()}
+    except Exception as e:  # 文件不存在/坏 JSON/权限问题都不阻断主流程
+        logger.debug("[Bench] 磁盘映射快照不可用: %s", e)
+        return None
+
+
+def _save_mapping_to_disk(db_path: str, mapping: dict[str, str]) -> None:
+    """原子写回快照（tmp + replace）；空映射/写失败一律忽略。"""
+    if not mapping:
+        return
+    path = _mapping_file_path(db_path)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "mapping": mapping}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as e:  # 只读目录 / 并发写 / 磁盘满：忽略
+        logger.debug("[Bench] 磁盘映射快照写入失败（忽略）: %s", e)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 def build_bench_mapping(db_path: str | None = None) -> dict[str, str]:
-    """构建 {股票代码: 行业指数代码} 映射（模块级缓存，同库只构建一次）。"""
+    """构建 {股票代码: 行业指数代码} 映射（内存 → 磁盘快照 → 读库构建，逐级回落）。
+
+    - 同库只在内存里构建/读取一次；
+    - 内存未命中先读同目录 `bench_mapping.json`（<7 天 → 直接用，不查库）；
+    - 仍没有 → 读库构建，成功后原子写回快照（供下次进程冷启动秒开）。
+    """
     path = db_path or _MAPPING_DB_PATH
     if path is None:
         try:
@@ -120,15 +189,28 @@ def build_bench_mapping(db_path: str | None = None) -> dict[str, str]:
             logger.debug("[Bench] 取 market_data.db 路径失败: %s", e)
             return {}
     with _cache_lock:
-        if path not in _mapping_cache:
-            _mapping_cache[path] = _load_mapping_from_db(path)
-            logger.info("[Bench] 行业基准映射构建完成: %d 只个股命中行业指数",
-                        len(_mapping_cache[path]))
+        cached = _mapping_cache.get(path)
+        if cached is not None:
+            return cached
+        mapping = _load_mapping_from_disk(path)
+        if mapping is not None:
+            _mapping_cache[path] = mapping
+            logger.info("[Bench] 行业基准映射命中磁盘快照: %d 只个股", len(mapping))
+            return mapping
+        _mapping_cache[path] = _load_mapping_from_db(path)
+        logger.info("[Bench] 行业基准映射构建完成: %d 只个股命中行业指数",
+                    len(_mapping_cache[path]))
+        _save_mapping_to_disk(path, _mapping_cache[path])
         return _mapping_cache[path]
 
 
 def reset_cache() -> None:
-    """清空映射缓存（测试收尾 / 板块数据重同步后可调）。"""
+    """只清内存映射缓存（测试用）；不动磁盘快照，下次构建会命中文件。
+
+    ⚠️ 这也意味着「清内存 + 同目录还有 <7 天快照」时不会重新查库——想验证
+    重建路径需先删掉 `bench_mapping.json`（或改 ts），见 test/unit/signal_eval/
+    test_benchmarks.py::TestMappingSnapshot。
+    """
     with _cache_lock:
         _mapping_cache.clear()
 

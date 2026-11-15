@@ -2,14 +2,45 @@
   "meta": {
     "name": "DPO金叉死叉",
     "description": "DPO上穿MADPO买入（底部金叉），下穿MADPO卖出（顶部死叉）。区间震荡线剥离了长期趋势，只保留短期偏离，对拐点反应通常比MACD、KDJ更早，适合捕捉洗盘结束后的第一买点。",
-    "tags": ["震荡", "DPO", "反转", "拐点"],
+    "tags": [
+      "震荡",
+      "DPO",
+      "反转",
+      "拐点"
+    ],
     "source": "template",
     "strategy_id": "dpo_crossover",
     "category": "oscillator"
   },
   "params": {
-    "period": { "value": 20, "min": 10, "max": 60, "step": 1, "label": "DPO周期", "type": "int", "unit": "日" },
-    "smooth": { "value": 6, "min": 3, "max": 30, "step": 1, "label": "MADPO平滑", "type": "int", "unit": "日" }
+    "period": {
+      "value": 20,
+      "min": 10,
+      "max": 60,
+      "step": 1,
+      "label": "DPO周期",
+      "type": "int",
+      "unit": "日",
+      "help": "DPO 去趋势周期。越大越看长周期摆动。",
+      "recommended": [
+        15,
+        40
+      ]
+    },
+    "smooth": {
+      "value": 6,
+      "min": 3,
+      "max": 30,
+      "step": 1,
+      "label": "MADPO平滑",
+      "type": "int",
+      "unit": "日",
+      "help": "MADPO 平滑天数。越大信号越平滑、滞后越多。",
+      "recommended": [
+        4,
+        10
+      ]
+    }
   },
   "conditions": {
     "buy": {
@@ -17,9 +48,25 @@
       "rules": [
         {
           "type": "indicator",
-          "left": { "func": "dpo", "args": ["close", "{period}", "{smooth}"], "field": "dpo" },
+          "left": {
+            "func": "dpo",
+            "args": [
+              "close",
+              "{period}",
+              "{smooth}"
+            ],
+            "field": "dpo"
+          },
           "op": "cross_above",
-          "right": { "func": "dpo", "args": ["close", "{period}", "{smooth}"], "field": "madpo" }
+          "right": {
+            "func": "dpo",
+            "args": [
+              "close",
+              "{period}",
+              "{smooth}"
+            ],
+            "field": "madpo"
+          }
         }
       ]
     },
@@ -28,18 +75,44 @@
       "rules": [
         {
           "type": "indicator",
-          "left": { "func": "dpo", "args": ["close", "{period}", "{smooth}"], "field": "dpo" },
+          "left": {
+            "func": "dpo",
+            "args": [
+              "close",
+              "{period}",
+              "{smooth}"
+            ],
+            "field": "dpo"
+          },
           "op": "cross_below",
-          "right": { "func": "dpo", "args": ["close", "{period}", "{smooth}"], "field": "madpo" }
+          "right": {
+            "func": "dpo",
+            "args": [
+              "close",
+              "{period}",
+              "{smooth}"
+            ],
+            "field": "madpo"
+          }
         }
       ]
     }
   },
   "risk": {
-    "stop_loss": { "type": "fixed", "value": 0.05 },
-    "take_profit": { "type": "fixed", "value": 0.12 }
+    "stop_loss": {
+      "type": "fixed",
+      "value": 0.05
+    },
+    "take_profit": {
+      "type": "fixed",
+      "value": 0.12
+    }
   },
   "chart_indicators": [
-    { "type": "DPO", "period": "{period}", "smooth": "{smooth}" }
+    {
+      "type": "DPO",
+      "period": "{period}",
+      "smooth": "{smooth}"
+    }
   ]
 }

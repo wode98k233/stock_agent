@@ -49,6 +49,7 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
         logger=logger,
         log_tag="U",
         fallback_skill="UnifiedPlan",
+    for_binding=True,
     )
 
     history = memory.get_history()
@@ -74,6 +75,12 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
 
         # L1 渐进披露：注入计划涉及技能的用法详情（与 plan_solve/PDOR executor 对齐）。
         # unified 一次执行全部 step，故注入全部涉及技能的详情（去重保序）。
+        #
+        # ⚠️ PRD-A11 FR-10/11：这些详情与用户约束**随任务指令一起去尾部**（tail_extra），
+        # 不再插在 history 与 user 之间 —— 插在中间会让内层 agent 的 payload 从
+        # `[REACT][history]` 之后立刻与主链分叉，实测 agent#1 只命中 tools+cache_prefix
+        # （37%）；移到尾部后前缀与 React 主链同形，可被 planner 与跨模式调用共享。
+        tail_extra: list[str] = []
         detail_skills = list(dict.fromkeys(s for s in plan_skills if s))
         if not detail_skills:
             detail_skills = list(dict.fromkeys(
@@ -83,14 +90,14 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
             try:
                 detail = SkillPromptBuilder.build_tools_detail_prompt(registry, sk)
                 if detail:
-                    context_messages.append(("system", f"可用工具详情：\n{detail}"))
+                    tail_extra.append(f"可用工具详情：\n{detail}")
             except Exception as e:
                 logger.debug("U", f"技能详情注入失败 {sk}: {e}")
 
         # 注入用户约束
         user_constraints = state.get("user_constraints", "")
         if user_constraints:
-            context_messages.append(("system", f"[用户约束] {user_constraints}"))
+            tail_extra.append(f"[用户约束] {user_constraints}")
 
         context_messages.append(("user", state["input"]))
 
@@ -99,12 +106,17 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
             tools=all_tools,
             step_purpose=task,
             context_messages=context_messages,
+            # 角色指令 + 技能详情 + 约束一起放尾部（与主链 [REACT][history][guidance][user] 同形）
+            tail_system="\n\n".join(tail_extra),
             max_iterations=Config.PLAN_EXECUTOR_TOOL_CALLS,
             budget=budget,
             logger=logger,
             metadata={"plan_context": "unified_executor"},
             failed_tools=[],
             template_id=state.get("template_id"),
+            # ⚠️ guidance 的 user_input 用**用户原话**（= planner 用的同一个 state["input"]），
+            #    而非 step_purpose（计划串）—— 两处逐字节相同，planner 才能预热本 agent 首调。
+            guidance_input=state["input"],
         )
 
         result_text = result["final_result"]
@@ -192,6 +204,10 @@ async def unified_execute_step(state: PlanExecute, ctx: AgentContext, run_config
         updates.update({
             "past_steps": past_results,
             "response": result_text,
+            # PRD-A9 §14 fork：透传内层已热对话 + 同一份工具数组，供 report_enhance
+            # 复用前缀。plan_solve（多步）不传——它的报告输入是跨 step 聚合。
+            "_fork_messages": result.get("_fork_messages") or [],
+            "_fork_tools": result.get("_fork_tools") or [],
         })
         return updates
 

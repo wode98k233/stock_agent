@@ -11,7 +11,7 @@ def scans_on(monkeypatch):
     from config import Config
     for name in ("BACKGROUND_SCANS_ENABLED", "SCAN_STORAGE_ENABLED",
                  "SCAN_THESIS_ENABLED", "SCAN_CROWDING_ENABLED",
-                 "SCAN_SHORTLINE_ENABLED"):
+                 "SCAN_SHORTLINE_ENABLED", "SCAN_MARKET_AMOUNT_ENABLED"):
         monkeypatch.setattr(Config, name, True)
     return Config
 
@@ -247,10 +247,12 @@ class TestDefaultJobs:
         jobs = default_jobs()
         assert [j.key for j in jobs] == ["storage_scan", "thesis_refresh",
                                          "crowding_scan", "shortline_refresh",
-                                         "kline_keepalive"]
+                                         "pricing_check", "uploads_cleanup",
+                                         "kline_keepalive", "market_amount_refresh"]
         assert [j.name for j in jobs] == ["存储监控扫描", "研究台账刷新",
                                           "全市场拥挤度扫描", "短线情绪预热",
-                                          "K 线保活"]
+                                          "定价目录巡检", "对话图片清理",
+                                          "K 线保活", "全市场成交额日终补录"]
         assert all(j.enabled for j in jobs)
         assert all(j.interval_minutes > 0 and j.first_delay_s >= 0 for j in jobs)
         # 首次延迟必须错峰：启动期三个 warmup 正在抢 GIL，一起开跑会拖慢首字节
@@ -285,7 +287,8 @@ class TestDefaultJobs:
         mgr = ScanManager()
         keys = register_default_jobs(mgr)
         assert keys == ["storage_scan", "thesis_refresh", "crowding_scan",
-                        "shortline_refresh", "kline_keepalive"]
+                        "shortline_refresh", "pricing_check", "uploads_cleanup",
+                        "kline_keepalive", "market_amount_refresh"]
         assert mgr.keys() == keys
 
     def test_job_functions_are_the_real_ones(self, scans_on):

@@ -35,6 +35,8 @@ class ClassifyNode:
         out = {"is_stock_related": True, "response": None}
         if result.get("clarified_input"):
             out["clarified_input"] = result["clarified_input"]
+        if result.get("task_spec"):
+            out["task_spec"] = result["task_spec"]
         return out
 
 

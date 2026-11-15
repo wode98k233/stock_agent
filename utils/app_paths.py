@@ -198,6 +198,11 @@ def get_signal_eval_db_path() -> str:
     return os.path.join(get_db_dir(), 'signal_eval.db')
 
 
+def get_deep_report_db_path() -> str:
+    """获取长报告（深度研报）元数据库路径（独立库，避免与业务库抢锁）"""
+    return os.path.join(get_db_dir(), 'deep_report.db')
+
+
 def get_monitor_alerts_db_path() -> str:
     """获取盯盘告警数据库路径（规则 + 告警历史，独立于 stock_radar.db 零锁冲突）"""
     return os.path.join(get_db_dir(), 'monitor_alerts.db')
@@ -266,3 +271,9 @@ def get_user_profile_dir() -> str:
     p = os.path.join(get_app_dir(), 'data', 'user_profile')
     os.makedirs(p, exist_ok=True)
     return p
+
+def get_uploads_dir() -> str:
+    """对话图片上传目录（按月分子目录由 server/uploads.py 管理）。"""
+    d = os.path.join(get_app_dir(), "output", "uploads")
+    os.makedirs(d, exist_ok=True)
+    return d

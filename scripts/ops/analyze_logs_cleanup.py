@@ -393,7 +393,7 @@ def _resolve_default_paths() -> tuple[str, str]:
         from utils.app_paths import get_db_path, get_logs_dir
         return get_logs_dir(), get_db_path()
     except Exception:
-        return str(project_root / "logs"), str(project_root / "stock_radar.db")
+        return str(project_root / "logs"), str(project_root / "db" / "stock_radar.db")
 
 
 def main() -> int:

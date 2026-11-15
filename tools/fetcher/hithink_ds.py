@@ -152,6 +152,25 @@ class HithinkDataSource(DataSource):
             return ""
         return datetime.fromtimestamp(float(ms) / 1000, tz=_CN_TZ).strftime("%Y-%m-%d")
 
+    @classmethod
+    def _date_ms_or_effective(cls, date: str = None) -> "int | None":
+        """date_ms 参数解析：显式日期优先；缺省回退「最近一个已收盘交易日」。
+
+        为什么不能裸缺省（2026-10-15 事故复盘）：special-data 端点对「不带日期」
+        的默认口径不统一 —— 涨停池服务端自身会回退（10-15 凌晨实测返回 10-14
+        的 20 条），炸板池/跌停池不回退（同时点实测均返回 0 条；显式传
+        '2026-10-14' 则分别返回 20 / 11 条）。后果：agent 把「空数组」误读为
+        「0 家炸板、封板质量尚可」，与 40 分钟前同工具的 20 只炸板直接矛盾。
+        由客户端统一显式回退，三个池行为确定且一致。
+        """
+        if date:
+            return cls._to_ms(date)
+        try:
+            from utils.trading_calendar import get_effective_trading_date
+            return cls._to_ms(get_effective_trading_date("cn").isoformat())
+        except Exception:
+            return None  # 拿不到交易日历就保持原行为（交由服务端默认）
+
     # ── 历史K线 ───────────────────────────────────────────
 
     @classmethod
@@ -467,8 +486,9 @@ class HithinkDataSource(DataSource):
             "sort_field": "continue_day_cnt",
             "sort_dir": "desc",
         }
-        if date:
-            params["date_ms"] = cls._to_ms(date)
+        _ms = cls._date_ms_or_effective(date)
+        if _ms is not None:
+            params["date_ms"] = _ms
         data = cls._get("/api/a-share/special-data/limit-up-pool", params)
         items = data.get("item") or []
         rows = []
@@ -497,8 +517,9 @@ class HithinkDataSource(DataSource):
             "sort_field": "open_times",
             "sort_dir": "desc",
         }
-        if date:
-            params["date_ms"] = cls._to_ms(date)
+        _ms = cls._date_ms_or_effective(date)
+        if _ms is not None:
+            params["date_ms"] = _ms
         data = cls._get("/api/a-share/special-data/limit-break-pool", params)
         items = data.get("item") or []
         rows = []
@@ -658,8 +679,9 @@ class HithinkDataSource(DataSource):
             "sort_field": "last_limit_time",
             "sort_dir": "desc",
         }
-        if date:
-            params["date_ms"] = cls._to_ms(date)
+        _ms = cls._date_ms_or_effective(date)
+        if _ms is not None:
+            params["date_ms"] = _ms
         data = cls._get("/api/a-share/special-data/limit-down-pool", params)
         items = data.get("item") or []
         return [{

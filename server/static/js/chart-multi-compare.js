@@ -54,10 +54,14 @@ window.StockRadar.MultiCompareChart = (() => {
     if (vMax == null) vMax = Math.max(...vals);
     if (vMin === vMax) { vMin -= 0.01; vMax += 0.01; }
 
-    // 回撤颜色反转（负值=红即好）
+    // 色带按模式分开：
+    //   收益 / 夏普 —— 围绕 0 发散，负绿正红（A 股语义，和 K 线一致）
+    //   最大回撤   —— 恒为负值，没有"正方向"，只表达深浅：越深越红
+    // 原来三个模式共用同一组 #14b143/#ef232a，回撤模式等于没做（三元两分支字面相同）。
+    const UP = '#e74c3c', DOWN = '#176b5b';
     const colorRange = _colorMode === 'drawdown'
-      ? ['#14b143', '#fff', '#ef232a']
-      : ['#14b143', '#fff', '#ef232a'];
+      ? [UP, '#ffffff']
+      : [DOWN, '#ffffff', UP];
 
     _chart.setOption({
       tooltip: {

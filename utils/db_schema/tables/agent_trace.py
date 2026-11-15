@@ -105,7 +105,20 @@ TABLES = [
                       "CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status)"]),
 ]
 
-# 月库三表（runs/steps/messages，按月分库用）；messages 的补列迁移随表归集
-MONTH_TABLES = TABLES[:3]
+# 内容寻址的压缩长文本（trace 瘦身 T2，见
+# docs/superpowers/specs/2026-10-19-trace-storage-slimming-design.md §7）。
+# 行内只留哨兵 "\x01B<codec>:<hash>"；读侧经 utils/agent_trace/blobstore.py 的行工厂
+# 透明解压，因此新老格式（内联文本 / 哨兵引用）可以在同一个库里混存。
+BLOBS = TableDef(name="blobs", ddl="""CREATE TABLE IF NOT EXISTS blobs (
+    hash    TEXT PRIMARY KEY,
+    codec   TEXT NOT NULL,
+    raw_len INTEGER NOT NULL,
+    data    BLOB NOT NULL
+)""")
+
+TABLES = TABLES + [BLOBS]
+
+# 月库四表（runs/steps/messages + blobs，按月分库用）；messages 的补列迁移随表归集
+MONTH_TABLES = TABLES[:3] + [BLOBS]
 # 主库仅 reviews（评审记录生命周期独立于 trace 月库）
 REVIEW_TABLES = [TABLES[3]]

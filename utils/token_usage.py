@@ -21,7 +21,11 @@ _ZERO_USAGE = {
     "cache_hit_ratio": 0.0,
     "cache_read_input_tokens": 0,
     "cache_creation_input_tokens": 0,
+    "cache_miss_input_tokens": 0,  # DeepSeek 口径：未命中缓存的输入 token
     "reasoning_tokens": 0,   # 思考 token（含在 output_tokens 内），缺失回退 0
+    "tools_count": 0,       # 工具 schema 数量（明细，含在 input_tokens 内）
+    "tools_chars": 0,       # 工具 schema 字符数（明细，不参与计价）
+    "tools_measured": False,  # 哨兵：本次调用是否**被埋点**（False=未采集，不是「没工具」）
     "source": "none",
 }
 
@@ -110,6 +114,40 @@ def extract_model_name(response) -> str:
     return ""
 
 
+def extract_base_url(response) -> str:
+    """从 LLM 响应中提取本次调用**实际使用**的端点地址（供应商统计用）。
+
+    由 ``TokenCompatibleChatOpenAI._create_chat_result`` 回填到 ``llm_output.base_url``。
+    同一模型可能经不同供应商/中转（主端点 / 压缩旁路 / 报告旁路，各自不同 base_url），
+    供应商与成本反查必须以实际端点为准；缺失（老路径 / 流式聚合）时返回 ""，
+    调用方回落全局默认端点，保持既有行为。
+    """
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(llm_output, dict):
+        url = llm_output.get("base_url")
+        if url:
+            return str(url)
+    return ""
+
+
+def _as_int(value) -> int:
+    """宽松取整：脏数据（非数字字符串 / None / 对象）一律回退 0，绝不抛。
+
+    extra 是自由 JSON（旧版本 / 人工写入都可能落脏值），而本模块的归一入口被
+    trace 聚合路径（utils/agent_trace/context_stats.py）无条件调用 —— 为一个明细
+    字段抛 ValueError 会把整条 insight 接口打成 500，代价远大于读成 0。
+
+    ⚠️ 本轮**只**用它护 tools_count / tools_chars 两个**新增**明细字段。既有字段
+    （input_tokens / output_tokens / reasoning_tokens / cached_tokens 等）**有意保持
+    严格 int() / 原样透传**：上面那条理由对它们同样成立，但换掉它们等于静默改变既有
+    脏数据语义（属行为变更、不在本任务范围）。**请勿顺手替换。**
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_reasoning_tokens(usage: dict) -> int:
     """从 usage 字典提取思考 token 数，兼容多种形态。
 
@@ -170,6 +208,16 @@ def normalize_token_usage_dict(data: dict | None) -> dict:
         "cache_read_input_tokens": cache["cache_read_input_tokens"],
         "cache_creation_input_tokens": cache["cache_creation_input_tokens"],
         "reasoning_tokens": reasoning,
+        "tools_count": _as_int(data.get("tools_count")),
+        "tools_chars": _as_int(data.get("tools_chars")),
+        # 哨兵透传，判据是 `is True`（fail-safe）：为真 = 本次调用**确实被埋点**
+        #（真绑 0 个工具也记 0，仍是实测值）。
+        # ⚠️ 不能用 bool(x or False)：extra 是自由 JSON，字符串 "false" / "0" 会被
+        #    bool() 读成「已采集」，而它们**必然**伴随 tools_chars 缺省 → 消费侧显示
+        #    假 0（0 = 实测没工具）—— 正是哨兵要防的方向。任何非 True 一律未采集，
+        #    脏数据只可能落到 None，不可能落到假 0。（全仓唯一写真值的地方是
+        #    utils/llm_factory.py::_attach_tool_schema_stats，写的是真 True。）
+        "tools_measured": data.get("tools_measured") is True,
         "source": data.get("source", "normalized"),
     }
 
@@ -180,6 +228,7 @@ def _extract_cache_fields(usage: dict) -> dict:
     支持:
     - OpenAI: prompt_tokens_details.cached_tokens / input_token_details.cached_tokens
     - Anthropic: cache_read_input_tokens / cache_creation_input_tokens
+    - DeepSeek: prompt_cache_hit_tokens / prompt_cache_miss_tokens
     - LangChain usage_metadata: input_token_details.cache_read
     """
     cached = 0
@@ -195,17 +244,26 @@ def _extract_cache_fields(usage: dict) -> dict:
     cache_read = usage.get("cache_read_input_tokens") or 0
     cache_creation = usage.get("cache_creation_input_tokens") or 0
 
+    # DeepSeek top-level（命中 token 折算为 cache_read；写入缓存免费，故 creation 恒为 0）
+    ds_hit = usage.get("prompt_cache_hit_tokens") or 0
+    if ds_hit:
+        cache_read = max(cache_read, ds_hit)
+        if not cache_creation:
+            cache_creation = 0  # DeepSeek 不对缓存写入单独计价
+    # DeepSeek 未命中数不参与 cached 计算，仅保留在 usage 原字段中
+
     # 兼容: cached_tokens 可能直接在顶层
     if not cached:
         cached = usage.get("cached_tokens") or 0
 
-    # cached_tokens 取较大值（OpenAI cached 或 Anthropic cache_read）
+    # cached_tokens 取较大值（OpenAI cached / Anthropic cache_read / DeepSeek hit）
     effective_cached = max(cached, cache_read)
 
     return {
         "cached_tokens": effective_cached,
         "cache_read_input_tokens": cache_read or cached,
         "cache_creation_input_tokens": cache_creation,
+        "cache_miss_input_tokens": usage.get("prompt_cache_miss_tokens") or 0,
     }
 
 
@@ -244,6 +302,10 @@ def _extract_from_dict(usage: dict, source: str) -> dict:
         "cache_hit_ratio": hit_ratio,
         "cache_read_input_tokens": cache["cache_read_input_tokens"],
         "cache_creation_input_tokens": cache["cache_creation_input_tokens"],
+        "cache_miss_input_tokens": cache["cache_miss_input_tokens"],
         "reasoning_tokens": reasoning,
+        "tools_count": _as_int(usage.get("tools_count")),
+        "tools_chars": _as_int(usage.get("tools_chars")),
+        "tools_measured": usage.get("tools_measured") is True,   # fail-safe，理由见上方 normalize
         "source": source,
     }

@@ -113,6 +113,37 @@ def _short_col_name(col: str) -> str:
     return col
 
 
+# 指标名归一：问财的列名带着域前缀与口径后缀（'净资产收益率roe(加权,公布值)同比增长率'），
+# 直接当图例会把 ECharts 图例撑破，也读不出是什么指标。
+_IWC_METRIC_ALIASES = (
+    ("净资产收益率roe", "ROE"),
+    ("净资产收益率", "ROE"),
+    ("归属于母公司所有者的净利润", "净利润"),
+    ("归属于母公司股东的净利润", "净利润"),
+    ("归母净利润", "净利润"),
+    ("营业收入(同比增长率)", "营收同比"),
+    ("营业收入", "营收"),
+    ("市盈率", "PE"),
+    ("市净率", "PB"),
+    ("涨跌幅:前复权", "涨跌幅"),
+    ("涨跌幅:不复权", "涨跌幅"),
+    ("收盘价:前复权", "收盘价"),
+    ("收盘价:不复权", "收盘价"),
+)
+
+
+def _short_metric_name(base: str) -> str:
+    """把问财列名压成可读图例：'净资产收益率roe(加权,公布值)同比增长率' → 'ROE同比'。"""
+    name = str(base or "")
+    for old, new in _IWC_METRIC_ALIASES:
+        name = name.replace(old, new)
+    for junk in ("(加权,公布值)", "（加权,公布值）", "(pe,ttm)", "(PE,TTM)"):
+        name = name.replace(junk, "")
+    name = name.replace("同比增长率", "同比").replace("环比增长", "环比")
+    name = name.replace("最新", "").replace("ttm", "TTM")
+    return name.strip() or str(base or "")
+
+
 def _find_date_col(fieldnames: list) -> str:
     """找日期列：优先含 date，否则第一列。"""
     for f in fieldnames:
@@ -196,6 +227,299 @@ def _extract_entity(table: dict) -> tuple[str, str]:
     return "", ""
 
 
+# ═══════════════════════════════════════════════════════════════
+# mx_data_query 表格的四种「朝向」
+#
+# 2026-11-03 实测：妙想返回的 tables 并不是只有「一行一日期、一列一指标」这一种。
+# 同一次 run 里四种朝向都出现过，而旧实现只认第 ④ 种，于是报告里零图：
+#
+#   ① 横表·列是标的：rows=1，fieldnames=[date, 上证指数(…), 深证成指(…), …]
+#   ② 截面·行是标的：fieldnames=[date, 成交额, 涨跌幅]，date 列里装的是「上证指数」
+#   ③ 时序矩阵：rows=日期，列=标的（白酒Ⅱ(板块) / 食品饮料(板块)）
+#   ④ 长表·行是日期：rows=日期，列=指标（均线/RSI/MACD/财务/资金流）← 旧实现唯一支持
+#
+# 判别只靠两件事：date 列的值像不像日期、列名像不像标的。判错会画出
+# 「拿指标当标的」的怪图（2026-11-03 用户截图里的「板块累计涨跌幅 vs 上证指数」）。
+# ═══════════════════════════════════════════════════════════════
+
+_DATE_LIKE_RE = re.compile(r"\d{4}\s*[-/.年]\s*\d{1,2}")
+# 标的形态：带代码括号，或者板块/指数/ETF 这类名字
+_ENTITY_HINT_RE = re.compile(
+    r"[（(]\d{5,6}(?:\.[A-Za-z]{2})?[）)]|板块|指数|ETF|LOF|基金|行业|证券")
+
+# 单指标折线的指标优先级（长表里没有均线/RSI 这类规则命中时用它兜底）
+_SERIES_METRICS = ("收盘价", "最新价", "收盘点位", "成交额", "成交金额", "涨跌幅")
+_CROSS_METRICS = ("涨跌幅", "最新涨跌幅", "主力净流入", "净流入", "成交额",
+                  "收盘价", "最新价")
+
+
+def _looks_date_like(value) -> bool:
+    return bool(_DATE_LIKE_RE.search(str(value or "")))
+
+
+def _looks_entity_name(value) -> bool:
+    return bool(_ENTITY_HINT_RE.search(str(value or "")))
+
+
+def _short_entity(field: str) -> str:
+    """列名里的标的显示名：'上证指数(000001.SH)(指数)' → '上证指数'。"""
+    name = re.sub(r"[（(]\d{5,6}(?:\.[A-Za-z]{2})?[）)]", "", str(field or ""))
+    name = name.replace("(指数)", "").replace("(板块)", "").strip()
+    return name or str(field or "")
+
+
+def _metric_from_sheet(sheet_name: str) -> str:
+    """从 sheet 名里抠指标名：'食品饮料(板块)等的(区间)主力净流入资金' → '主力净流入资金'。"""
+    text = str(sheet_name or "")
+    for sep in ("等当前的", "等的", "的"):
+        if sep in text:
+            text = text.split(sep, 1)[1]
+            break
+    text = text.split("、")[0]
+    text = re.sub(r"[（(][^）)]*[）)]", "", text).strip()
+    return text[:14] or "数值"
+
+
+def _pick_metric_field(fields: list, priority) -> str:
+    """按优先级挑一个指标列（同关键词取列名最短的，避开「xxx同比增长率」这类变体）。"""
+    for kw in priority:
+        cands = sorted([f for f in fields if kw.lower() in str(f).lower()],
+                       key=lambda x: (len(str(x)), str(x)))
+        for f in cands:
+            if any(x in str(f) for x in ("增长", "同比", "环比", "累计", "区间")):
+                continue
+            return f
+    return ""
+
+
+def _table_cross_fragment(rows: list, fields: list, entity_values: list,
+                          metric_field: str, unit: str, title_prefix: str,
+                          code: str, name: str, dialog_uuid: str) -> list:
+    """行=标的的截面柱状图（② 与 ① 共用）。"""
+    if not metric_field or len(entity_values) < 2:
+        return []
+    data = [_to_float(r.get(metric_field)) for r in rows]
+    if all(v is None for v in data):
+        return []
+    metric = _short_metric_name(metric_field)
+    first = next((v for v in entity_values if v), "")
+    n = len([v for v in entity_values if v])
+    scope = f"{first}等{n}只" if n > 1 else first
+    option = {
+        "xAxis": [{"data": entity_values}],
+        "series": [{"name": metric, "type": "bar", "data": data}],
+    }
+    if unit:
+        option["yUnit"] = unit
+    return [_mk_fragment("comparison", code, name, f"{metric}对比·{scope}",
+                         option, dialog_uuid)]
+
+
+def _table_series_fragment(rows: list, fields: list, date_col: str, entities: list,
+                           dialog_uuid: str, code: str = "", name: str = "",
+                           metric_hint: str = "") -> list:
+    """③ 时序矩阵：行=日期、列=标的 → 多线折线图。"""
+    if len(rows) < 3 or not entities:
+        return []
+    ordered = sorted(
+        [r for r in rows if _looks_date_like(r.get(date_col))],
+        key=lambda r: str(r.get(date_col)),
+    )[-_SERIES_MAX_POINTS:]
+    if len(ordered) < 3:
+        return []
+    dates = [str(r.get(date_col)) for r in ordered]
+    series = []
+    for f in entities[:_SERIES_MAX_ROWS_SIMPLE]:
+        data = [_to_float(r.get(f)) for r in ordered]
+        if all(v is None for v in data):
+            continue
+        series.append({"name": _short_entity(f), "type": "line", "data": data})
+    if not series:
+        return []
+    metric = _short_metric_name(
+        next((kw for kw in _SERIES_METRICS if kw in str(fields)), "") or metric_hint or "数值")
+    option = {"xAxis": [{"data": dates}], "series": series}
+    return [_mk_fragment("time_series", code, name, f"{metric}走势", option, dialog_uuid)]
+
+
+def _mk_fragment(chart_type: str, code: str, name: str, title: str,
+                 option: dict, dialog_uuid: str = "") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "dialog_uuid": dialog_uuid,
+        "chart_type": chart_type,
+        "stock_code": code,
+        "stock_name": name,
+        "title": title.strip(),
+        "data_json": json.dumps(option, ensure_ascii=False),
+        "annotations": "[]",
+        "source": "rule",
+    }
+
+
+_SERIES_MAX_ROWS_SIMPLE = 4
+
+
+def _table_fragments(table: dict, stock_code: str, stock_name: str,
+                     dialog_uuid: str) -> list:
+    """单表 → 图表（按朝向分派，最多 2 张）。"""
+    fieldnames = table.get("fieldnames") or []
+    rows = [r for r in (table.get("rows") or []) if isinstance(r, dict)]
+    if not fieldnames or not rows:
+        return []
+    entity_name, entity_code = _extract_entity(table)
+    code = entity_code or stock_code
+    name = entity_name or stock_name
+    sheet = str(table.get("sheet_name") or "")
+    date_col = _find_date_col(fieldnames)
+    others = [f for f in fieldnames if f != date_col]
+    if not others:
+        return []
+
+    # ① 单行 + 列是标的 → 横表截面
+    entity_cols = [f for f in others if _looks_entity_name(f)]
+    if len(rows) == 1 and len(entity_cols) >= 2:
+        metric = _metric_from_sheet(sheet)
+        labels = [_short_entity(f) for f in entity_cols]
+        data = [_to_float(rows[0].get(f)) for f in entity_cols]
+        if any(v is not None for v in data):
+            scope = f"{labels[0]}等{len(labels)}只" if len(labels) > 1 else labels[0]
+            return [_mk_fragment(
+                "comparison", code, name, f"{metric}对比·{scope}",
+                {"xAxis": [{"data": labels}],
+                 "series": [{"name": metric, "type": "bar", "data": data}]},
+                dialog_uuid)]
+
+    col_values = [rows[i].get(date_col) for i in range(len(rows))]
+    dateish = sum(1 for v in col_values if _looks_date_like(v))
+
+    # ② date 列里装的是标的 → 截面柱状
+    if dateish == 0 and len(rows) >= 2:
+        labels = [_short_entity(v) for v in col_values]
+        metric = _pick_metric_field(others, _CROSS_METRICS)
+        return _table_cross_fragment(
+            rows, fieldnames, labels, metric, "",
+            f"{name or _metric_from_sheet(sheet)}", code, name, dialog_uuid)
+
+    # ③ 行=日期、列=标的 → 多线折线
+    if dateish >= 2 and len(entity_cols) >= 2:
+        frags = _table_series_fragment(rows, fieldnames, date_col, entity_cols,
+                                       dialog_uuid, code, name,
+                                       metric_hint=_metric_from_sheet(sheet))
+        if frags:
+            return frags
+
+    # ④ 长表：原有规则（均线/RSI/MACD/财务/资金流）
+    out = []
+    for pat, matched_cols in _match_patterns(fieldnames):
+        data_json = _build_data_json(pat, fieldnames, rows, matched_cols)
+        if data_json is None:
+            continue
+        out.append(_mk_fragment(pat["chart_type"], code, name,
+                                f"{name or code} {pat['title']}".strip(),
+                                data_json, dialog_uuid))
+    if out:
+        return out[:2]
+
+    # ⑤ 长表兜底：单指标折线（收盘价/成交额/涨跌幅）
+    if dateish >= 3:
+        metric = _pick_metric_field(others, _SERIES_METRICS)
+        if metric:
+            ordered = sorted(
+                [r for r in rows if _looks_date_like(r.get(date_col))],
+                key=lambda r: str(r.get(date_col)),
+            )[-120:]
+            dates = [str(r.get(date_col)) for r in ordered]
+            data = [_to_float(r.get(metric)) for r in ordered]
+            if any(v is not None for v in data):
+                return [_mk_fragment(
+                    "time_series", code, name,
+                    f"{name or code} {_short_metric_name(metric)}",
+                    {"xAxis": [{"data": dates}],
+                     "series": [{"name": _short_metric_name(metric),
+                                 "type": "line", "data": data}]},
+                    dialog_uuid)]
+    return []
+
+
+def _merge_series_tables(tables: list, dialog_uuid: str):
+    """把「同结构、每张表一个标的」的长表合并成一张多线图。
+
+    典型来源（2026-11-03 实测）：问「上证指数 深证成指 创业板指 科创50 最新点位」，
+    妙想会返回 4 张同构表，每张 `fields=['date','成交额','收盘价','涨跌幅']`、
+    sheet 名里各带一个指数。逐表画会得到 4 张几乎一样的单线图，合并成一张
+    4 条线的走势图才有信息量。
+
+    返回 (fragments, 已消费的 table id 集合)。
+    """
+    groups: dict = {}
+    for table in tables:
+        fieldnames = tuple(table.get("fieldnames") or [])
+        rows = [r for r in (table.get("rows") or []) if isinstance(r, dict)]
+        if not fieldnames or len(rows) < 3:
+            continue
+        date_col = _find_date_col(list(fieldnames))
+        if sum(1 for r in rows if _looks_date_like(r.get(date_col))) < 3:
+            continue
+        entity_name, _ = _extract_entity(table)
+        if not entity_name:
+            continue
+        groups.setdefault((fieldnames, date_col), []).append((entity_name, rows, id(table)))
+
+    out, consumed = [], set()
+    for (fieldnames, date_col), items in groups.items():
+        if len(items) < 2:
+            continue
+        metric = _pick_metric_field([f for f in fieldnames if f != date_col], _SERIES_METRICS)
+        if not metric:
+            continue
+        day_map: dict = {}
+        for entity_name, rows, _tid in items:
+            for r in rows:
+                day = str(r.get(date_col))
+                day_map.setdefault(day, {})[entity_name] = _to_float(r.get(metric))
+        days = sorted(day_map)[-_SERIES_MAX_POINTS:]
+        if len(days) < 3:
+            continue
+        series = []
+        for entity_name, _rows, _tid in items[:_SERIES_MAX_ROWS_SIMPLE]:
+            values = [(day_map.get(d) or {}).get(entity_name) for d in days]
+            if all(v is None for v in values):
+                continue
+            series.append({"name": entity_name, "type": "line", "data": values})
+        if len(series) < 2:
+            continue
+        out.append(_mk_fragment(
+            "time_series", "", "", f"{_short_metric_name(metric)}走势",
+            {"xAxis": [{"data": days}], "series": series}, dialog_uuid))
+        consumed.update(tid for _, _, tid in items)
+    return out, consumed
+
+
+def _dedupe_fragments(fragments: list, keep: int = 4) -> list:
+    """同一次工具调用内的图表去重：同一 (chart_type, 指标) 只留数据点最多的那张。
+
+    不做这一步的话，一次查询会产出「4 个指数」「2 个指数」等多张同指标图，
+    报告尾部变成同一件事的复读机。
+    """
+    best: dict = {}
+    order: list = []
+    for frag in fragments:
+        try:
+            option = json.loads(frag["data_json"])
+            points = len((option.get("xAxis") or [{}])[0].get("data") or [])
+            series = option.get("series") or [{}]
+            key = (frag["chart_type"], str(series[0].get("name") or frag["title"]))
+        except Exception:
+            points, key = 0, (frag["chart_type"], frag["title"])
+        if key not in best:
+            order.append(key)
+            best[key] = (points, frag)
+        elif points > best[key][0]:
+            best[key] = (points, frag)
+    return [best[k][1] for k in order][:keep]
+
+
 def extract_from_tables(tables: list, stock_code: str = "", stock_name: str = "",
                         dialog_uuid: str = "") -> list[dict]:
     """规则萃取主入口：扫描 tables → 生成 ChartFragment dict 列表（未入库）。
@@ -203,35 +527,369 @@ def extract_from_tables(tables: list, stock_code: str = "", stock_name: str = ""
     tables: mx_data 返回的 [{"sheet_name", "fieldnames", "rows"}, ...]
     实体标注：优先取每个表格 sheet_name 里的真实实体（多股查询各表独立），
     提取不到时回退到调用方传入的 stock_code/stock_name。
+    四种表朝向的分派见 `_table_fragments`；同构多表先合并成多线图。
     """
-    fragments = []
+    tables = [t for t in tables if isinstance(t, dict)]
+    merged, consumed = _merge_series_tables(tables, dialog_uuid)
+    fragments = list(merged)
     for table in tables:
-        if not isinstance(table, dict):
+        if id(table) in consumed:
             continue
-        fieldnames = table.get("fieldnames") or []
-        rows = table.get("rows") or []
-        if not fieldnames or not rows:
+        try:
+            fragments.extend(_table_fragments(table, stock_code, stock_name, dialog_uuid))
+        except Exception:
             continue
-        # 表级实体（真实数据源），回退到调用方参数
-        entity_name, entity_code = _extract_entity(table)
-        code = entity_code or stock_code
-        name = entity_name or stock_name
-        for pat, matched_cols in _match_patterns(fieldnames):
-            data_json = _build_data_json(pat, fieldnames, rows, matched_cols)
-            if data_json is None:
+    return _dedupe_fragments(fragments)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 问财（iwc_query）萃取：截面 → 对比柱状图；宽表 → 折线图
+#
+# 为什么必须有这一层（2026-11-02）：本项目的图表曾被硬编码成「只认
+# mx_data_query 的 tables 结构」，而 agent 的主力数据源早已换成 iwc_query
+# （同花顺问财，见 tools/other_skills/10jqka/skills.py）。两者返回结构完全不同：
+#   mx_data_query: {"tables": [{"sheet_name", "fieldnames", "rows"}]}  ← 长表
+#   iwc_query:     {"data": {"columns": [...], "datas": [...]}}        ← 宽表
+# 结果 chart_fragments 从 2026-10-30 起再无新增，报告全零图（连柱状/折线都没有）。
+#
+# 问财数据的两个形态必须分开处理：
+#   1) **截面**（48/49 次调用）：datas 一行一标的、columns 是指标 → x 轴用标的名，
+#      图表是「多标的对比柱状图」；
+#   2) **宽表时间序列**：同一指标带一串日期后缀列（收盘价[20261022]…×120）→
+#      x 轴用日期，图表是折线。日期在**列名**里，不在行里，这是与 mx 最大的差异。
+#
+# ⚠️ 区间合计列必须整列丢弃：`涨跌幅[20260929-20261102]` 是区间累计值，
+# 与 `涨跌幅[20261102]`（当日）混在一张图上会让读者误读（见
+# agents/deep_report/series.py 的同款判定与 test_interval_aggregate_rejected）。
+# ═══════════════════════════════════════════════════════════════
+
+# 支持图表萃取的工具有哪些（tool_node_base 与 extract_from_tool_output 共用一份，
+# 避免两处白名单各写各的——历史上就是两处硬编码，谁先改谁静默失效）
+CHART_TOOLS = frozenset({"mx_data_query", "iwc_query", "get_etf_history"})
+
+# 返回 OHLCV 序列（可以直接画折线）的工具
+_BAR_TOOLS = frozenset({"get_etf_history"})
+
+_IWC_TS_SUFFIX_RE = re.compile(r"[\[(]([^\])\s]+)[\])]\s*$")
+_IWC_RANGE_TS_RE = re.compile(r"\d{4}-?\d{2}-?\d{2}\s*[-~至]\s*\d{4}-?\d{2}-?\d{2}")
+_IWC_DAY_RE = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})")
+_IWC_NUMERIC_TYPES = ("DOUBLE", "FLOAT", "INT", "INTEGER", "LONG", "NUMBER")
+_IWC_NAME_LABELS = ("name",)
+_IWC_CODE_LABELS = ("code",)
+_IWC_NAME_KEYS = ("股票简称", "指数简称", "基金简称", "板块名称", "名称", "简称")
+_IWC_CODE_KEYS = ("股票代码", "指数代码", "基金代码", "板块代码", "代码")
+
+_SERIES_MAX_POINTS = 120      # 折线最多 120 个点（与 deep_report 的 SERIES_MAX_POINTS 对齐）
+_SERIES_MAX_ROWS = 4          # 宽表里最多画 4 个标的的线
+_SERIES_MAX_ROWS_SIMPLE = 4   # mx 时序矩阵里最多画 4 个标的的线
+_CROSS_MAX_ROWS = 20          # 截面最多画 20 根柱
+_CROSS_MAX_CHARTS = 3         # 单次工具输出最多产出 3 张对比图（防图表墙）
+
+# 截面图规则：keys 按优先级**逐个尝试**，先命中先选中（每张图只画 1 个指标）。
+#
+# 为什么要「优先级 + 单指标」而不是「关键词全收」（2026-11-02 实测教训）：
+# 问财一份截面里同一业务概念会有很多列 —— 最新涨跌幅 / 涨跌幅[当日] /
+# 涨跌幅:前复权 / 涨跌幅:前复权同比增长率 / 涨跌幅[20日区间累计]，关键词都是
+# 「涨跌幅」。全收会把「当日涨跌幅」和「同比增长率（实测有 +156%、-756%）」
+# 画进同一个坐标轴，读者直接误判。同理 PE 与 PB 单位不同，绝不能同轴。
+_CROSS_PATTERNS = [
+    {
+        "keys": ("最新涨跌幅", "涨跌幅", "涨跌"),
+        "title": "涨跌幅对比",
+        "label": "涨跌幅",
+        # 增长率/区间累计/振幅换手都不是「当日涨跌幅」，一律不选
+        "exclude": ("增长", "同比", "环比", "累计", "区间", "振幅", "换手", "分位"),
+    },
+    {
+        "keys": ("市盈率", "pe", "市净率", "pb"),
+        "title": "估值对比",
+        "label": "市盈率TTM",
+        "exclude": ("增长", "分位", "百分位", "历史"),
+    },
+    {
+        "keys": ("净资产收益率", "roe", "毛利率"),
+        "title": "盈利能力对比",
+        "label": "ROE",
+        "exclude": ("分位", "百分位"),
+    },
+    {
+        "keys": ("归母净利润", "净利润", "营业收入", "营收"),
+        "title": "财务对比",
+        "label": "净利润同比",
+        "exclude": (),
+    },
+]
+
+
+def _iwc_col_key(col: dict) -> str:
+    """列在 datas 行里的取值键（key > feKey > index_name）。"""
+    for k in ("key", "feKey", "index_name"):
+        v = col.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+def _iwc_base_name(col: dict) -> str:
+    """去掉日期后缀：'收盘价[20261102]' → '收盘价'。"""
+    name = _iwc_col_key(col)
+    base = _IWC_TS_SUFFIX_RE.sub("", name).strip()
+    return base or name
+
+
+def _iwc_col_ts(col: dict) -> str:
+    """列日期：优先 timestamp 字段，否则从列名后缀解析（后端只保证一种）。"""
+    ts = str(col.get("timestamp") or "").strip()
+    if ts:
+        return ts
+    m = _IWC_TS_SUFFIX_RE.search(_iwc_col_key(col))
+    return m.group(1).strip() if m else ""
+
+
+def _iwc_is_range_ts(ts: str) -> bool:
+    return bool(_IWC_RANGE_TS_RE.search(str(ts or "")))
+
+
+def _iwc_is_numeric(col: dict, rows: list) -> bool:
+    if str(col.get("type") or "").upper() in _IWC_NUMERIC_TYPES:
+        return True
+    key = _iwc_col_key(col)
+    for row in rows[:5]:
+        if isinstance(row, dict) and _to_float(row.get(key)) is not None:
+            return True
+    return False
+
+
+def _iwc_entity_cols(cols: list) -> tuple:
+    """找出 (名称列, 代码列) 的取值键；找不到返回空串。"""
+    name_key = code_key = ""
+    for col in cols:
+        key = _iwc_col_key(col)
+        label = str(col.get("label") or "")
+        index_name = str(col.get("index_name") or "")
+        if not code_key and (label in _IWC_CODE_LABELS or index_name in _IWC_CODE_KEYS):
+            code_key = key
+        if not name_key and (label in _IWC_NAME_LABELS or index_name in _IWC_NAME_KEYS):
+            name_key = key
+    return name_key, code_key
+
+
+def _iwc_make_fragment(chart_type: str, code: str, name: str, title: str,
+                       option: dict, dialog_uuid: str = "") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "dialog_uuid": dialog_uuid,
+        "chart_type": chart_type,
+        "stock_code": code,
+        "stock_name": name,
+        "title": title,
+        "data_json": json.dumps(option, ensure_ascii=False),
+        "annotations": "[]",
+        "source": "rule",
+    }
+
+
+def _iwc_series_fragments(cols: list, rows: list, name_key: str, code_key: str,
+                          dialog_uuid: str = "") -> list:
+    """宽表时间序列 → 折线图（同一指标带多个日期后缀列）。"""
+    groups: dict = {}
+    for col in cols:
+        ts = _iwc_col_ts(col)
+        if not ts or _iwc_is_range_ts(ts):
+            continue
+        if not _iwc_is_numeric(col, rows):
+            continue
+        groups.setdefault(_iwc_base_name(col), []).append(col)
+
+    out = []
+    for base, group in groups.items():
+        by_day: dict = {}
+        for col in group:
+            m = _IWC_DAY_RE.search(_iwc_col_ts(col))
+            if not m:
                 continue
-            fragments.append({
-                "id": str(uuid.uuid4()),
-                "dialog_uuid": dialog_uuid,
-                "chart_type": pat["chart_type"],
-                "stock_code": code,
-                "stock_name": name,
-                "title": f"{name or code} {pat['title']}",
-                "data_json": json.dumps(data_json, ensure_ascii=False),
-                "annotations": "[]",
-                "source": "rule",
-            })
-    return fragments
+            by_day.setdefault(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", col)
+        if len(by_day) < 5:          # 少于 5 个点画折线没意义
+            continue
+        days = sorted(by_day)[-_SERIES_MAX_POINTS:]
+        series = []
+        for row in rows[:_SERIES_MAX_ROWS]:
+            if not isinstance(row, dict):
+                continue
+            entity = ""
+            if name_key or code_key:
+                entity = str(row.get(name_key) or row.get(code_key) or "")
+            values = [_to_float(row.get(_iwc_col_key(by_day[d]))) for d in days]
+            if all(v is None for v in values):
+                continue
+            series.append({"name": f"{entity} {base}".strip(), "type": "line", "data": values})
+        if not series:
+            continue
+        code = ""
+        if rows and isinstance(rows[0], dict) and code_key:
+            code = str(rows[0].get(code_key) or "")
+        option = {"xAxis": [{"data": days}], "series": series}
+        out.append(_iwc_make_fragment(
+            "time_series", code, "", f"{base}走势", option, dialog_uuid))
+        if len(out) >= 2:            # 一次输出最多 2 张折线
+            break
+    return out
+
+
+def _iwc_pick_metric(latest: dict, pat: dict):
+    """按优先级为该规则挑一列；找不到返回 None。
+
+    latest: {base_name: (ts, col)}，同一业务概念的多列都在里面。
+    """
+    exclude = tuple(str(x).lower() for x in (pat.get("exclude") or ()))
+    for key in pat["keys"]:
+        k = str(key).lower()
+        # 同 key 命中多列时，列名越短越「纯」（避免挑到 xxx:前复权同比增长率）
+        candidates = sorted(
+            (base for base in latest if k in base.lower()),
+            key=lambda b: (len(b), b),
+        )
+        for base in candidates:
+            if any(x in base.lower() for x in exclude):
+                continue
+            return latest[base][1], base
+    return None
+
+
+def _iwc_cross_fragments(cols: list, rows: list, name_key: str, code_key: str,
+                         dialog_uuid: str = "") -> list:
+    """截面（多标的 × 多指标）→ 对比柱状图（一图一指标）。"""
+    if len(rows) < 2:
+        return []
+    entity_key = name_key or code_key
+    if not entity_key:
+        return []
+
+    # 每个指标只留「最新一期」那一列；区间合计列（涨跌幅[2026xxxx-2026xxxx]）丢弃
+    latest: dict = {}
+    for col in cols:
+        ts = _iwc_col_ts(col)
+        if ts and _iwc_is_range_ts(ts):
+            continue
+        if not _iwc_is_numeric(col, rows):
+            continue
+        key = _iwc_col_key(col)
+        if key in (name_key, code_key):
+            continue
+        base = _iwc_base_name(col)
+        prev = latest.get(base)
+        if prev is None or ts >= prev[0]:
+            latest[base] = (ts, col)
+    if not latest:
+        return []
+
+    sample = rows[:_CROSS_MAX_ROWS]
+    labels = [str(r.get(entity_key) or "") if isinstance(r, dict) else "" for r in sample]
+    if not any(labels):
+        return []
+
+    out = []
+    for pat in _CROSS_PATTERNS:
+        if len(out) >= _CROSS_MAX_CHARTS:
+            break
+        picked = _iwc_pick_metric(latest, pat)
+        if not picked:
+            continue
+        col, base = picked
+        key = _iwc_col_key(col)
+        data = [_to_float(r.get(key)) if isinstance(r, dict) else None for r in sample]
+        if all(v is None for v in data):
+            continue
+        # 标题带上首个标的与样本数：既让人一眼知道范围，也避免同一份报告里
+        # 「涨跌幅对比」标题重名（report_builder 按 title 去重，重名只会剩最后一张）
+        first = next((x for x in labels if x), "")
+        n = sum(1 for x in labels if x)
+        scope = f"{first}等{n}只" if n > 1 else first
+        title = f"{pat['title']}·{scope}" if scope else pat["title"]
+        option = {
+            "xAxis": [{"data": labels}],
+            "series": [{"name": _short_metric_name(base),
+                        "type": "bar", "data": data}],
+        }
+        out.append(_iwc_make_fragment(
+            pat.get("chart_type", "comparison"), "", "", title, option, dialog_uuid))
+    return out
+
+
+def extract_from_iwc(data: dict, dialog_uuid: str = "") -> list:
+    """iwc_query 输出 → ChartFragment 列表（未入库）。
+
+    先试宽表时间序列（折线），没有再退回截面（对比柱状）。两者都拿不到就返回 []。
+    任何异常都返回 []（调用方还有一层 try/except）。
+    """
+    try:
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            return []
+        cols = payload.get("columns") or []
+        rows = payload.get("datas") or []
+        if not cols or not rows:
+            return []
+        cols = [c for c in cols if isinstance(c, dict)]
+        name_key, code_key = _iwc_entity_cols(cols)
+        frags = _iwc_series_fragments(cols, rows, name_key, code_key, dialog_uuid)
+        if frags:
+            return frags
+        return _iwc_cross_fragments(cols, rows, name_key, code_key, dialog_uuid)
+    except Exception:
+        return []
+
+
+# ── K 线类工具（get_etf_history 等）→ 收盘价 + 均线折线图 ──
+#
+# 为什么不做成蜡烛图：普通 @@CHART 片段只支持 line/bar（前端 _buildFragmentOption
+# 只认 series[].type），真蜡烛图必须走 tech_panel，而 tech_panel 的数据来自本地
+# market_data.db。ETF 的本地覆盖极差（1710 只里只有 71 只有 ≥60 根日 K），
+# 所以这类标的用工具当场返回的 OHLCV 画折线兜底。
+
+_BAR_LINE_MAX_POINTS = 120
+
+
+def _moving_average(values: list, n: int) -> list:
+    """简单移动平均，不足 n 个点的位置补 None（保证与 x 轴等长）。"""
+    out = []
+    for i in range(len(values)):
+        if i + 1 < n:
+            out.append(None)
+            continue
+        window = [v for v in values[i - n + 1:i + 1] if v is not None]
+        out.append(round(sum(window) / n, 4) if len(window) == n else None)
+    return out
+
+
+def extract_from_bars(bars: list, code: str = "", name: str = "",
+                      dialog_uuid: str = "") -> list:
+    """OHLCV 序列 → 一张「收盘价 + MA5 + MA20」折线图。
+
+    bars 元素形如 {"date": "2026-11-02", "open":…, "close":…, "volume":…}；
+    取不到至少 5 根就返回 []（点太少画折线没意义）。
+    """
+    try:
+        if not isinstance(bars, list):
+            return []
+        rows = [b for b in bars
+                if isinstance(b, dict) and b.get("date") and b.get("close") is not None]
+        if len(rows) < 5:
+            return []
+        rows = rows[-_BAR_LINE_MAX_POINTS:]
+        dates = [str(b["date"]) for b in rows]
+        closes = [_to_float(b.get("close")) for b in rows]
+        series = [{"name": "收盘价", "type": "line", "data": closes}]
+        for n in (5, 20):
+            if len(closes) >= n:
+                series.append({"name": f"MA{n}", "type": "line",
+                               "data": _moving_average(closes, n)})
+        option = {"xAxis": [{"data": dates}], "series": series}
+        title = f"{name or code} 收盘价与均线".strip()
+        return [_iwc_make_fragment("time_series", str(code or ""), str(name or ""),
+                                   title, option, dialog_uuid)]
+    except Exception:
+        return []
 
 
 # ── chart_fragments 持久化（stock_radar.db，DDL 单一事实源 utils/db_schema） ──
@@ -396,26 +1054,47 @@ def ensure_tech_panel(code: str, name: str = "", dialog_uuid: str = "",
         return None
 
 
-def extract_from_tool_output(tool_name: str, content: str, dialog_uuid: str = "") -> list[str]:
+def extract_from_tool_output(tool_name: str, content: str, dialog_uuid: str = "",
+                             tool_args: dict = None) -> list[str]:
     """Agent 集成入口：从工具输出 JSON 萃取图表并入库，返回图表 ID 列表。
+
+    支持的工具在 ``CHART_TOOLS`` 里（mx_data_query / iwc_query / get_etf_history）；
+    ``tool_args`` 只在 K 线类工具里用来取标的代码（输出本身不带 code）。
 
     设计约束（效率/失败隔离）：
     - 同步执行但为纯 CPU + 本地 SQLite，毫秒级，不调 LLM
     - 任何异常都返回 []，绝不上抛（调用方再包 try/except 双保险）
     - stock_code 从 query 中正则提取（6 位数字），提取不到留空
     """
-    if tool_name != "mx_data_query":
+    if tool_name not in CHART_TOOLS:
         return []
     try:
         data = json.loads(content)
-        tables = data.get("tables") or []
-        if not tables:
-            return []
-        query = str(data.get("query", ""))
-        m = _STOCK_CODE_RE.search(query)
-        stock_code = m.group(0) if m else ""
-        fragments = extract_from_tables(tables, stock_code=stock_code,
-                                        stock_name="", dialog_uuid=dialog_uuid)
+    except Exception:
+        return []
+    try:
+        fragments: list = []
+        if tool_name == "iwc_query":
+            fragments = extract_from_iwc(data, dialog_uuid=dialog_uuid)
+        elif tool_name in _BAR_TOOLS:
+            args = tool_args if isinstance(tool_args, dict) else {}
+            code = str(args.get("symbol") or args.get("code") or "")
+            if isinstance(data, list):
+                bars = data
+            elif isinstance(data, dict):
+                bars = data.get("latest_5") or data.get("data") or []
+            else:
+                bars = []
+            fragments = extract_from_bars(bars, code=code, dialog_uuid=dialog_uuid)
+        else:
+            tables = data.get("tables") if isinstance(data, dict) else None
+            if not tables:
+                return []
+            query = str(data.get("query", ""))
+            m = _STOCK_CODE_RE.search(query)
+            stock_code = m.group(0) if m else ""
+            fragments = extract_from_tables(tables, stock_code=stock_code,
+                                            stock_name="", dialog_uuid=dialog_uuid)
         if not fragments:
             return []
         insert_fragments(fragments)

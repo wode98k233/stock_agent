@@ -16,10 +16,13 @@
     dialogs: [],
     currentId: null,
     taskId: null,
+    transcriptAppendTail: false,
     eventSource: null,
     statusBubble: null,
     statusPlayer: null,
     selectedMode: "react_stock",
+    // v1：单图；{name, mime, dataUrl}
+    pendingImages: [],
   };
 
   const dom = {
@@ -37,6 +40,9 @@
     modeTrigger: document.getElementById("modeTrigger"),
     modeLabel: document.getElementById("modeLabel"),
     modeDropdown: document.getElementById("modeDropdown"),
+    typeTrigger: document.getElementById("typeTrigger"),
+    typeLabel: document.getElementById("typeLabel"),
+    typeDropdown: document.getElementById("typeDropdown"),
     dialogTitle: document.getElementById("dialogTitle"),
     dialogMeta: document.getElementById("dialogMeta"),
     connectionStatus: document.getElementById("connectionStatus"),
@@ -49,7 +55,139 @@
     execBtn: document.getElementById("execBtn"),
     execScanBar: document.getElementById("execScanBar"),
     execScanFill: document.getElementById("execScanFill"),
+    imageBtn: document.getElementById("imageBtn"),
+    imageInput: document.getElementById("imageInput"),
+    imagePreview: document.getElementById("imagePreview"),
   };
+
+  /* ── 池子验证实时进度条（对话内） ──────────────────────────────
+     池子任务是后台跑的，不占当前 turn；进度走 /pool-runs/{id}/events。
+     这里在对话顶部挂一条 sticky 进度条，按「已跑 X/Y 只」更新，完成给结果入口。
+     ⚠️ 不能只在当前 turn 的 SSE 里等：turn 早就结束了，必须单独订阅池子 SSE。 */
+  const POOL_RUN_RE = /\bPR-\d{10,}-[0-9a-z]+\b/i;
+  const poolLiveChecked = new Set();
+  let poolLive = { runId: "", es: null, el: null };
+
+  function stopPoolLive() {
+    if (poolLive.es) poolLive.es.close();
+    if (poolLive.el && poolLive.el.parentNode) {
+      poolLive.el.parentNode.removeChild(poolLive.el);
+    }
+    // 允许切回该会话时重新接上（已结束的 run 会被状态检查过滤掉）
+    if (poolLive.runId) poolLiveChecked.delete(poolLive.runId);
+    poolLive = { runId: "", es: null, el: null };
+  }
+
+  function _setPoolLive(bar, pct, text) {
+    const fill = bar.querySelector(".pool-live-fill");
+    const pctEl = bar.querySelector(".pool-live-pct");
+    const meta = bar.querySelector(".pool-live-meta");
+    if (fill) fill.style.width = pct + "%";
+    if (pctEl) pctEl.textContent = pct + "%";
+    if (meta && text) meta.textContent = text;
+  }
+
+  // 从进度对象折算「百分比 + 文案」：SSE 增量事件与重连补种共用同一口径
+  function _applyPoolProgress(bar, d) {
+    const phase = String((d && d.phase) || "");
+    const total = Number(d && d.total) || 0;
+    if (phase === "generate") { _setPoolLive(bar, 5, "正在生成策略…"); return; }
+    if (phase === "portfolio") { _setPoolLive(bar, 96, "逐只完成，正在跑组合…"); return; }
+    if (!total) {
+      if (phase === "evaluate") _setPoolLive(bar, 10, "策略已生成，开始逐只回测…");
+      return;
+    }
+    const done = Number(d.done) || 0;
+    const rounds = Number(d.rounds) || 1;
+    const round = Number(d.round) || 1;
+    // 10% 起步、95% 封顶（最后 5% 留给组合层）。
+    // 矩阵/口径对比是多组串行：按「已完成组 + 当前组内进度」折算，条只前进不倒退。
+    const frac = Math.min(1, done / total);
+    const pct = Math.min(95, 10 + Math.round(((round - 1) + frac) / rounds * 85));
+    const prefix = rounds > 1 ? "第 " + round + "/" + rounds + " 组 · " : "";
+    _setPoolLive(bar, pct,
+      prefix + "已跑 " + done + "/" + total + " 只（成功 " + (d.ok || 0) +
+      "，失败 " + (d.fail || 0) + "）");
+  }
+
+  function startPoolLive(runId, progress) {
+    stopPoolLive();
+    const pane = document.querySelector(".chat-pane");
+    if (!pane) return;
+    const bar = document.createElement("div");
+    bar.className = "pool-live";
+    bar.innerHTML =
+      '<div class="pool-live-head"><span>池子验证 <code>' + runId + '</code></span>' +
+      '<span class="pool-live-pct">0%</span></div>' +
+      '<div class="pool-live-track"><div class="pool-live-fill"></div></div>' +
+      '<div class="pool-live-meta">排队中…</div>';
+    pane.insertBefore(bar, pane.firstChild);
+    _setPoolLive(bar, 2, "排队中…");
+    // 事件队列可能已被上一个订阅者取空（切会话/刷新再回来）：先用服务端最新进度补种
+    _applyPoolProgress(bar, progress);
+    const es = new EventSource(
+      "/api/strategy-research/pool-runs/" + encodeURIComponent(runId) + "/events");
+    es.addEventListener("pool_phase", (ev) => {
+      try { _applyPoolProgress(bar, JSON.parse(ev.data)); } catch {}
+    });
+    es.addEventListener("pool_progress", (ev) => {
+      try { _applyPoolProgress(bar, JSON.parse(ev.data)); } catch {}
+    });
+    // EventSource 会自连重试，只有彻底关闭（404 / 服务端拒绝）才收尾；
+    // 否则 run 已经不存在时进度条会永远停在 2%「排队中…」。
+    es.onerror = () => {
+      if (es.readyState !== EventSource.CLOSED) return;
+      _setPoolLive(bar, 100, "进度已丢失（可在「池子研究」页查看结果）");
+      bar.classList.add("error");
+      poolLive = { runId: "", es: null, el: bar };
+    };
+    es.addEventListener("final", () => {
+      _setPoolLive(bar, 100, "完成");
+      bar.classList.add("done");
+      es.close();
+      const btn = document.createElement("button");
+      btn.className = "pool-live-link";
+      btn.textContent = "查看结果";
+      btn.onclick = () => {
+        if (window.StockRadar.poolStudy) window.StockRadar.poolStudy.openPage(runId);
+      };
+      const head = bar.querySelector(".pool-live-head");
+      if (head) head.appendChild(btn);
+      poolLive = { runId: "", es: null, el: bar };
+    });
+    es.addEventListener("task_error", (ev) => {
+      let msg = "失败";
+      try { msg = JSON.parse(ev.data).message || msg; } catch {}
+      _setPoolLive(bar, 100, "失败：" + msg);
+      bar.classList.add("error");
+      es.close();
+    });
+    poolLive = { runId, es, el: bar };
+  }
+
+  function ensurePoolProgressFromText(text) {
+    const m = String(text || "").match(POOL_RUN_RE);
+    if (!m) return;
+    const runId = m[0];
+    if (poolLive.runId === runId || poolLiveChecked.has(runId)) return;
+    poolLiveChecked.add(runId);
+    // 老 run 已经结束就别挂进度条（刷新历史时只接正在跑的）
+    fetch("/api/strategy-research/pool-runs/" + encodeURIComponent(runId))
+      .then((r) => {
+        // 404 = 这条 run 已经不在内存里（池子任务只活在 web 进程字典中，服务重启即丢）。
+        // 不能把 404 当成「还在跑」，否则会挂一条永远停在 2%「排队中…」的假进度条。
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then((j) => {
+        const row = (j && j.data) || {};
+        if (!row.status || row.status === "done" || row.status === "failed") return;
+        // 事件队列可能已被上一个订阅者取空：用服务端最新进度补种，别又从「排队中…」开始
+        startPoolLive(runId, row.progress || {});
+      })
+      .catch(() => { poolLiveChecked.delete(runId); });
+  }
 
   /* ── 执行抽屉 / 顶栏扫描条（方案 C：进度不再占右栏） ── */
   function setExecDrawer(open) {
@@ -80,6 +218,8 @@
       dom.stopTaskBtn.disabled = false;
       if (!running) dom.stopTaskBtn.title = "停止当前任务（下一检查点生效）";
     }
+    // 跟随：任务开始即默认开启（思考链逐字增长时视口持续贴底）
+    if (window.StockRadar.chatFollow) window.StockRadar.chatFollow.setRunning(running);
   }
 
   function setExecScan(pct) {
@@ -195,6 +335,7 @@
               dom.dialogTitle.textContent = "新对话";
               dom.dialogMeta.textContent = "请选择或创建对话";
               chat.showEmptyState(dom.messageList);
+              syncDeepReportEntry();
             }
             loadDialogs();
           });
@@ -204,8 +345,16 @@
     });
   }
 
+  // 左侧「深度报告」入口：href 跟随当前对话，生成完成后卡片落回该对话
+  function syncDeepReportEntry() {
+    const btn = document.getElementById("deepReportBtn");
+    if (!btn) return;
+    btn.href = "/static/deep-report.html" + (state.currentId ? `?dialog_uuid=${encodeURIComponent(state.currentId)}` : "");
+  }
+
   async function selectDialog(id) {
     state.currentId = id;
+    syncDeepReportEntry();
     renderDialogList();
     // crossfade 过渡
     dom.messageList.style.opacity = "0";
@@ -235,6 +384,7 @@
       dom.messageList.innerHTML = "";
       dom.progressList.innerHTML = "";
       dom.traceList.innerHTML = "";
+      stopPoolLive();
       tl.clearAll();
 
       if (msgs.length === 0) {
@@ -252,10 +402,21 @@
       }
 
       msgs.forEach((m) => {
-        const meta = m.role === "assistant" ? { trace_run_id: m.trace_run_id, task_id: m.task_id, dialog_uuid: m.dialog_uuid, log_file: m.log_file, message_uuid: m.message_uuid } : null;
+        let attachments = null;
+        if (m.attachments) {
+          try { attachments = JSON.parse(m.attachments); } catch { attachments = null; }
+        }
+        const meta = m.role === "assistant"
+          ? { trace_run_id: m.trace_run_id, task_id: m.task_id, dialog_uuid: m.dialog_uuid, log_file: m.log_file, message_uuid: m.message_uuid }
+          : (attachments && attachments.length ? { attachments, message_uuid: m.message_uuid } : null);
         chat.appendMessage(dom.messageList, m.role, m.content, false, meta);
       });
       chat.scrollBottom(dom.messageList);
+
+      // 刷新/切回：最近的助手消息里若有仍在跑的池子 run，把实时进度条接回来
+      msgs.slice(-3).forEach((m) => {
+        if (m.role === "assistant") ensurePoolProgressFromText(m.content);
+      });
 
       // 从持久化的 progress 事件中还原「记忆上下文」卡片与过程流（transcript）到主对话
       const nodes = Array.from(dom.messageList.children);
@@ -267,6 +428,10 @@
             const mc = list.find((ev) => ev.type === "memory_context") || null;
             if (mc && nodes[idx]) {
               chat.appendMemoryContext(dom.messageList, mc, nodes[idx]);
+            }
+            // 成本 chip（成本 / 计价 §8②）：与实时 SSE 同一口径，刷新/切回也看得到
+            if (nodes[idx] && window.StockRadar.chatCost) {
+              window.StockRadar.chatCost.renderForMessage(nodes[idx], list);
             }
             const trEntries = list.filter((ev) => ev && ev.type === "transcript" && ev.entry_id);
             if (trEntries.length && nodes[idx] && window.StockRadar.chatTranscript) {
@@ -481,6 +646,8 @@
   function connectSSE(taskId) {
     disconnectSSE();
     state.taskId = taskId;
+    // 新任务：过程卡重新锚到状态气泡之前（上一轮的「分段追加」标志不跨任务）
+    state.transcriptAppendTail = false;
     dom.progressList.innerHTML = "";
     dom.traceList.innerHTML = "";
     tl.clearAll();
@@ -544,8 +711,11 @@
         const entry = JSON.parse(e.data);
         const ct = window.StockRadar.chatTranscript;
         if (ct && entry && entry.entry_id) {
-          ct.upsert(state.taskId, entry, dom.messageList,
-            state.statusBubble ? state.statusBubble.wrap : null);
+          // 澄清反问后过程卡已分段，新卡锚到列表末尾（状态气泡此时已在反问上方）
+          const anchor = state.transcriptAppendTail
+            ? null
+            : (state.statusBubble ? state.statusBubble.wrap : null);
+          ct.upsert(state.taskId, entry, dom.messageList, anchor);
         }
       } catch {}
     });
@@ -600,6 +770,15 @@
             chat.appendMessage(dom.messageList, "assistant", data.content || "", true);
           }
 
+          // 成本 chip 兜底：正常情况下随后 refreshCurrentDialog 会走恢复路径重建，
+          // 这里先渲染一次，避免刷新失败时看不到「本次花了多少」
+          if (data.cost && window.StockRadar.chatCost) {
+            const nodes = Array.from(dom.messageList.querySelectorAll(".message.assistant"));
+            const last = nodes[nodes.length - 1];
+            if (last) window.StockRadar.chatCost.render(last, data.cost);
+          }
+          // 池子任务是后台跑的：从回复里的 PR-… 认出 run_id，单独订阅进度 SSE
+          ensurePoolProgressFromText(data.content || "");
           dom.taskStatus.textContent = "完成";
           dom.connectionStatus.textContent = "就绪";
           setExecRunning(false);
@@ -649,6 +828,7 @@
             .filter(Boolean).join("\n");
           chat.appendMessage(dom.messageList, "assistant", qText, false);
           chat.appendMessage(dom.messageList, "user", "补充信息：\n" + aText + "\n（超时未作答，按推荐选项继续）", false);
+          _splitTranscriptAfterClarify();
           chat.scrollBottom(dom.messageList);
         }
       } catch {}
@@ -928,6 +1108,7 @@
           .join("\n");
         chat.appendMessage(dom.messageList, "assistant", qText, false);
         chat.appendMessage(dom.messageList, "user", "补充信息：\n" + aText, false);
+        _splitTranscriptAfterClarify();
         chat.scrollBottom(dom.messageList);
       } catch {}
       api.clarifyDecision(taskId, { answers, skipped: skippedIds }).catch(function () {});
@@ -981,12 +1162,93 @@
   }
 
   // 真正发送并处理响应（task_id 走 SSE，content 直接渲染）
-  async function _deliverMessage(text) {
-    const data = await api.sendMessage(state.currentId, text, state.selectedMode);
+  async function _deliverMessage(text, attachments = []) {
+    if (reportType === "strategy") {
+      await _startStrategyBacktest(text);
+      return;
+    }
+    const wantsDeep = reportType === "deep_report" ||
+      (reportType === "auto" && /深度(报告|研究)|万字|完整报告/.test(text));
+    if (wantsDeep) {
+      await _startDeepReport(text);
+      return;
+    }
+    const turnType = reportType === "chat" ? "chat" : "auto";
+    const data = await api.sendMessage(state.currentId, text, state.selectedMode, turnType,
+                                       attachments);
     if (data.task_id) {
       connectSSE(data.task_id);
     } else if (data.content) {
       chat.appendMessage(dom.messageList, "assistant", data.content, true);
+      dom.sendBtn.disabled = false;
+      dom.sendBtn.classList.remove("loading");
+    }
+  }
+
+  // 深度报告：先让后端从问题里抽标的/模板（失败自动降级），再起任务并刷新对话让卡片出现
+  async function _startDeepReport(text) {
+    try {
+      const plan = await api.fetchJSON("/api/deep-reports/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const d = (plan && plan.data) || {};
+      await api.fetchJSON("/api/deep-reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          universe: d.universe || text.slice(0, 20),
+          request: d.request || text,
+          template_id: d.template_id || "deep_sector_finance",
+          fetch: true,
+          dialog_uuid: state.currentId,
+        }),
+      });
+      _flashHint(d.fallback
+        ? "已按原问题启动深度报告（标的由兜底识别，约 10–15 分钟）"
+        : "已启动深度报告（约 10–15 分钟），卡片会显示进度");
+      await loadMessages(state.currentId);
+    } catch (e) {
+      _appendFailedBubble(text, "深度报告启动失败: " + e.message);
+    } finally {
+      dom.sendBtn.disabled = false;
+      dom.sendBtn.classList.remove("loading");
+    }
+  }
+
+  // 策略回测：从对话直接起「策略研究」任务（自然语言 → LLM 生成策略 → IS/OOS 回测）
+  async function _startStrategyBacktest(text) {
+    try {
+      const plan = await api.fetchJSON("/api/deep-reports/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const universe = ((plan && plan.data) || {}).universe || text.slice(0, 20);
+      const res = await api.fetchJSON("/api/strategy-research/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idea: text,
+          universe,
+          source: "chat",
+          dialog_uuid: state.currentId,
+        }),
+      });
+      if (!res || res.code !== 0) {
+        throw new Error((res && res.msg) || "策略研究接口返回失败");
+      }
+      _flashHint("已启动策略研究/回测（标的：" + universe + "），几分钟后可在策略面板查看");
+      await loadMessages(state.currentId);
+    } catch (e) {
+      // 接口不可用/识别不出标的：退回打开回测面板，把原话留在输入框
+      const btn = document.getElementById("backtestBtn");
+      if (btn) btn.click();
+      dom.messageInput.value = text;
+      dom.messageInput.focus();
+      _flashHint("策略研究启动失败（" + e.message + "），已打开回测面板");
+    } finally {
       dom.sendBtn.disabled = false;
       dom.sendBtn.classList.remove("loading");
     }
@@ -1018,8 +1280,89 @@
     return false;
   }
 
+  /* ── 图片输入（v1：单图，服务端转成文字后进对话） ─────────────── */
+  const IMAGE_MAX_MB = 5;
+
+  function _notice(msg) {
+    if (!dom.imagePreview) return;
+    dom.imagePreview.hidden = false;
+    dom.imagePreview.textContent = msg;
+    setTimeout(() => {
+      if (state.pendingImages.length === 0 && dom.imagePreview) {
+        dom.imagePreview.hidden = true;
+        dom.imagePreview.textContent = "";
+      }
+    }, 2600);
+  }
+
+  function _renderPendingImages() {
+    if (!dom.imagePreview) return;
+    dom.imagePreview.innerHTML = "";
+    state.pendingImages.forEach((item, idx) => {
+      const box = document.createElement("div");
+      box.className = "composer-image-item";
+      const img = document.createElement("img");
+      img.src = item.dataUrl;
+      img.alt = item.name || "图片";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "composer-image-remove";
+      btn.setAttribute("aria-label", "移除图片");
+      btn.textContent = "×";
+      btn.onclick = () => {
+        state.pendingImages.splice(idx, 1);
+        _renderPendingImages();
+      };
+      box.appendChild(img);
+      box.appendChild(btn);
+      dom.imagePreview.appendChild(box);
+    });
+    dom.imagePreview.hidden = state.pendingImages.length === 0;
+  }
+
+  function _addImageFile(file) {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type || "")) {
+      _notice("仅支持 PNG / JPEG / WebP 图片");
+      return;
+    }
+    if (file.size > IMAGE_MAX_MB * 1024 * 1024) {
+      _notice(`图片超过 ${IMAGE_MAX_MB}MB 上限`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      // v1 单图：新图替换旧图
+      state.pendingImages = [{ name: file.name, mime: file.type, dataUrl: String(reader.result) }];
+      _renderPendingImages();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function _clearPendingImages() {
+    state.pendingImages = [];
+    _renderPendingImages();
+  }
+
+  async function _uploadPendingImages() {
+    const out = [];
+    for (const item of state.pendingImages) {
+      const b64 = String(item.dataUrl || "").split(",")[1] || "";
+      const resp = await api.uploadImage(item.name, item.mime, b64);
+      if (resp && resp.data && resp.data.id) {
+        out.push({ id: resp.data.id, name: item.name });
+      }
+    }
+    return out;
+  }
+
   async function sendMessage(text) {
-    if (!text.trim()) return;
+    const images = state.pendingImages.slice();
+    if (!text.trim() && !images.length) return;
+    if (images.length && (reportType === "strategy" || reportType === "deep_report")) {
+      _notice("图片暂只支持普通对话（策略回测 / 深度报告请先用文字描述）");
+      return;
+    }
 
     if (!state.currentId) {
       await createDialog();
@@ -1029,13 +1372,33 @@
     const emptyEl = dom.messageList.querySelector(".empty-state");
     if (emptyEl) emptyEl.remove();
 
-    chat.appendMessage(dom.messageList, "user", text, true);
+    let attachments = [];
+    let imgStatus = null;
+    if (images.length) {
+      // 图片识别是同步阻塞的（实测 30–60s），先给一个进度气泡，别让用户以为卡死
+      imgStatus = chat.createStatusBubble(dom.messageList);
+      const statusText = imgStatus.statusLine.querySelector(".status-text");
+      if (statusText) statusText.textContent = "正在识别图片（约 30–60 秒）…";
+      chat.scrollBottom(dom.messageList);
+      try {
+        attachments = await _uploadPendingImages();
+      } catch (e) {
+        if (imgStatus) imgStatus.wrap.remove();
+        _notice("图片上传失败：" + (e.message || e));
+        return;
+      }
+      if (imgStatus) imgStatus.wrap.remove();
+    }
+
+    chat.appendMessage(dom.messageList, "user", text || "（图片）", true,
+                       attachments.length ? { attachments } : null);
     dom.messageInput.value = "";
+    _clearPendingImages();
     dom.sendBtn.disabled = true;
     dom.sendBtn.classList.add("loading");
 
     try {
-      await _deliverMessage(text);
+      await _deliverMessage(text, attachments);
     } catch (e) {
       await _onSendFailed(text, e);
     }
@@ -1122,6 +1485,7 @@
     try {
       const data = await api.createDialog(null, state.selectedMode);
       state.currentId = data.dialog_uuid;
+      syncDeepReportEntry();
       await loadDialogs();
       dom.dialogTitle.textContent = data.title || "新对话";
       dom.dialogMeta.textContent = new Date(data.created_at).toLocaleString("zh-CN");
@@ -1230,6 +1594,83 @@
     });
   }
 
+  /* ── 本轮类型（自动 / 普通回答 / 深度报告 / 策略回测）── */
+  const REPORT_TYPES = [
+    { name: "auto", label: "自动", desc: "提到「深度报告」才生成，其余按普通回答" },
+    { name: "chat", label: "普通回答", desc: "只做对话分析，不生成报告" },
+    { name: "deep_report", label: "深度报告", desc: "1 万字以上分页报告，约 10–15 分钟" },
+    { name: "strategy", label: "策略回测", desc: "打开策略回测面板，不发送对话" },
+  ];
+  let reportType = localStorage.getItem("report_type") || "auto";
+  if (!REPORT_TYPES.some((t) => t.name === reportType)) reportType = "auto";
+
+  function _flashHint(msg) {
+    const el = document.createElement("div");
+    el.textContent = msg;
+    el.style.cssText = "position:fixed;left:50%;bottom:120px;transform:translateX(-50%);" +
+      "background:#176b5b;color:#fff;padding:8px 14px;border-radius:8px;font-size:13px;" +
+      "z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.18)";
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+
+  function _renderTypeDropdown() {
+    if (!dom.typeDropdown) return;
+    dom.typeDropdown.innerHTML = "";
+    REPORT_TYPES.forEach((t) => {
+      const opt = document.createElement("div");
+      opt.className = "mode-option" + (t.name === reportType ? " active" : "");
+      opt.dataset.value = t.name;
+      opt.innerHTML = `
+        <div>
+          <div class="mode-option-name">${chat.esc(t.label)}</div>
+          ${t.desc ? `<div class="mode-option-desc">${chat.esc(t.desc)}</div>` : ""}
+        </div>
+        <svg class="mode-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      `;
+      opt.addEventListener("click", (e) => {
+        e.stopPropagation();
+        _selectReportType(t.name);
+      });
+      dom.typeDropdown.appendChild(opt);
+    });
+    const cur = REPORT_TYPES.find((t) => t.name === reportType);
+    if (dom.typeLabel) dom.typeLabel.textContent = cur ? cur.label : reportType;
+  }
+
+  function _selectReportType(name) {
+    reportType = name;
+    localStorage.setItem("report_type", name);
+    _renderTypeDropdown();
+    _closeTypeDropdown();
+  }
+
+  function _toggleTypeDropdown() {
+    if (!dom.typeDropdown) return;
+    const open = dom.typeDropdown.classList.contains("open");
+    if (open) { _closeTypeDropdown(); } else {
+      dom.typeDropdown.classList.add("open");
+      dom.typeTrigger.setAttribute("aria-expanded", "true");
+    }
+  }
+
+  function _closeTypeDropdown() {
+    if (!dom.typeDropdown) return;
+    dom.typeDropdown.classList.remove("open");
+    if (dom.typeTrigger) dom.typeTrigger.setAttribute("aria-expanded", "false");
+  }
+
+  if (dom.typeTrigger) {
+    dom.typeTrigger.addEventListener("click", (e) => { e.stopPropagation(); _toggleTypeDropdown(); });
+    dom.typeTrigger.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); _toggleTypeDropdown(); }
+    });
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest("#typeSelector")) _closeTypeDropdown();
+    });
+  }
+  _renderTypeDropdown();
+
   /* ── 配置面板 ── */
   const configPanel = new ConfigPanel();
 
@@ -1252,6 +1693,20 @@
   /* ── 模板路由配置 ── */
   const routeConfig = new window.StockRadar.RouteConfigPanel();
   document.getElementById("templateRouteConfigBtn").onclick = () => routeConfig.open();
+
+  /* ── 策略意图词表配置（R3）── */
+  const strategyIntentConfig = new window.StockRadar.StrategyIntentConfigPanel();
+  document.getElementById("strategyIntentConfigBtn").onclick = () => strategyIntentConfig.open();
+
+  /* 澄清反问后给过程流分段。
+     反问两个气泡追加在列表末尾，但过程卡（及其锚定的状态气泡）在它们上方，
+     若不另起一段，「反问之后的继续执行」会被画到反问上方 —— 顺序反了。
+     处理：结束当前卡并让其移出 turns，下一条目在列表末尾另起新卡（锚点置空）。 */
+  function _splitTranscriptAfterClarify() {
+    state.transcriptAppendTail = true;
+    const ct = window.StockRadar.chatTranscript;
+    if (ct && state.taskId) ct.splitTurn(state.taskId);
+  }
 
   /* ── 日志关联（回答溯源 · 执行归因）── */
   const attrPanel = new window.StockRadar.AttributionPanel();
@@ -1340,6 +1795,27 @@
   const btPanel = window.initBacktestPanel();
   document.getElementById("backtestBtn").onclick = () => btPanel.show();
   document.getElementById("backtestOverlay").onclick = (e) => { if (e.target.id === 'backtestOverlay') btPanel.hide(); };
+
+  /* ── 池子研究 ── */
+  if (window.initPoolStudyPanel) {
+    const poolPanel = window.initPoolStudyPanel();
+    const poolBtn = document.getElementById("poolStudyBtn");
+    if (poolBtn) {
+      // 按钮自带的 onclick 已调 openPage；这里只做兜底绑定，避免两处都触发
+      poolBtn.onclick = () => poolPanel.openPage();
+    }
+    const poolOverlay = document.getElementById("poolStudyOverlay");
+    if (poolOverlay) {
+      poolOverlay.onclick = (e) => { if (e.target.id === 'poolStudyOverlay') poolPanel.hide(); };
+    }
+  }
+
+  /* ── 因子研究 ── */
+  if (window.initFactorPanel) {
+    const factorPanel = window.initFactorPanel();
+    const factorBtn = document.getElementById("factorBtn");
+    if (factorBtn) factorBtn.onclick = () => factorPanel.show();
+  }
 
   /* ── 数据中心 ── */
   const dcPanel = window.initDataCenterPanel();
@@ -1432,6 +1908,27 @@
     }
   });
 
+  // 图片输入：按钮选图 + 直接粘贴
+  if (dom.imageBtn && dom.imageInput) {
+    dom.imageBtn.addEventListener("click", () => dom.imageInput.click());
+    dom.imageInput.addEventListener("change", () => {
+      _addImageFile(dom.imageInput.files && dom.imageInput.files[0]);
+      dom.imageInput.value = "";
+    });
+  }
+  if (dom.messageInput) {
+    dom.messageInput.addEventListener("paste", (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      for (const item of items) {
+        if (item.kind === "file" && String(item.type || "").startsWith("image/")) {
+          _addImageFile(item.getAsFile());
+          e.preventDefault();
+          break;
+        }
+      }
+    });
+  }
+
   dom.messageInput.addEventListener("input", () => {
     dom.messageInput.style.height = "auto";
     dom.messageInput.style.height = Math.min(dom.messageInput.scrollHeight, 160) + "px";
@@ -1447,6 +1944,21 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
       { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
+  // 当前会话 uuid（本文件既有写法是模块级 state.currentId；拿不到就返回空串）
+  function _tpDialogUuid() {
+    try { return state.currentId || ""; } catch (e) { return ""; }
+  }
+  // 为什么判成策略：把命中词摊开给用户看（措辞用「检测到」，不下断言）
+  function _tpStrategyTip(s) {
+    const sig = (s && s.signals) || {};
+    const parts = [];
+    const push = (label, arr) => { if (arr && arr.length) parts.push(label + "：" + arr.join("、")); };
+    push("祈使词", sig.imperatives);
+    push("条件词", sig.condition_words);
+    push("意图词", sig.intent_words);
+    push("动作词", (sig.entry_words || []).concat(sig.exit_words || []));
+    return "检测到" + (parts.length ? parts.join("；") : "策略意图") + "（判定：" + ((s && s.reason) || "-") + "）";
+  }
   function _scheduleTemplatePreview(text) {
     if (_tpTimer) clearTimeout(_tpTimer);
     _tpTimer = setTimeout(() => _loadTemplatePreview(text), 300);
@@ -1461,7 +1973,7 @@
       const res = await fetch("/api/report-templates/route-preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: q }),
+        body: JSON.stringify({ text: q, dialog_uuid: _tpDialogUuid() }),
       });
       if (!res.ok) throw new Error("http " + res.status);
       const data = await res.json();
@@ -1473,8 +1985,21 @@
   }
   function _renderTemplatePreview(data) {
     const box = dom.templatePreview;
+    if (!box) return;
+    const s = (data && data.strategy) || null;
+    // 策略态 / 会话态：替换整条预览（策略轮不用模板，继续显示「✓ 模板」是误导）
+    if (s && s.enabled && (s.session_active || s.is_strategy)) {
+      const active = !!s.session_active;
+      const text = active
+        ? "策略会话进行中 · 此条将续接会话"
+        : ("策略会话 · 将进入策略回测" + (s.mode === "auto" ? "" : "（发送后先确认参数）"));
+      box.innerHTML = '<span class="tp-strategy' + (active ? " active" : "") + '" title="'
+        + _tpEsc(_tpStrategyTip(s)) + '">' + text + "</span>";
+      box.hidden = false;
+      return;
+    }
     const ranked = (data && data.ranked) || [];
-    if (!box || !ranked.length) { if (box) { box.hidden = true; box.innerHTML = ""; } return; }
+    if (!ranked.length) { box.hidden = true; box.innerHTML = ""; return; }
     const winner = data.winner;
     const chips = ranked.map((t) => {
       const isTop = t.template_id === winner;
@@ -1484,7 +2009,9 @@
         + `${isTop ? "✓ " : ""}${_tpEsc(t.name)}`
         + `${t.score ? `<em>${t.score}</em>` : ""}</span>`;
     }).join("");
-    box.innerHTML = `<span class="tp-label" title="当前输入将匹配到的报告模板（追问轮会沿用上一轮）">模板匹配</span>${chips}`;
+    const hint = (s && s.enabled && s.disambiguate)
+      ? '<span class="tp-hint">疑似策略 · 发送后自动判别归属</span>' : "";
+    box.innerHTML = `<span class="tp-label" title="当前输入将匹配到的报告模板（追问轮会沿用上一轮）">模板匹配</span>${chips}${hint}`;
     box.hidden = false;
   }
 
@@ -1556,6 +2083,13 @@
   }
 
   async function init() {
+    // 跟随先于任何渲染初始化：打字机每帧回调要立刻能驱动滚动
+    const follow = window.StockRadar.chatFollow;
+    const ct = window.StockRadar.chatTranscript;
+    if (follow) {
+      follow.init();
+      if (ct) ct.setOnTick(() => follow.pin());
+    }
     _applyUiConfig();
     startBootMonitor();
     await loadModes();

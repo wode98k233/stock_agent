@@ -96,6 +96,14 @@ class ToolCall:
 
 
 class ExecutionState:
+    """执行状态。
+
+    ``last_llm_messages`` / ``last_llm_tools``：记录**最后一次 LLM 调用实际发出的**
+    消息序列与工具数组（PRD-A9 §14）。报告 fork 直接复用这一份，前缀按定义与
+    agent 最后一次调用逐字节相同，从而整段命中缓存。
+    ⚠️ 不要改用 state["messages"] —— 它在最后一次调用之后仍会被追加/改写
+    （实测前导 system 由 2 条变 3 条，前缀指纹随之变化，命中率从 ~90% 掉到 31%）。
+    """
     """执行状态捕获器"""
     def __init__(self):
         self.messages: List[BaseMessage] = []

@@ -8,12 +8,37 @@
 - backtest_trades: 交易记录
 """
 import json
+import sqlite3
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from config import Config
 from utils.cache.db_utils import make_db_context
 
 get_backtest_db = make_db_context(lambda: Config.get_backtest_db_path())
+
+# ---- 列存在性探测（迁移未应用时的降级兜底）--------------------------------
+# B 批给 backtest_runs / strategy_session 加了 ``exit_timing`` 列（加性迁移，
+# 事实源在 utils/db_schema/tables/backtest.py）。生产库若还没跑迁移，INSERT 里
+# 带这个列会直接 "table has no column named exit_timing" 把整条策略回测链打断。
+#
+# 这里在**进程内**缓存一次探测结果：迁移补上后重启进程即可恢复（缓存不跨进程）。
+# 降级行为是「这一列不写」，而不是抛错 —— 宁可少存一个可选字段，也不能让整条链路挂掉。
+_MISSING_COLS: Dict[str, set] = {}
+
+
+def _missing_columns(conn, table: str, columns) -> set:
+    """返回 ``columns`` 中在当前库里**不存在**的那些（按表缓存，首次查一次）。"""
+    cached = _MISSING_COLS.get(table)
+    if cached is None:
+        cached = _MISSING_COLS[table] = set()
+    todo = [c for c in columns if c not in cached]
+    if todo:
+        try:
+            have = {r[1] for r in conn.execute('PRAGMA table_info(%s)' % table)}
+        except Exception:
+            have = set()
+        cached.update(c for c in todo if c not in have)
+    return {c for c in columns if c in cached}
 
 
 def init_backtest_tables():
@@ -141,6 +166,13 @@ def update_data_task(task_id: str, **kwargs) -> None:
         conn.execute(f'UPDATE data_tasks SET {sets} WHERE task_id = ?', values)
 
 
+def set_data_task_origin(task_id: str, origin: str, ref_id: str = '') -> None:
+    """标记任务来源（manual / backtest_gap）+ 反指触发的回测 run_id。"""
+    with get_backtest_db() as conn:
+        conn.execute('UPDATE data_tasks SET origin = ?, ref_id = ? WHERE task_id = ?',
+                     (origin or 'manual', ref_id or '', task_id))
+
+
 def append_task_log(task_id: str, log_line: str) -> None:
     """追加采集日志"""
     now = datetime.now().strftime('%H:%M:%S')
@@ -186,6 +218,15 @@ def upsert_strategy(strategy_id: str, name: str, description: str, category: str
                       code, params_schema, tags, now, now))
 
 
+def update_strategy_hash(strategy_id: str, strategy_hash_value: str) -> bool:
+    """回写策略指纹（设计 §8 修 B5：采纳后的策略要能反查研发迭代史）。"""
+    with get_backtest_db() as conn:
+        cur = conn.execute('UPDATE strategies SET strategy_hash = ?, updated_at = ? WHERE strategy_id = ?',
+                           (strategy_hash_value or '',
+                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), strategy_id))
+        return cur.rowcount > 0
+
+
 def delete_strategy(strategy_id: str) -> bool:
     """删除用户策略（内置策略不可删除）
 
@@ -224,31 +265,67 @@ def _resolve_stock_name(code: str) -> str:
 # backtest_runs CRUD
 # ============================================================
 
-def create_backtest_run(run_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+def _cfg_default_limit_mode() -> str:
+    """全局默认涨跌停拦截口径（P0 §4.7），读不到时回落 enforce。"""
+    try:
+        from config import Config
+        return str(getattr(Config, 'PRICE_LIMIT_MODE', 'enforce') or 'enforce')
+    except Exception:  # noqa: BLE001
+        return 'enforce'
+
+
+def create_backtest_run(run_id: str, config: Dict[str, Any],
+                       origin: str = 'manual', ref_id: str = '') -> Dict[str, Any]:
     """创建回测任务"""
     # 补全标的名称：如果 config 里没传 stock_name，从 market_data 查
     stock_name = config.get('stock_name') or ''
     if not stock_name:
         stock_name = _resolve_stock_name(config['code'])
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # P0 §4.7：口径快照——记录本次回测实际使用的拦截模式（单次请求 > 全局配置）
+    from backtest import a_share_rules
+    limit_mode = a_share_rules.resolve_mode(config.get('price_limit_mode'),
+                                            _cfg_default_limit_mode())
     with get_backtest_db() as conn:
-        conn.execute('''INSERT INTO backtest_runs
-            (run_id, status, code, stock_name, strategy_id, strategy_name, params_json, config_json,
-             start_date, end_date, initial_cash, commission, min_commission, stamp_tax, transfer_fee, slippage,
-             t_plus_1, lot_size, adjust_type, stop_loss, take_profit, trailing_stop,
-             position_mode, position_size, created_at, updated_at)
-            VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (run_id, config['code'], stock_name, config['strategy_id'],
-             config.get('strategy_name', ''), json.dumps(config.get('params', {}), ensure_ascii=False),
-             json.dumps(config, ensure_ascii=False), config['start_date'], config['end_date'],
-             config.get('initial_cash', 100000), config.get('commission', 0.0003),
-             config.get('min_commission', 5.0), config.get('stamp_tax', 0.0005),
-             config.get('transfer_fee', 0.00001), config.get('slippage', 0.001),
-             1 if config.get('t_plus_1', True) else 0, config.get('lot_size', 100),
-             config.get('adjust_type', 'qfq'), config.get('stop_loss', 0),
-             config.get('take_profit', 0), config.get('trailing_stop', 0),
-             config.get('position_mode', 'full'), config.get('position_size', 1.0),
-             now, now))
+        # P0 §4.7：列与值改为**列表构造**——新增可选列只加一行，不再新增 if/else 分支。
+        base = [
+            ('run_id', run_id), ('status', 'pending'), ('code', config['code']),
+            ('stock_name', stock_name), ('strategy_id', config['strategy_id']),
+            ('strategy_name', config.get('strategy_name', '')),
+            ('params_json', json.dumps(config.get('params', {}), ensure_ascii=False)),
+            ('config_json', json.dumps(config, ensure_ascii=False)),
+            ('start_date', config['start_date']), ('end_date', config['end_date']),
+            ('initial_cash', config.get('initial_cash', 100000)),
+            ('commission', config.get('commission', 0.0003)),
+            ('min_commission', config.get('min_commission', 5.0)),
+            ('stamp_tax', config.get('stamp_tax', 0.0005)),
+            ('transfer_fee', config.get('transfer_fee', 0.00001)),
+            ('slippage', config.get('slippage', 0.001)),
+            ('t_plus_1', 1 if config.get('t_plus_1', True) else 0),
+            ('lot_size', config.get('lot_size', 100)),
+            ('adjust_type', config.get('adjust_type', 'qfq')),
+            ('stop_loss', config.get('stop_loss', 0)),
+            ('take_profit', config.get('take_profit', 0)),
+            ('trailing_stop', config.get('trailing_stop', 0)),
+            ('position_mode', config.get('position_mode', 'full')),
+            ('position_size', config.get('position_size', 1.0)),
+            ('created_at', now), ('updated_at', now), ('origin', origin), ('ref_id', ref_id),
+        ]
+        # 可选列：迁移未应用时自动降级为不写（_missing_columns 按表缓存探测）。
+        # engine_version：enforce 口径的 run 记 v1.1，作为「无新列时」的二级可辨识信号。
+        optional = [
+            ('entry_timing', str(config.get('entry_timing') or 'next_open')),
+            ('exit_timing', str(config.get('exit_timing') or '')),
+            ('price_limit_mode', limit_mode),
+            ('engine_version', 'v1.1' if limit_mode == 'enforce' else 'v1.0'),
+        ]
+        skip = _missing_columns(conn, 'backtest_runs', tuple(k for k, _ in optional))
+        cols = base + [(k, v) for k, v in optional if k not in skip]
+        names = [k for k, _ in cols]
+        conn.execute(
+            f"INSERT INTO backtest_runs ({', '.join(names)}) "
+            f"VALUES ({', '.join('?' * len(names))})",
+            [v for _, v in cols])
     return get_backtest_run(run_id)
 
 
@@ -315,29 +392,65 @@ def delete_backtest_run(run_id: str) -> bool:
 # ============================================================
 
 def save_backtest_result(run_id: str, result: Dict[str, Any]) -> None:
-    """保存回测结果"""
+    """保存回测结果。
+
+    P1：列与值改**列表构造 + ``_missing_columns`` 降级**——新增可选列（sr_daily /
+    skewness / kurtosis / yearly_stats_json / deflated_sharpe / trial_count）在
+    迁移未应用时自动跳过，INSERT 不炸。
+    """
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with get_backtest_db() as conn:
-        conn.execute('''INSERT OR REPLACE INTO backtest_results
-            (run_id, total_return, annual_return, benchmark_return, excess_return,
-             sharpe_ratio, sortino_ratio, calmar_ratio, max_drawdown, max_drawdown_duration,
-             volatility, downside_volatility, trade_count, win_count, loss_count, win_rate,
-             profit_factor, avg_win, avg_loss, avg_holding_days, max_consecutive_wins,
-             max_consecutive_losses, final_equity, peak_equity,
-             equity_curve_json, drawdown_curve_json, monthly_returns_json, engine_version, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (run_id, result.get('total_return'), result.get('annual_return'),
-             result.get('benchmark_return'), result.get('excess_return'),
-             result.get('sharpe_ratio'), result.get('sortino_ratio'), result.get('calmar_ratio'),
-             result.get('max_drawdown'), result.get('max_drawdown_duration'),
-             result.get('volatility'), result.get('downside_volatility'),
-             result.get('trade_count'), result.get('win_count'), result.get('loss_count'),
-             result.get('win_rate'), result.get('profit_factor'),
-             result.get('avg_win'), result.get('avg_loss'), result.get('avg_holding_days'),
-             result.get('max_consecutive_wins'), result.get('max_consecutive_losses'),
-             result.get('final_equity'), result.get('peak_equity'),
-             result.get('equity_curve_json'), result.get('drawdown_curve_json'),
-             result.get('monthly_returns_json'), result.get('engine_version', 'v1.0'), now))
+        cols = [
+            ('run_id', run_id),
+            ('total_return', result.get('total_return')),
+            ('annual_return', result.get('annual_return')),
+            ('benchmark_return', result.get('benchmark_return')),
+            ('excess_return', result.get('excess_return')),
+            ('sharpe_ratio', result.get('sharpe_ratio')),
+            ('sortino_ratio', result.get('sortino_ratio')),
+            ('calmar_ratio', result.get('calmar_ratio')),
+            ('max_drawdown', result.get('max_drawdown')),
+            ('max_drawdown_duration', result.get('max_drawdown_duration')),
+            ('volatility', result.get('volatility')),
+            ('downside_volatility', result.get('downside_volatility')),
+            ('trade_count', result.get('trade_count')),
+            ('win_count', result.get('win_count')),
+            ('loss_count', result.get('loss_count')),
+            ('win_rate', result.get('win_rate')),
+            ('profit_factor', result.get('profit_factor')),
+            ('avg_win', result.get('avg_win')),
+            ('avg_loss', result.get('avg_loss')),
+            ('avg_holding_days', result.get('avg_holding_days')),
+            ('max_consecutive_wins', result.get('max_consecutive_wins')),
+            ('max_consecutive_losses', result.get('max_consecutive_losses')),
+            ('final_equity', result.get('final_equity')),
+            ('peak_equity', result.get('peak_equity')),
+            ('equity_curve_json', result.get('equity_curve_json')),
+            ('drawdown_curve_json', result.get('drawdown_curve_json')),
+            ('monthly_returns_json', result.get('monthly_returns_json')),
+            ('yearly_stats_json', result.get('yearly_stats_json')),
+            ('sr_daily', result.get('sr_daily')),
+            ('skewness', result.get('skewness')),
+            ('kurtosis', result.get('kurtosis')),
+            ('deflated_sharpe', result.get('deflated_sharpe')),
+            ('trial_count', result.get('trial_count')),
+            ('health', result.get('health', 'ok')),
+            ('health_detail', result.get('health_detail', '')),
+            ('data_bars', result.get('data_bars', 0)),
+            ('expected_bars', result.get('expected_bars', 0)),
+            ('coverage_pct', result.get('coverage_pct', 0.0)),
+            ('gaps_json', result.get('gaps_json', '[]')),
+            ('trade_sample_ok', result.get('trade_sample_ok', 0)),
+            ('engine_version', result.get('engine_version', 'v1.0')),
+            ('created_at', now),
+        ]
+        skip = _missing_columns(conn, 'backtest_results', tuple(k for k, _ in cols))
+        final = [(k, v) for k, v in cols if k not in skip]
+        names = [k for k, _ in final]
+        conn.execute(
+            f"INSERT OR REPLACE INTO backtest_results ({', '.join(names)}) "
+            f"VALUES ({', '.join('?' * len(names))})",
+            [v for _, v in final])
 
 
 def get_backtest_result(run_id: str) -> Optional[Dict[str, Any]]:
@@ -348,13 +461,222 @@ def get_backtest_result(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 # ============================================================
+# trial 记账 / DSR 回填（P1 统计严谨 §4）
+# ============================================================
+
+def count_trials_for_strategy(strategy_hash: str) -> int:
+    """同策略所在研发任务的迭代轮数（P1 §4.1，实测 8 轮制口径）。
+
+    ``strategy_iter`` 每轮一行、不覆盖（策略 hash 级实测恒 1 行——每轮变异产生新
+    hash——故 trial 口径取「**该 hash 所属研发任务的全部轮数**」）。
+    无记录（散点评估）→ 1。
+    """
+    if not strategy_hash:
+        return 1
+    with get_backtest_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM strategy_iter WHERE run_id IN "
+            "(SELECT DISTINCT run_id FROM strategy_iter WHERE strategy_hash = ?)",
+            (strategy_hash,)).fetchone()
+    return int(row[0]) if row and row[0] else 1
+
+
+def trial_sharpe_std(strategy_hash: str) -> tuple:
+    """同任务内 trial 夏普序列的 stdev（**年化**口径）+ 来源（P1 §4.1b 三级降级）。
+
+    Returns ``(sr_std, source)``：
+
+    - ``'sharpe'``：新口径（≥2 个非空值）
+    - ``'sharpe_legacy'``：旧口径兜底（新值不足时，口径已标注不可比——仅用于
+      sr_std 的**组内**估计）
+    - ``'none'``：都不足 → 不校正、不造数
+    """
+    if not strategy_hash:
+        return None, 'none'
+    import statistics as _st
+    with get_backtest_db() as conn:
+        rows = conn.execute(
+            "SELECT is_metrics FROM strategy_iter WHERE run_id IN "
+            "(SELECT DISTINCT run_id FROM strategy_iter WHERE strategy_hash = ?) "
+            "ORDER BY round", (strategy_hash,)).fetchall()
+
+    def _series(key: str) -> list:
+        out = []
+        for (m,) in rows:
+            try:
+                d = json.loads(m or '{}')
+            except Exception:
+                continue
+            v = d.get(key)
+            if v is not None:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    new = _series('sharpe')
+    if len(new) >= 2:
+        return _st.stdev(new), 'sharpe'
+    legacy = _series('sharpe_legacy')
+    if len(legacy) >= 2:
+        return _st.stdev(legacy), 'sharpe_legacy'
+    return None, 'none'
+
+
+def update_result_dsr(run_id: str, deflated_sharpe, trial_count) -> None:
+    """回填结果的 DSR / trial 列（P1 §4；迁移未应用时静默跳过）。"""
+    with get_backtest_db() as conn:
+        skip = _missing_columns(conn, 'backtest_results', ('deflated_sharpe', 'trial_count'))
+        if skip:
+            return
+        conn.execute(
+            'UPDATE backtest_results SET deflated_sharpe = ?, trial_count = ? WHERE run_id = ?',
+            (deflated_sharpe, trial_count, run_id))
+
+
+# ============================================================
+# backtest_eval CRUD（样本内外评判，Plan 3 任务 2）
+# ============================================================
+
+_BACKTEST_EVAL_UPDATABLE = {
+    'is_metrics_json', 'oos_metrics_json', 'split_date',
+    'is_sharpe', 'oos_sharpe', 'sharpe_ratio_io',
+    'overfit_flag', 'verdict', 'eval_run_ids_json', 'error_message',
+}
+
+
+def save_backtest_eval(run_id: str, data: Dict[str, Any]) -> None:
+    """写入/覆盖一次样本内外评判（单表单行，重复评判以最后一次为准）。"""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    payload = {k: v for k, v in (data or {}).items() if k in _BACKTEST_EVAL_UPDATABLE}
+    payload['run_id'] = run_id
+    payload['created_at'] = now
+    payload['updated_at'] = now
+    cols = ', '.join(payload.keys())
+    marks = ', '.join('?' for _ in payload)
+    with get_backtest_db() as conn:
+        conn.execute(f'INSERT OR REPLACE INTO backtest_eval ({cols}) VALUES ({marks})',
+                     tuple(payload.values()))
+
+
+def get_backtest_eval(run_id: str) -> Optional[Dict[str, Any]]:
+    """读取评判结果；没评判过返回 None（调用方据此显示「尚未评判」）。"""
+    with get_backtest_db() as conn:
+        row = conn.execute('SELECT * FROM backtest_eval WHERE run_id = ?', (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_result_health_map(run_ids: List[str]) -> Dict[str, str]:
+    """批量读取 run 的体检结论：run_id -> health。
+
+    批量验证（Plan 3 任务 8）用它区分三种「有结果」：
+    - health ∈ {ok, low_sample} → 结果可用于评判（达标 / 没达标）
+    - 其余（data_gap / insufficient_bars / error ...）→ 无法评判，不能算「弱」
+
+    旧库未迁移（没有 health 列 / 没有 backtest_results 表）时返回空表，
+    调用方按「无法评判」处理，不因迁移状态炸掉整个统计。
+    """
+    ids = [rid for rid in (run_ids or []) if rid]
+    if not ids:
+        return {}
+    placeholders = ','.join('?' * len(ids))
+    try:
+        with get_backtest_db() as conn:
+            rows = conn.execute(
+                f'SELECT run_id, health FROM backtest_results WHERE run_id IN ({placeholders})',
+                ids).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r['run_id']: (r['health'] or '') for r in rows}
+
+
+def get_result_meta_map(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """批量取体检元数据（health/health_detail/coverage_pct/trade_sample_ok/data_bars/expected_bars）。
+
+    刻意不返回 equity_curve_json / drawdown_curve_json 这类大字段：策略详情页一次要看几十条 run。
+    Plan 1 建列之前的历史行不会命中这些列 → 缺列时返回空字典，不抛异常。
+    """
+    ids = [r for r in (run_ids or []) if r]
+    if not ids:
+        return {}
+    placeholders = ','.join('?' * len(ids))
+    try:
+        with get_backtest_db() as conn:
+            rows = conn.execute(
+                'SELECT run_id, health, health_detail, coverage_pct, trade_sample_ok, '
+                'data_bars, expected_bars FROM backtest_results '
+                f'WHERE run_id IN ({placeholders})',
+                ids).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r['run_id']: dict(r) for r in rows}
+
+
+# ============================================================
+# 回测数据就绪度（设计文档 §12，Plan 4 任务 2 步骤 2.4）
+# ============================================================
+
+def get_backtest_readiness(days: int = 30) -> Dict[str, Any]:
+    """近 N 天回测数据就绪度（设计文档 §12）。只读，绝不触发补数或网络请求。"""
+    from datetime import timedelta
+    span = max(1, int(days))
+    since = (datetime.now() - timedelta(days=span)).strftime('%Y-%m-%d %H:%M:%S')
+    out: Dict[str, Any] = {'days': span, 'runs': 0, 'avg_coverage_pct': None, 'gap_runs': 0,
+                           'gap_tasks': 0, 'gap_tasks_done': 0, 'refilled': 0, 'hint': ''}
+    try:
+        with get_backtest_db() as conn:
+            out['runs'] = conn.execute(
+                'SELECT COUNT(*) FROM backtest_runs WHERE created_at >= ?', (since,)).fetchone()[0]
+            row = conn.execute(
+                'SELECT AVG(res.coverage_pct) AS avg_cov, '
+                "SUM(CASE WHEN res.health = 'data_gap' THEN 1 ELSE 0 END) AS gap_runs "
+                'FROM backtest_runs r JOIN backtest_results res ON r.run_id = res.run_id '
+                'WHERE r.created_at >= ?', (since,)).fetchone()
+            if row:
+                # 口径：coverage_pct 落库为 0–1 比值（backtest/health.py），对外统一百分数
+                out['avg_coverage_pct'] = (round(row['avg_cov'] * 100, 1)
+                                           if row['avg_cov'] is not None else None)
+                out['gap_runs'] = int(row['gap_runs'] or 0)
+            out['gap_tasks'] = conn.execute(
+                "SELECT COUNT(*) FROM data_tasks WHERE origin = 'backtest_gap' AND created_at >= ?",
+                (since,)).fetchone()[0]
+            out['gap_tasks_done'] = conn.execute(
+                "SELECT COUNT(*) FROM data_tasks WHERE origin = 'backtest_gap' "
+                "AND status = 'completed' AND created_at >= ?", (since,)).fetchone()[0]
+            # 近似口径（计划偏差 2）：补过数、且之后重跑过，即算「补数后已重跑」
+            out['refilled'] = conn.execute(
+                'SELECT COUNT(DISTINCT t.ref_id) FROM data_tasks t '
+                'JOIN backtest_runs r ON r.ref_id = t.ref_id '
+                "WHERE t.origin = 'backtest_gap' AND t.status = 'completed' "
+                "AND t.created_at >= ? "
+                "AND r.origin = 'manual' AND r.created_at >= t.created_at",
+                (since,)).fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    cov = out['avg_coverage_pct']
+    out['hint'] = (f"近 {span} 天回测 {out['runs']} 次，平均数据覆盖率 "
+                   f"{'—' if cov is None else str(cov) + '%'}，"
+                   f"其中 {out['gap_tasks']} 次因缺口补过数"
+                   f"（补数后 {out['refilled']} 次已重跑）")
+    return out
+
+
+# ============================================================
 # backtest_trades CRUD
 # ============================================================
 
 def save_backtest_trades(run_id: str, trades: List[Dict[str, Any]]) -> None:
-    """批量保存交易记录"""
+    """批量保存交易记录。
+
+    ⚠️ 必须先删后插（2026-11-07 修）：同一个 run 重跑时，旧实现只 INSERT，
+    成交记录会一批批叠加——实测某 run `trade_count=29`，库里却有 55 买 55 卖
+    （26 笔旧批 + 29 笔新批），全库 4 万多个重复键。后果是按成交重算的任何指标
+    （胜率、滑点、费用）都会算重。
+    """
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with get_backtest_db() as conn:
+        conn.execute('DELETE FROM backtest_trades WHERE run_id = ?', (run_id,))
         for t in trades:
             conn.execute('''INSERT INTO backtest_trades
                 (run_id, trade_no, direction, trade_date, price, quantity, amount,
@@ -687,6 +1009,10 @@ def mark_interrupted_runs() -> Dict[str, int]:
 
     覆盖三张主表（backtest_runs / backtest_batch / backtest_multi）及关联明细表，
     避免 SSE 永远显示 running。返回各表清理条数。
+
+    ⚠️ 这里**不碰** ``strategy_run``：策略研发的残留 running 由
+    ``backtest.strategy_research.mark_interrupted_runs`` 收敛成 ``interrupted``
+    （可续跑）。两边都写会互相覆盖 —— 谁先跑谁决定用户还能不能接着跑。
     """
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     msg = '服务重启中断'
@@ -714,10 +1040,6 @@ def mark_interrupted_runs() -> Dict[str, int]:
             "UPDATE backtest_multi_item SET status='failed', completed_at=? "
             "WHERE status IN ('running','pending')", (now,)
         ).rowcount
-        counts['strategy_runs'] = conn.execute(
-            "UPDATE strategy_run SET status='failed', stop_reason='cancelled', "
-            "completed_at=? WHERE status = 'running'", (now,)
-        ).rowcount
     return counts
 
 
@@ -732,31 +1054,79 @@ _ITER_COLS = ('id, run_id, round, hypothesis, strategy_json, strategy_hash, '
 
 def create_strategy_run(run_uuid: str, idea: str, universe: str, period: str,
                         source: str = 'panel',
-                        dialog_uuid: Optional[str] = None) -> Dict[str, Any]:
-    """创建策略研究任务（status=running）"""
+                        dialog_uuid: Optional[str] = None,
+                        engine_version: str = '',
+                        entry_timing: str = 'next_open',
+                        exit_timing: str = '') -> Dict[str, Any]:
+    """创建策略研究任务（status=running）。
+
+    engine_version 标记指标口径（见 engine.py）。
+    entry_timing / exit_timing：本次研究实际的成交口径，**必须落库**——只传给后台
+    线程的话，续跑和结果卡只能回去猜会话，面板/技能发起的任务更是完全无据可查。
+    exit_timing 空串 = 跟随 entry_timing（不是「没记录」）。
+    """
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with get_backtest_db() as conn:
-        conn.execute('''INSERT INTO strategy_run
-            (run_uuid, idea, universe, period, status, source, dialog_uuid, created_at)
-            VALUES (?, ?, ?, ?, 'running', ?, ?, ?)''',
-            (run_uuid, idea, universe, period, source, dialog_uuid, now))
+        cols = [
+            ('run_uuid', run_uuid), ('idea', idea), ('universe', universe),
+            ('period', period), ('status', 'running'), ('source', source),
+            ('dialog_uuid', dialog_uuid), ('created_at', now),
+        ]
+        # 可选列：迁移未跑时降级为**不写这一列**，而不是把整条研究链打断
+        # （同 create_backtest_run / create_strategy_session，见
+        #  test_backtest_db_migration_guard.py 的降级契约）。
+        optional = [
+            ('engine_version', engine_version),
+            ('entry_timing', str(entry_timing or 'next_open')),
+            ('exit_timing', str(exit_timing or '')),
+        ]
+        skip = _missing_columns(conn, 'strategy_run', tuple(k for k, _ in optional))
+        cols += [(k, v) for k, v in optional if k not in skip]
+        names = [k for k, _ in cols]
+        conn.execute(
+            f"INSERT INTO strategy_run ({', '.join(names)}) "
+            f"VALUES ({', '.join('?' * len(names))})",
+            [v for _, v in cols])
     return get_strategy_run(run_uuid)
 
 
 def get_strategy_run(run_uuid: str) -> Optional[Dict[str, Any]]:
-    """按 run_uuid 获取策略研究任务"""
+    """按 run_uuid 获取策略研究任务。
+
+    ⚠️ 迁移未跑的旧库没有 entry_timing / exit_timing 列：这里**不补默认值**
+    （数据缺失 ≠ 默认口径），由调用方归一化；补默认值会让「旧 run 没有口径记录」
+    与「明确跑了 next_open」变得不可区分，续跑就没法回退到原会话。
+    """
     with get_backtest_db() as conn:
         row = conn.execute('SELECT * FROM strategy_run WHERE run_uuid = ?', (run_uuid,)).fetchone()
         return dict(row) if row else None
 
 
+# strategy_run 允许更新的列（白名单：kwargs 直接拼进 SQL，必须锁死）
+_STRATEGY_RUN_UPDATABLE = {
+    'status', 'stop_reason', 'best_iter_id', 'total_iters', 'completed_at',
+    # C 批：策略研发自建 trace run 的归属（显式绑定，取代「猜最近 run」）
+    'trace_run_id',
+}
+
+
 def update_strategy_run(run_uuid: str, **kwargs) -> None:
-    """更新策略研究任务字段（status/stop_reason/best_iter_id/total_iters/completed_at）"""
-    if not kwargs:
+    """更新策略研究任务字段。
+
+    白名单过滤（kwargs 会直接拼进 SQL）；列缺失时剔除该键而不是抛错 ——
+    否则迁移未跑时``trace_run_id`` 会连带把 status 更新一起拖掉。
+    """
+    fields = {k: v for k, v in kwargs.items() if k in _STRATEGY_RUN_UPDATABLE}
+    if not fields:
         return
-    sets = ', '.join(f'{k} = ?' for k in kwargs)
-    values = list(kwargs.values()) + [run_uuid]
     with get_backtest_db() as conn:
+        missing = _missing_columns(conn, 'strategy_run', fields)
+        for key in missing:
+            fields.pop(key, None)
+        if not fields:
+            return
+        sets = ', '.join(f'{k} = ?' for k in fields)
+        values = list(fields.values()) + [run_uuid]
         conn.execute(f'UPDATE strategy_run SET {sets} WHERE run_uuid = ?', values)
 
 
@@ -782,6 +1152,39 @@ def list_strategy_runs(limit: int = 50) -> List[Dict[str, Any]]:
         return runs
 
 
+def _intent_check_path(run_uuid: str) -> 'Path':
+    from pathlib import Path
+    from utils.app_paths import get_app_dir
+    return Path(get_app_dir()) / 'data' / 'strategy_intent_checks' / (str(run_uuid) + '.json')
+
+
+def _append_intent_check(run_uuid: str, round_no: int, payload: Dict[str, Any]) -> None:
+    """把一轮的意图核对结果写进 sidecar（失败不影响主流程）。"""
+    import json as _json
+    try:
+        path = _intent_check_path(run_uuid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if path.exists():
+            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
+        data[str(round_no)] = payload
+        path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception:
+        logger.debug('意图核对 sidecar 写入失败（忽略）', exc_info=True)
+
+
+def load_intent_checks(run_uuid: str) -> Dict[str, Any]:
+    """读回某 run 的意图核对结果（API / 卡片用）。"""
+    import json as _json
+    try:
+        path = _intent_check_path(run_uuid)
+        if path.exists():
+            return _json.loads(path.read_text(encoding='utf-8') or '{}')
+    except Exception:
+        logger.debug('意图核对 sidecar 读取失败（忽略）', exc_info=True)
+    return {}
+
+
 def insert_strategy_iter(run_uuid: str, round_no: int, hypothesis: Optional[str],
                          strategy_json: Optional[str], strategy_hash: Optional[str],
                          strategy_diff: Optional[str], compile_ok: int,
@@ -789,7 +1192,14 @@ def insert_strategy_iter(run_uuid: str, round_no: int, hypothesis: Optional[str]
                          is_metrics: Optional[Dict[str, Any]],
                          oos_metrics: Optional[Dict[str, Any]],
                          overfit_flag: int = 0, verdict: Optional[str] = None,
-                         model: Optional[str] = None) -> int:
+                         model: Optional[str] = None,
+                         intent_check: Optional[Dict[str, Any]] = None) -> int:
+    """插入一轮迭代记录，返回新记录 id。
+
+    intent_check（意图保真核对）**不走表结构**：先落 data/strategy_intent_checks/<run_uuid>.json
+    的 sidecar —— 加列要动 migrator（见 utils/db_schema/tables/backtest.py 的 migrate 机制），
+    在没跑通迁移前先不碰 schema，避免真实库写崩。
+    """
     """插入一轮迭代记录，返回新记录 id"""
     run = get_strategy_run(run_uuid)
     if run is None:
@@ -806,7 +1216,10 @@ def insert_strategy_iter(run_uuid: str, round_no: int, hypothesis: Optional[str]
              json.dumps(is_metrics, ensure_ascii=False) if is_metrics is not None else None,
              json.dumps(oos_metrics, ensure_ascii=False) if oos_metrics is not None else None,
              overfit_flag, verdict, model, now))
-        return cur.lastrowid
+        iid = cur.lastrowid
+    if intent_check:
+        _append_intent_check(run_uuid, round_no, intent_check)
+    return iid
 
 
 def update_strategy_iter(iter_id: int, **kwargs) -> None:
@@ -828,6 +1241,10 @@ def get_strategy_iters(run_uuid: str) -> List[Dict[str, Any]]:
             ORDER BY round, id
         ''', (run_uuid,)).fetchall()
     iters = [dict(r) for r in rows]
+    # 意图核对结果存在 sidecar（data/strategy_intent_checks/<run_uuid>.json），不进表结构。
+    # **必须在这里并回去**：面板/卡片读 /iters 时若拿不到，「本轮偏离用户原话」的徽章
+    # 永远不显示，闸门就等于只写不读（2026-10-18 实测确认这个洞）。
+    checks = load_intent_checks(run_uuid) or {}
     for it in iters:
         for f in ('is_metrics', 'oos_metrics'):
             if it.get(f):
@@ -835,7 +1252,31 @@ def get_strategy_iters(run_uuid: str) -> List[Dict[str, Any]]:
                     it[f] = json.loads(it[f])
                 except (json.JSONDecodeError, TypeError):
                     pass
+        ic = checks.get(str(it.get('round')))
+        if ic:
+            it['intent_check'] = ic
     return iters
+
+
+def get_strategy_iter_by_hash(strategy_hash: str) -> Optional[Dict[str, Any]]:
+    """按策略指纹取最近一轮迭代记录（策略研发中途的策略只存在这里，注册表重启即空）"""
+    h = str(strategy_hash or '').strip()
+    if not h:
+        return None
+    with get_backtest_db() as conn:
+        sql = (f'SELECT {_ITER_COLS} FROM strategy_iter WHERE strategy_hash = ?'
+               ' ORDER BY id DESC LIMIT 1')
+        row = conn.execute(sql, (h,)).fetchone()
+        if not row:
+            return None
+        it = dict(row)
+        for f in ('is_metrics', 'oos_metrics'):
+            if it.get(f):
+                try:
+                    it[f] = json.loads(it[f])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return it
 
 
 def get_strategy_iter_by_id(iter_id: int) -> Optional[Dict[str, Any]]:
@@ -853,3 +1294,196 @@ def get_strategy_iter_by_id(iter_id: int) -> Optional[Dict[str, Any]]:
                 except (json.JSONDecodeError, TypeError):
                     pass
         return it
+
+
+def get_strategy_iters_by_hash(strategy_hash: str) -> List[Dict[str, Any]]:
+    """按策略 hash 反查研发迭代史（策略详情页「一个策略的一生」用）。
+
+    与 get_strategy_iters(run_uuid) 的区别：那个按 run_uuid 找，这个跨 run 按 hash 找——
+    策略被采纳进 strategies 表后只剩 strategy_hash（设计文档 §8），这是唯一反查路径。
+    """
+    if not strategy_hash:
+        return []
+    with get_backtest_db() as conn:
+        rows = conn.execute(
+            f'SELECT {_ITER_COLS} FROM strategy_iter WHERE strategy_hash = ? ORDER BY id',
+            (strategy_hash,)).fetchall()
+    iters = [dict(r) for r in rows]
+    for it in iters:
+        for f in ('is_metrics', 'oos_metrics'):
+            if it.get(f):
+                try:
+                    it[f] = json.loads(it[f])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    return iters
+
+
+# ============================================================
+# strategy_session CRUD（对话式策略研发，Plan 2 任务 2）
+# ============================================================
+
+# 白名单：只允许更新这些列，避免把任意 kwargs 拼进 SQL
+_SESSION_UPDATABLE = {
+    'status', 'idea', 'universe', 'period_start', 'period_end',
+    'entry_text', 'exit_text', 'entry_timing', 'exit_timing', 'slots_json', 'plan_json',
+    'opened_by', 'intent_confidence', 'intent_signals', 'run_uuid', 'turn_count',
+}
+
+
+def _slot_value(slots: Dict[str, Any], key: str, default: Any = '') -> Any:
+    """取槽位值，兼容两种形状：
+
+    - 扁平：{'universe': '600519'}（strategy_intent._extract_slots 产出）
+    - 嵌套：{'universe': {'value': '600519', 'source': 'user'}}（strategy_gate._resolve_slots 产出）
+    """
+    v = (slots or {}).get(key)
+    if isinstance(v, dict):
+        v = v.get('value')
+    if v is None or v == '':
+        return default
+    return v
+
+
+def _slot_text(slots: Dict[str, Any], key: str, default: str = '') -> str:
+    """槽位取字符串；列表/字典等非标量退回默认值"""
+    v = _slot_value(slots, key, default)
+    return default if isinstance(v, (list, tuple, dict)) else str(v)
+
+
+def _session_period(slots: Dict[str, Any]) -> tuple:
+    """会话起止日期：优先扁平 period_start/period_end，其次嵌套 period=[start, end]"""
+    start = _slot_value(slots, 'period_start')
+    end = _slot_value(slots, 'period_end')
+    if not start or not end:
+        period = _slot_value(slots, 'period')
+        if isinstance(period, (list, tuple)) and len(period) >= 2:
+            start, end = period[0], period[1]
+    return str(start or ''), str(end or '')
+
+
+def create_strategy_session(session_uuid: str, dialog_uuid: str, src_text: str,
+                            idea: str = '', opened_by: str = 'rule',
+                            intent_confidence: float = 0.0,
+                            intent_signals: Optional[Dict[str, Any]] = None,
+                            slots: Optional[Dict[str, Any]] = None,
+                            status: str = 'pending_confirm') -> Dict[str, Any]:
+    """创建策略会话（默认停在 pending_confirm：没确认前绝不起回测）"""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    slots = slots or {}
+    period_start, period_end = _session_period(slots)
+    with get_backtest_db() as conn:
+        # exit_timing 同backtest_runs：迁移未应用时降级为不写
+        skip = _missing_columns(conn, 'strategy_session', ('exit_timing',))
+        if skip:
+            conn.execute('''INSERT INTO strategy_session
+                (session_uuid, dialog_uuid, status, src_text, idea, universe, period_start, period_end,
+                 entry_text, exit_text, entry_timing, slots_json, opened_by,
+                 intent_confidence, intent_signals, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (session_uuid, dialog_uuid, status, src_text[:500], idea[:500],
+                 _slot_text(slots, 'universe'), period_start, period_end,
+                 _slot_text(slots, 'entry'), _slot_text(slots, 'exit'),
+                 _slot_text(slots, 'entry_timing', 'next_open'),
+                 json.dumps(slots, ensure_ascii=False), opened_by, float(intent_confidence),
+                 json.dumps(intent_signals or {}, ensure_ascii=False), now, now))
+        else:
+            conn.execute('''INSERT INTO strategy_session
+            (session_uuid, dialog_uuid, status, src_text, idea, universe, period_start, period_end,
+             entry_text, exit_text, entry_timing, exit_timing, slots_json, opened_by,
+             intent_confidence, intent_signals, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (session_uuid, dialog_uuid, status, src_text[:500], idea[:500],
+                 _slot_text(slots, 'universe'), period_start, period_end,
+                 _slot_text(slots, 'entry'), _slot_text(slots, 'exit'),
+                 _slot_text(slots, 'entry_timing', 'next_open'),
+                 _slot_text(slots, 'exit_timing', ''),
+                 json.dumps(slots, ensure_ascii=False), opened_by, float(intent_confidence),
+                 json.dumps(intent_signals or {}, ensure_ascii=False), now, now))
+    # 注意：降级分支不能提前 return —— 那样会跳过上下文管理器的提交。
+    return get_strategy_session(session_uuid)
+
+
+def get_strategy_session(session_uuid: str) -> Optional[Dict[str, Any]]:
+    """按 session_uuid 获取会话"""
+    with get_backtest_db() as conn:
+        row = conn.execute('SELECT * FROM strategy_session WHERE session_uuid = ?',
+                           (session_uuid,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_open_strategy_session(dialog_uuid: str) -> Optional[Dict[str, Any]]:
+    """取该对话当前活着的会话（pending_confirm / active），无则 None。
+
+    这是闸门的第一句查询——有会话就续轮，不再做意图判定。
+    """
+    with get_backtest_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM strategy_session WHERE dialog_uuid = ? "
+            "AND status IN ('pending_confirm', 'active') "
+            "ORDER BY updated_at DESC LIMIT 1", (dialog_uuid,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_strategy_session_by_run(run_uuid: str) -> Optional[Dict[str, Any]]:
+    """按 run_uuid 反查会话（含已归档）。
+
+    用途：结果卡需要会话的 ``entry_timing``（成交口径）。前端「跑完自动升级」
+    时只拿得到 run_uuid，不指望它知道当前对话；而 run 表本身不存口径。
+    会话已归档（用户说了「结束会话」）时 open 版本查不到，这张表仍然能查到。
+    """
+    if not run_uuid:
+        return None
+    with get_backtest_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM strategy_session WHERE run_uuid = ? "
+            "ORDER BY updated_at DESC LIMIT 1", (run_uuid,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_strategy_session(session_uuid: str, **kwargs) -> None:
+    """更新会话字段（白名单校验，避免把任意 kwargs 拼进 SQL）"""
+    fields = {k: v for k, v in kwargs.items() if k in _SESSION_UPDATABLE}
+    if not fields:
+        return
+    with get_backtest_db() as conn:
+        # 迁移未应用时剔除不存在的列，避免整个 UPDATE 失败（连带丢 status 等关键字段）
+        missing = _missing_columns(conn, 'strategy_session', fields)
+        for key in missing:
+            fields.pop(key, None)
+        if not fields:
+            return
+        sets = ', '.join(k + ' = ?' for k in fields)
+        values = list(fields.values()) + [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), session_uuid]
+        conn.execute('UPDATE strategy_session SET ' + sets + ', updated_at = ? WHERE session_uuid = ?', values)
+
+
+def archive_strategy_session(session_uuid: str) -> None:
+    """归档会话（status=archived）"""
+    update_strategy_session(session_uuid, status='archived')
+
+
+def get_latest_research_backtest(ref_id: str) -> Optional[Dict[str, Any]]:
+    """取某次策略研发（strategy_run.run_uuid）最近一次回测的 run_id 与体检结论。
+
+    研发链路与 backtest_runs 之间只有 origin='research' + ref_id=run_uuid 这条线索（Plan 1），
+    故按它反查最近一次回测，再取体检结论（health / total_return）。
+    """
+    if not ref_id:
+        return None
+    with get_backtest_db() as conn:
+        row = conn.execute(
+            "SELECT run_id FROM backtest_runs WHERE origin = 'research' AND ref_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (str(ref_id),),
+        ).fetchone()
+    if not row:
+        return None
+    run_id = row['run_id'] if hasattr(row, 'keys') else row[0]
+    result = get_backtest_result(run_id) or {}
+    return {
+        'run_id': run_id,
+        'health': str(result.get('health') or ''),
+        'health_detail': str(result.get('health_detail') or ''),
+        'total_return': result.get('total_return'),
+    }

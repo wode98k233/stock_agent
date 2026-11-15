@@ -2,15 +2,29 @@
 
 纯函数为主（fetch_kline 可 monkeypatch），便于单测。
 价格口径：后复权（fetch 时 adjust=hfq）。
-周期口径：信号日收盘买入 → 信号日后第 N 个交易日收盘（ret_N）；至今 = 最新收盘。
+周期口径：按「可执行时点」成交（见 `_action_point`）→ 之后第 N 个交易日收盘（ret_N）；
+至今 = 最新收盘。为什么不再用信号日收盘：报告多在收盘后生成，当日收盘已经发生。
 """
 import math
 import re
+from datetime import datetime, timedelta, timezone
 
 CYCLES = [5, 10, 20, 30, 60]
 BASE_URL = "http://127.0.0.1:8000"
 
 _MARKET_PREFIX_RE = re.compile(r"^(sh|sz|bj)", re.IGNORECASE)
+# 只有日期、没有时间的旧格式（无 T 也无空格分隔的时刻）
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# A 股连续竞价时段（北京时间）；[09:30, 15:00) 视为盘中，15:00 起算收盘后
+_SESSION_OPEN_MIN = 9 * 60 + 30
+_SESSION_CLOSE_MIN = 15 * 60
+
+try:   # 中国无夏令时，Asia/Shanghai 恒为 UTC+8；缺 tzdata 时退化为固定偏移
+    from zoneinfo import ZoneInfo
+    _BJ_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:   # pragma: no cover - 仅在无 tzdata 的极简环境触发
+    _BJ_TZ = timezone(timedelta(hours=8))
 
 
 def _bare_code(code: str) -> str:
@@ -47,12 +61,101 @@ def _signal_idx(kline: list[dict], signal_date: str) -> int | None:
     return None
 
 
-def _close_at(kline: list[dict], date: str) -> float | None:
-    """指定日期（或之后第一个交易日）收盘价。"""
-    idx = _signal_idx(kline, date)
-    if idx is None:
+def _next_idx_after(kline: list[dict], day: str) -> int | None:
+    """第一个交易日严格晚于 day 的 K 线索引（day 当日已无可成交价时用）。"""
+    for i, k in enumerate(kline):
+        if k["date"][:10] > day:
+            return i
+    return None
+
+
+def _bar_price(bar: dict, key: str) -> float | None:
+    """取 K 线某个价，缺失/为 0 → 用 close 兜底；仍无效返回 None。"""
+    for field in (key, "close"):
+        val = bar.get(field)
+        if not val:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _action_point(kline: list[dict], signal_time: str) -> tuple[int, str, float, str] | None:
+    """信号时间 → 可执行成交点：(K 线索引, 成交日, 成交价, 口径)。
+
+    为什么必须按「可执行时点」而不是信号日收盘：信号的时间戳是**报告生成时间**，
+    而报告绝大多数在收盘后产出（实测主样本 65% 落在北京时间 15:00 之后或凌晨）。
+    此时当日收盘早已发生，再拿当日收盘价当入场价，等于用已知结果反推收益——
+    既不可执行，也带前视偏差（买在已经出现的收盘上）。所以按「当时还能不能成交」
+    分三档：
+
+    - 盘中 09:30 ≤ t < 15:00 且当日有 K 线 → 当日收盘，mode='close'
+      （信号发出后到收盘前还有时间，当日收盘价可成交）；
+    - 开盘前 00:00 ≤ t < 09:30 且当日是交易日（有 K 线）→ 当日开盘，mode='open'
+      （开盘前下单，当日开盘即可成交）；
+    - 收盘后 t ≥ 15:00、非交易日、或当日无 K 线（停牌）→ 下一根 K 线开盘，
+      mode='next_open'（当日已无可成交价，只能等下一个交易日开盘）；
+    - 只有日期（旧格式，无时间）→ 保持原口径「当日或之后第一根收盘价」，
+      mode='legacy_close'，兼容历史数据与旧测试；
+    - 找不到可用 bar（信号晚于全部 K 线）→ None。
+
+    时间解释：带时区的先转 Asia/Shanghai；无时区的按北京时间理解。旧 K 线缺
+    open 字段时用 close 兜底，避免因数据缺口整条信号算不出收益。
+    """
+    if not kline or not signal_time:
         return None
-    return kline[idx]["close"]
+    text = str(signal_time).strip()
+    if not text:
+        return None
+
+    # 旧格式（只有日期）：口径不变，仍是当日收盘
+    if _DATE_ONLY_RE.match(text):
+        idx = _signal_idx(kline, text[:10])
+        if idx is None:
+            return None
+        price = _bar_price(kline[idx], "close")
+        if not price:
+            return None
+        return idx, kline[idx]["date"][:10], price, "legacy_close"
+
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:      # 无法解析的时间串 → 退回旧口径（按前 10 位日期）
+        idx = _signal_idx(kline, text[:10])
+        if idx is None:
+            return None
+        price = _bar_price(kline[idx], "close")
+        if not price:
+            return None
+        return idx, kline[idx]["date"][:10], price, "legacy_close"
+
+    dt = dt.replace(tzinfo=_BJ_TZ) if dt.tzinfo is None else dt.astimezone(_BJ_TZ)
+    day = dt.strftime("%Y-%m-%d")
+    minute_of_day = dt.hour * 60 + dt.minute
+    same_idx = _signal_idx(kline, day)
+    has_same_bar = same_idx is not None and kline[same_idx]["date"][:10] == day
+
+    if has_same_bar and _SESSION_OPEN_MIN <= minute_of_day < _SESSION_CLOSE_MIN:
+        price = _bar_price(kline[same_idx], "close")            # 盘中 → 当日收盘
+        if not price:
+            return None
+        return same_idx, day, price, "close"
+    if has_same_bar and minute_of_day < _SESSION_OPEN_MIN:
+        price = _bar_price(kline[same_idx], "open")             # 开盘前 → 当日开盘
+        if not price:
+            return None
+        return same_idx, day, price, "open"
+
+    # 收盘后 / 非交易日 / 当日停牌：当日已无可成交价 → 下一个交易日开盘
+    nxt = _next_idx_after(kline, day)
+    if nxt is None:
+        return None
+    price = _bar_price(kline[nxt], "open")
+    if not price:
+        return None
+    return nxt, kline[nxt]["date"][:10], price, "next_open"
 
 
 def net_ret(gross_pct: float, cost_pct: float = 0.0) -> float:
@@ -62,33 +165,52 @@ def net_ret(gross_pct: float, cost_pct: float = 0.0) -> float:
 
 def calc_returns(kline: list[dict], signal_date: str, cycles: list[int] | None = None,
                  cost_pct: float = 0.0) -> dict:
-    """单信号收益：{ret: {5:..,'now':..}, peak, maxDD}。
+    """单信号收益：{ret, peak, maxDD, entry_date, entry_price, entry_mode,
+    status, last_bar_date, bars_after_entry}。
 
-    - ret[n]：信号日后第 n 个交易日收盘 vs 信号日收盘（后复权），cost_pct>0 时为费后
-    - ret['now']：最新收盘 vs 信号日收盘（费后同口径）
-    - peak/maxDD：期间最大/最小相对收益，保持毛值（诊断极值，不扣费）
-    - 信号日无 K 线（停牌）→ 返回空；K 线不足 N 日 → 该周期不入 ret
+    - 入场价按「可执行时点」取（`_action_point`）：盘中当日收盘 / 开盘前当日开盘 /
+      收盘后（或非交易日、停牌）下一交易日开盘；日期-only 旧格式仍是当日收盘
+    - ret[n]：入场后第 n 个交易日收盘 vs 入场价（后复权），cost_pct>0 时为费后
+    - ret['now']：最新收盘 vs 入场价（费后同口径）
+    - peak/maxDD：入场起期间最大/最小相对收益，保持毛值（诊断极值，不扣费）
+    - 找不到入场 bar（信号晚于全部 K 线）→ 返回空；K 线不足 N 日 → 该周期不入 ret
+    - status：'missing'（无 K 线或无入场点）/ 'ok'；数据门控由服务层按
+      last_bar_date / 5 日收益继续细分 stale/pending
+    - last_bar_date：最后一根 K 线日期（YYYY-MM-DD）或 None
+    - bars_after_entry：入场 bar 到最后一根 K 线的 bar 数（≥0；无入场为 0）
     """
     cycles = cycles or CYCLES
-    idx = _signal_idx(kline, signal_date)
-    if idx is None:
-        return {"ret": {}, "peak": None, "maxDD": None, "entry_price": None}
-    p0 = kline[idx]["close"]
+    last_bar_date = None
+    if kline:
+        raw_date = kline[-1].get("date")
+        last_bar_date = str(raw_date)[:10] if raw_date else None
+    empty = {"ret": {}, "peak": None, "maxDD": None,
+             "entry_price": None, "entry_date": None, "entry_mode": None,
+             "status": "missing", "last_bar_date": last_bar_date,
+             "bars_after_entry": 0}
+    point = _action_point(kline, signal_date)
+    if point is None:
+        return dict(empty)
+    idx, entry_date, p0, mode = point
     if not p0:
-        return {"ret": {}, "peak": None, "maxDD": None, "entry_price": None}
+        return dict(empty)
     ret = {}
     for n in cycles:
         target = idx + n
         if target < len(kline):
-            pn = kline[target]["close"]
-            ret[n] = net_ret((pn - p0) / p0 * 100, cost_pct)
-    if kline:
-        last_close = kline[-1]["close"]
+            pn = kline[target].get("close")
+            if pn:
+                ret[n] = net_ret((pn - p0) / p0 * 100, cost_pct)
+    last_close = kline[-1].get("close")
+    if last_close:
         ret["now"] = net_ret((last_close - p0) / p0 * 100, cost_pct)
-    vals = [k["close"] for k in kline[idx:]]
+    vals = [k["close"] for k in kline[idx:] if k.get("close")]
     peak = round(max((v - p0) / p0 * 100 for v in vals), 2) if vals else None
     maxdd = round(min((v - p0) / p0 * 100 for v in vals), 2) if vals else None
-    return {"ret": ret, "peak": peak, "maxDD": maxdd, "entry_price": round(p0, 4)}
+    return {"ret": ret, "peak": peak, "maxDD": maxdd,
+            "entry_price": round(p0, 4), "entry_date": entry_date, "entry_mode": mode,
+            "status": "ok", "last_bar_date": last_bar_date,
+            "bars_after_entry": max(0, len(kline) - 1 - idx)}
 
 
 def win_rate(rets: list[float]) -> float | None:
@@ -122,31 +244,67 @@ def expectancy_payoff(rets: list[float]) -> tuple[float | None, float | None]:
     return exp, payoff
 
 
-def pair_signals(signals: list[dict]) -> list[tuple[dict, dict]]:
-    """同标的时间排序，buy 之后最近的 sell 配对（通道①）。
+def _pair_sort_key(s: dict) -> tuple[str, int]:
+    """配对用排序键：signal_time 升序，同一时间用 id 兜底（保证可复现）。
 
-    buy→sell→再 buy：每对独立；未平仓的 buy 不配对。
+    signal_time 统一转 str（库里是 ISO 字符串，个别历史行是 'YYYY-MM-DD'）。
+    id 缺失/非数值的兜底为 -1，避免 None 与 int 比较抛 TypeError。
     """
-    ordered = sorted(signals, key=lambda s: s["signal_time"])
+    try:
+        id_key = int(s.get("id"))
+    except (TypeError, ValueError):
+        id_key = -1
+    return (str(s.get("signal_time") or ""), id_key)
+
+
+def pair_signals(signals: list[dict]) -> list[tuple[dict, dict]]:
+    """按标的 FIFO 配对：同标的 buy 入队，sell 弹出最早的一笔未平仓 buy。
+
+    为什么必须按标的 FIFO —— 跨标的配对会让「配对收益」变成两个标的的价差：
+    pair_signals 的输出直接喂给 paired_return（买入可执行价 → 卖出可执行价），
+    如果买的是 A、卖的是 B，算出来的百分比既不是 A 的持有收益也不是 B 的，
+    而是两只标的价格之比。这会让「配对平仓胜率」、信号列表的 paired 标记与
+    paired_ret 全部失真（2026-11 实测库里 3 对配对全是跨标的：600519→518880、
+    159577→603618、601888→002714）。所以必须先按 symbol_key 分组，组内各自
+    排序，绝不能让 A 的买单和 B 的卖单相遇。
+
+    组内规则（FIFO，先进先出）：
+    - 每个 buy 入队（同标的多笔未平仓 buy 各自独立，不互相覆盖）；
+    - 每个 sell 弹出最早（signal_time 最小）的未平仓 buy 配成一对；
+    - 没有未平仓 buy 的 sell 忽略（孤立卖单，无建仓可平）。
+    排序：signal_time 升序，同一时间用 id 兜底；返回按 buy 的时间排序，跨标的也稳定。
+    """
+    by_sym: dict[str, list[dict]] = {}
+    for s in signals:
+        by_sym.setdefault(s.get("symbol_key") or "", []).append(s)
+
     pairs: list[tuple[dict, dict]] = []
-    open_buy = None
-    for s in ordered:
-        if s["decision"] == "buy":
-            open_buy = s
-        elif s["decision"] == "sell" and open_buy is not None:
-            pairs.append((open_buy, s))
-            open_buy = None
+    for sigs in by_sym.values():
+        open_buys: list[dict] = []   # 未平仓买单队列（FIFO：队首最早，sell 弹队首）
+        for s in sorted(sigs, key=_pair_sort_key):
+            decision = s.get("decision")
+            if decision == "buy":
+                open_buys.append(s)
+            elif decision == "sell" and open_buys:
+                pairs.append((open_buys.pop(0), s))
+    pairs.sort(key=lambda p: _pair_sort_key(p[0]))
     return pairs
 
 
 def paired_return(kline: list[dict], buy_date: str, sell_date: str,
                   cost_pct: float = 0.0) -> float | None:
-    """通道① 配对已实现收益：买入日收盘 → 卖出日收盘（后复权），费后。
+    """通道① 配对已实现收益：买入可执行价 → 卖出可执行价（后复权），费后。
+
+    买卖两端都走 `_action_point`：卖出信号同样不能在收盘后拿当日收盘价成交，
+    否则配对收益也带前视偏差（卖出价偏乐观/悲观）。日期-only 入参仍是当日收盘。
 
     与 `calc_returns` 的「buy 至今浮动收益」不同——这是真实平仓盈亏。
     """
-    p_buy = _close_at(kline, buy_date)
-    p_sell = _close_at(kline, sell_date)
+    buy = _action_point(kline, buy_date)
+    sell = _action_point(kline, sell_date)
+    if buy is None or sell is None:
+        return None
+    p_buy, p_sell = buy[2], sell[2]
     if not p_buy or not p_sell:
         return None
     return net_ret((p_sell - p_buy) / p_buy * 100, cost_pct)
@@ -163,29 +321,34 @@ def _close_on_or_before(close_map: dict[str, float], date: str) -> float | None:
 
 
 def _entry_at(kline: list[dict], signal_date: str) -> tuple[str, float] | None:
-    """信号日（或之后首个交易日）→ (实际入场日, 收盘价)。"""
-    idx = _signal_idx(kline, signal_date)
-    if idx is None:
+    """信号 → (实际成交日, 成交价)，口径与 `_action_point` 完全一致（可执行时点）。"""
+    point = _action_point(kline, signal_date)
+    if point is None:
         return None
-    close = kline[idx]["close"]
-    if not close:
-        return None
-    return kline[idx]["date"][:10], close
+    return point[1], point[2]
 
 
 def portfolio_equity(signals: list[dict], klines: dict[str, list[dict]],
                      cost_pct: float = 0.0) -> dict:
-    """组合级净值曲线（等权独立子仓位，无资金约束的简化口径）。
+    """组合级净值曲线（**等权** N 个子仓位，未建仓部分视为现金）。
 
     口径：
-    - buy 日收盘建仓（名义 1），sell 日收盘平仓（配对复用 pair_signals）；
-      hold 不建仓；同标的重叠 buy 各自独立子仓位
-    - equity(t) = 1 + Σ已实现盈亏（平仓后锁定，费后）+ Σ未平仓浮动盈亏（毛值）
+    - buy/sell 两端都按「可执行时点」成交（`_action_point`：盘中当日收盘 /
+      开盘前当日开盘 / 收盘后下一交易日开盘），与 paired_return 同口径；
+      收盘后生成的信号不会在信号日就建仓
+    - hold 不建仓；同标的重叠 buy 各自独立子仓位
+    - **N = len(positions)，每个仓位权重 1/N**；未建仓/未入场部分按现金处理（收益 0）。
+      equity(t) = 1 + (1/N) × Σ仓位累计 P&L（已平仓锁定、费后；未平仓按收盘浮动）
     - 日期轴 = 所有涉及标的交易日并集（≥最早入场日）；标的缺某日 → 前向填充
-    - max_dd：净值序列最大回撤（%）；样本期 <1 年不做年化
+    - max_dd：等权净值序列最大回撤（%）；样本期 <1 年不做年化
+    - ⚠️ 2026-11 口径修复：原实现把各子仓位盈亏**直接相加到 1.0**，22 个仓位可到
+      −64%、maxDD 139.5%（>100% 不合理）——那净值不是「组合」而是「仓位盈亏求和」。
+      改为等权后单仓位亏损最多 1/N，maxDD 数学上 ≤100%；总收益量级也随之落到
+      「平均仓位收益」（例如 2 个仓位里 1 个涨 10% → 组合约 +5%）。
 
     Returns:
-        {dates, equity, return, max_dd, open_positions}；无有效仓位时序列为空。
+        {dates, equity, return, max_dd, open_positions, position_count}；
+        无有效仓位时序列为空（position_count=0）。
     """
     positions: list[dict] = []   # {symbol_key, entry_date, entry_price, exit_date|None, exit_price|None}
     by_sym: dict[str, list[dict]] = {}
@@ -197,7 +360,7 @@ def portfolio_equity(signals: list[dict], klines: dict[str, list[dict]],
         kline = klines.get(sym) or []
         if not kline:
             continue
-        entry = {}   # 信号 → (实际入场日, 价格)
+        entry = {}   # 信号 → (实际成交日, 可执行成交价)
         for s in sigs:
             got = _entry_at(kline, s["signal_time"])
             if got:
@@ -218,7 +381,8 @@ def portfolio_equity(signals: list[dict], klines: dict[str, list[dict]],
                                   "exit_date": None, "exit_price": None})
 
     if not positions:
-        return {"dates": [], "equity": [], "return": None, "max_dd": None, "open_positions": 0}
+        return {"dates": [], "equity": [], "return": None, "max_dd": None,
+                "open_positions": 0, "position_count": 0}
 
     close_maps = {sym: {k["date"][:10]: k["close"] for k in kline}
                   for sym, kline in klines.items()}
@@ -227,24 +391,27 @@ def portfolio_equity(signals: list[dict], klines: dict[str, list[dict]],
     dates = [d for d in all_dates if d >= first_entry]
     if not dates:
         return {"dates": [], "equity": [], "return": None, "max_dd": None,
-                "open_positions": sum(1 for p in positions if p["exit_date"] is None)}
+                "open_positions": sum(1 for p in positions if p["exit_date"] is None),
+                "position_count": len(positions)}
 
+    # 等权：N 个已建仓/已平仓的子仓位各占 1/N，其余（未建仓/未入场）视为现金。
+    weight = 1.0 / len(positions)
     cost_frac = 2 * cost_pct / 100.0
     equity = []
     peak = None
     max_dd = 0.0
     for d in dates:
-        v = 1.0
+        pnl = 0.0
         for p in positions:
             if p["entry_date"] > d:
                 continue
             if p["exit_date"] is not None and d >= p["exit_date"]:
-                v += (p["exit_price"] / p["entry_price"] - 1) - cost_frac
+                pnl += (p["exit_price"] / p["entry_price"] - 1) - cost_frac
             else:
                 c = _close_on_or_before(close_maps[p["symbol_key"]], d)
                 if c:
-                    v += c / p["entry_price"] - 1
-        v = round(v, 6)
+                    pnl += c / p["entry_price"] - 1
+        v = round(1.0 + weight * pnl, 6)
         equity.append(v)
         peak = v if peak is None else max(peak, v)
         if peak > 0:
@@ -256,6 +423,7 @@ def portfolio_equity(signals: list[dict], klines: dict[str, list[dict]],
         "return": round((equity[-1] - 1) * 100, 2),
         "max_dd": round(max_dd, 2),
         "open_positions": sum(1 for p in positions if p["exit_date"] is None),
+        "position_count": len(positions),
     }
 
 

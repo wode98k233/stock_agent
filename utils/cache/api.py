@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 
-from utils.cache.core import _get, _set, _get_df, _set_df
+from utils.cache.core import _get, _set, _get_df, _set_df, _delete_prefix
 from utils.cache.market import is_market_closed
 from utils.cache.policies import _get_expire_hours
 
@@ -175,3 +175,35 @@ def get_chip_distribution_cache(symbol: str):
 def set_chip_distribution_cache(symbol: str, data):
     expire_hours = _get_expire_hours("chip_distribution")
     _set('cache_chip_distribution', symbol, data, expire_hours)
+
+
+# ── 研究台账双轴图（三级缓存里的 L2/L3，复用 cache_kv，不新建表） ─────
+# 前缀区分两类数据，key 由 server.thesis_service 统一构造：
+#   cache_thesis_chart:{thesis_id}:{def_hash}:{h}         整张图记录，1h
+#   cache_thesis_factor:{thesis_id}:{def_hash}:{factor}   因子重放行，24h
+# L1（进程内 dict）在服务层；这里只负责跨进程可见的持久层——**预热脚本是独立
+# 进程，不写这里服务器就看不到**。
+
+def get_thesis_chart_cache(key: str):
+    """读 L2 双轴图记录（`{tid}:{def_hash}:{h}`），过期自动删并返回 None。"""
+    return _get('cache_thesis_chart', key)
+
+def set_thesis_chart_cache(key: str, data, expire_hours: float = 1):
+    """写 L2 双轴图记录，默认 TTL 1 小时（与 L1 同口径）。"""
+    _set('cache_thesis_chart', key, data, expire_hours)
+
+def del_thesis_chart_cache_prefix(prefix: str) -> int:
+    """按前缀删 L2 双轴图记录（如 `bond_fund:`），返回删除行数。
+
+    ⚠️ 前缀里全是下划线，内部走 GLOB（不是 LIKE），不会把 `bondXfund` 误删；
+    细节见 `utils.cache.core._delete_prefix` 的注释。
+    """
+    return _delete_prefix('cache_thesis_chart', prefix)
+
+def get_thesis_factor_cache(key: str):
+    """读 L3 因子重放缓存（`{tid}:{def_hash}:{factor_key}`）。"""
+    return _get('cache_thesis_factor', key)
+
+def set_thesis_factor_cache(key: str, data, expire_hours: float = 24):
+    """写 L3 因子重放缓存，默认 TTL 24 小时（真正的失效靠 input_end）。"""
+    _set('cache_thesis_factor', key, data, expire_hours)

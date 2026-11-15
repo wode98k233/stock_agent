@@ -637,7 +637,7 @@
 .ed-close { border: none; background: none; cursor: pointer; font-size: 15px; color: var(--text-secondary, #6b7280); }
 .ed-panel-body { padding: 14px 18px; overflow: auto; }
 
-/* ═══ 存量回测视图（bt-*）+ 改进清单 + 人工改分（三期） ═══ */
+/* ═══ 历史对话复盘视图（bt-*，原「存量回测」）+ 改进清单 + 人工改分（三期） ═══ */
 .bt-form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .bt-form-row .eval-search { flex: 1; min-width: 140px; }
 .bt-progress { margin-top: 10px; }

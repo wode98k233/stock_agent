@@ -72,13 +72,27 @@ def test_format_remaining_calls():
 async def test_drilldown_selected_full_and_remaining(monkeypatch):
     from agents.analysis import report_builder as rb
 
-    async def fake_select(items, user_input, raw_result, budget, log, metadata, run_config):
+    seen = {}
+
+    async def fake_select(items, user_input, raw_result, budget, log, metadata,
+                          run_config, template=None, *, conversation=None,
+                          conversation_tools=None):
+        # 回归锁：template 必须透传到这里（否则 _build_selection_prompt 拿不到模板，
+        # report-select 的 system 就退化成空模板，与 report-fast 不再共享前缀）
+        seen["template"] = template
+        # PRD-A11 FR-3：conversation 也必须透传，否则 report-select 走不到 fork
+        seen["conversation"] = conversation
         return [1, 3]
 
     monkeypatch.setattr(rb, "_select_tool_indices", fake_select)
+    tpl = {"id": "market_daily", "sections": [{"title": "技术面"}]}
+    convo = [{"role": "user", "content": "问题"}]
     evidence = await rb._build_drilldown_evidence(
-        _items(), "问题", "草稿", None, _log(), None, None)
+        _items(), "问题", "草稿", None, _log(), None, None, template=tpl,
+        conversation=convo, conversation_tools=[{"t": 1}])
 
+    assert seen["template"] == tpl, "template 未透传到 _select_tool_indices"
+    assert seen["conversation"] == convo, "conversation 未透传 → report-select 走不到 fork"
     assert "指数数据" in evidence                      # 选中项全文
     assert "### 工具调用: mx_data_query" in evidence
     assert "### 工具调用: get_limit_up_pool" in evidence

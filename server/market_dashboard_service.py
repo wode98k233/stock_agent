@@ -15,6 +15,13 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+# 全市场广度计算与「上一交易日成交额」短历史：与 agent 侧 market_review 技能
+# （get_market_breadth）共用 tools/market_snapshot，单一事实源，勿在本文件重复实现。
+from tools.market_snapshot import (
+    build_market_snapshot as _build_market_snapshot,
+    compute_breadth as _compute_breadth,
+)
+
 logger = logging.getLogger("radar.market_dashboard")
 
 _ALERT_TTL_TRADING = 10.0
@@ -67,55 +74,9 @@ def _fetch_alerts(limit: int) -> list:
     return HithinkDataSource.get_stock_anomaly(n=limit) or []
 
 
-def _compute_breadth(df) -> dict | None:
-    """从全市场快照计算涨跌分布 / 三市成交额（纯函数，可单测）。"""
-    if df is None or getattr(df, "empty", True) or "涨跌幅" not in df.columns:
-        return None
-    pct = df["涨跌幅"].dropna()
-    dist = {
-        "limit_up": int((pct >= 9.8).sum()),
-        "up_5": int(((pct >= 5) & (pct < 9.8)).sum()),
-        "up_1_5": int(((pct >= 1) & (pct < 5)).sum()),
-        "up_0_1": int(((pct > 0) & (pct < 1)).sum()),
-        "flat": int((pct == 0).sum()),
-        "down_0_1": int(((pct < 0) & (pct > -1)).sum()),
-        "down_1_5": int(((pct <= -1) & (pct > -5)).sum()),
-        "down_5": int(((pct <= -5) & (pct > -9.8)).sum()),
-        "limit_down": int((pct <= -9.8).sum()),
-    }
-    amount = float(df["成交额"].dropna().sum()) if "成交额" in df.columns else 0.0
-    return {
-        "up": int((pct > 0).sum()),
-        "down": int((pct < 0).sum()),
-        "flat": int((pct == 0).sum()),
-        "total": int(pct.count()),
-        "dist": dist,
-        "amount": round(amount, 2),
-        "trade_date": datetime.now(_CST).strftime("%Y-%m-%d"),
-    }
-
-
 def _fetch_breadth() -> dict | None:
     from tools.fetcher.hithink_ds import HithinkDataSource
-    return _compute_breadth(HithinkDataSource.get_spot_all())
-
-
-def _update_prev_amount(amount: float) -> float | None:
-    """记录每日累计成交额，跨日滚动出「上一交易日全量成交额」（首日无数据返回 None）。"""
-    try:
-        from utils.cache.core import _get, _set
-    except Exception:
-        return None
-    today = datetime.now(_CST).strftime("%Y-%m-%d")
-    last = _get("market_dashboard", "last_amount")
-    prev = None
-    if last and last.get("date") != today:
-        _set("market_dashboard", "prev_close_amount", last, 72)
-        prev = last
-    if not prev:
-        prev = _get("market_dashboard", "prev_close_amount")
-    _set("market_dashboard", "last_amount", {"date": today, "amount": amount}, 24)
-    return float(prev["amount"]) if prev and prev.get("amount") else None
+    return _build_market_snapshot(HithinkDataSource.get_spot_all())
 
 
 def _get_breadth() -> tuple[dict | None, bool, float | None]:
@@ -135,8 +96,6 @@ def _get_breadth() -> tuple[dict | None, bool, float | None]:
         _breadth_fetching = True
     try:
         data = _fetch_breadth()
-        if data and data["amount"]:
-            data["prev_amount"] = _update_prev_amount(data["amount"])
     except Exception as e:
         logger.warning("[市场面板] 涨跌分布拉取失败（降级）: %s", e)
         with _breadth_lock:
@@ -200,17 +159,32 @@ def fetch_market_fund_flow(reg) -> float | None:
     return value
 
 
+# 非交易时段的前端轮询间隔（秒）。交易时段用 MARKET_DASHBOARD_REFRESH_S（默认 10）。
+# ⚠️ 为什么必须分档（2026-10-18）：服务端各层 TTL 早就分档了（交易 10/60s，非交易 300s），
+# 但 refresh_s 一直固定 10 —— 于是收盘后浏览器仍然每 10 秒打一次，**请求量是必要的 30 倍**，
+# 而每一次都要占一个专属线程池 worker、并可能触发一次全市场拉取。用户侧体感就是
+# 「这个面板老是让整个 web 卡」。分档后非交易时段轮询降到 300 秒。
+_REFRESH_S_CLOSED = 300
+
+
 def _config() -> dict:
     try:
         from config import Config
+        trading_s = max(3, int(getattr(Config, "MARKET_DASHBOARD_REFRESH_S", 10)))
         return {
             "enabled": bool(getattr(Config, "MARKET_DASHBOARD_ENABLED", True)),
             "alert_limit": max(1, int(getattr(Config, "MARKET_DASHBOARD_ALERT_LIMIT", _ALERT_LIMIT))),
             "news_limit": max(0, int(getattr(Config, "MARKET_DASHBOARD_NEWS_LIMIT", 20))),
-            "refresh_s": max(3, int(getattr(Config, "MARKET_DASHBOARD_REFRESH_S", 10))),
+            "refresh_s": trading_s if _is_trading_time() else max(trading_s, _REFRESH_S_CLOSED),
         }
     except Exception:
-        return {"enabled": True, "alert_limit": _ALERT_LIMIT, "news_limit": 20, "refresh_s": 10}
+        return {"enabled": True, "alert_limit": _ALERT_LIMIT, "news_limit": 20,
+                "refresh_s": _REFRESH_S_CLOSED}
+
+
+def build_config_only() -> dict:
+    """只读配置（含按交易时段分档的 refresh_s）。路由侧算缓存 TTL 用。"""
+    return _config()
 
 
 def _get_alerts(limit: int) -> tuple[list, bool, float | None]:

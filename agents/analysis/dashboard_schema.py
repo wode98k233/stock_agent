@@ -38,6 +38,38 @@ class DashboardCandidateStock(BaseModel):
     suitability: str = ""     # 适合投资者类型
 
 
+class DashboardGroupCandidate(BaseModel):
+    """组内候选标的"""
+    code: str = ""
+    name: str = ""
+    note: str = ""
+
+
+class DashboardEntry(BaseModel):
+    """执行条件：type=none 表示现价可执行"""
+    type: Literal["none", "pullback", "breakout", "unverifiable"] = "none"
+    low: float | None = None
+    high: float | None = None
+    note: str = ""
+
+
+class DashboardGroup(BaseModel):
+    """一个实体（方向/标的组）的决策"""
+    key: str
+    kind: Literal["direction", "symbol", "theme"] = "direction"
+    horizon: str = ""
+    decision: Literal["buy", "hold", "sell"]
+    confidence: float | None = None
+    stance: str = ""
+    candidates: list[DashboardGroupCandidate] = []
+    signal_symbol: str = ""
+    signal_name: str = ""
+    position: str = ""
+    entry: DashboardEntry = Field(default_factory=DashboardEntry)
+    invalidation: str = ""
+    note: str = ""
+
+
 class DashboardData(BaseModel):
     """仪表盘数据模型"""
 
@@ -85,6 +117,8 @@ class DashboardData(BaseModel):
     portfolio_snapshot: dict | None = None   # 组合概况：{total_asset, position_value, cash, position_ratio, position_count}
     positions: list | None = None            # 分标的持仓表：[{code,name,price,pnl_pct,action,condition}]
     symbol_signals: list | None = None       # 分标的具体信号（信号评测逐标的提取）：[{code,name,decision,confidence,condition}]
+    # ── 多实体（方向/标的组）──
+    groups: list[DashboardGroup] | None = None
     # ── 元数据 ──
     scenario_tag: str = "决策仪表盘"
     dashboard_id: str = ""

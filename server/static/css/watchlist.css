@@ -653,3 +653,18 @@
     display: none;
   }
 }
+
+/* ── 未来 30 天公司事件（2026-11-07） ───────────────────────── */
+.wl-events-section { margin: 8px 14px 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; }
+.wl-events-head { padding: 8px 12px; font-size: 12px; font-weight: 800; border-bottom: 1px solid #eef2f5; }
+.wl-events-count { color: var(--brand); }
+.wl-events-rows { padding: 4px 8px 8px; max-height: 160px; overflow-y: auto; }
+.wl-event-row { display: grid; grid-template-columns: 46px 52px 1fr; gap: 8px; padding: 5px 4px; font-size: 12px; align-items: start; }
+.wl-event-date { font-family: Consolas, monospace; color: #334155; font-weight: 700; }
+.wl-event-type { font-size: 10px; font-weight: 700; color: #fff; text-align: center; border-radius: 3px; padding: 1px 4px; }
+.wl-event-type.unlock { background: #b45309; }
+.wl-event-type.dividend { background: #176b5b; }
+.wl-event-type.disclosure { background: #64748b; }
+.wl-event-type.meeting { background: #7c3aed; }
+.wl-event-type.forecast { background: #b91c1c; }
+.wl-event-main { min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

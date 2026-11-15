@@ -17,7 +17,7 @@ category: 数据分析
 - 计算引擎：`thesis/engine.py`（Web 台账页复用同一套，勿在技能层重复实现）
 - 台账定义（阈值可手改）：`data/thesis/hog_regime.json`
 - 定义加载与校验：`thesis/defs.py`
-- 原始研究：用户资料库《猪周期研判》仪表盘（web 节点 qF6A3GseNKYrpBqjvlVC8a / lff8J8DwmGQomCvdoXQlWO）与《猪周期深度研究_当前位置与反转路径_2026-09-28》（web 节点 u2kXpZSQ55OaWk6dFaQKg9），配套源码 hog_regime.py / hog_config.json
+- 原始研究：内部研究（不随开源发布），配套源码 hog_regime.py / hog_config.json
 - ⚠️ **同目录兄弟技能**：`gold_env`（贵金属）、`cu_env`（工业金属）——三者共用 `ThesisSkill` 薄封装，**阈值符号绝不可互相照抄**（资产属性不同，方向可能相反）
 
 ## 目录层信息

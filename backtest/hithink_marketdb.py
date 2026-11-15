@@ -194,13 +194,16 @@ def download_market_dump(kind: str = "daily-k-10d") -> "pd.DataFrame":
     return df
 
 
-def sync_dump_stock_daily(kind: str = "daily-k-10d", progress_cb=None) -> int:
+def sync_dump_stock_daily(kind: str = "daily-k-10d", progress_cb=None,
+                          start_date: str = "") -> int:
     """全市场日K Parquet → stock_daily（source='hithink_dump'，executemany 分块快速灌库）。
 
     - 列映射按官方 Parquet schema（thscode/date_ms/open_price/...）；
     - pre_close/pct_change 由组内相邻收盘向量推算（dump 不含这两列，
       直接 REPLACE 会把已有 akshare 行的涨跌幅抹成 NULL）；
-    - (code, trade_date) 主键幂等，增量与本地重叠无副作用。
+    - (code, trade_date) 主键幂等，增量与本地重叠无副作用；
+    - ``start_date``（YYYY-MM-DD）只在**入库前**过滤，下载仍是官方全量 Parquet
+      （接口没有日期区间参数）。先算好 pre_close 再过滤，保证首行仍带真实昨收。
     """
     df = download_market_dump(kind)
     if df.empty:
@@ -211,9 +214,17 @@ def sync_dump_stock_daily(kind: str = "daily-k-10d", progress_cb=None) -> int:
     df = df.sort_values(["thscode", "date_ms"]).reset_index(drop=True)
     prev_close = df.groupby("thscode")["close_price"].shift(1)
     pct = ((df["close_price"] - prev_close) / prev_close * 100).round(2)
+    dates = df["date_ms"].map(_ms_to_trade_date)
+
+    if start_date:
+        keep = dates >= str(start_date).strip()[:10]
+        df = df[keep].reset_index(drop=True)
+        prev_close = prev_close[keep].reset_index(drop=True)
+        pct = pct[keep].reset_index(drop=True)
+        dates = dates[keep].reset_index(drop=True)
+        logger.info(f"[dump] 按 start_date={start_date} 过滤后 {len(df)} 行")
 
     codes = df["thscode"].astype(str).str.split(".").str[0]
-    dates = df["date_ms"].map(_ms_to_trade_date)
     source = "hithink_dump"
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -265,6 +276,8 @@ def main():
     parser.add_argument("--end", type=str, default="", help="历史K结束日期 YYYY-MM-DD")
     parser.add_argument("--dump", type=str, default="", choices=["", "daily-k", "daily-k-10d"],
                         help="全市场 Parquet 灌库（官方批量通道，替代逐只拉取）")
+    parser.add_argument("--since", type=str, default="",
+                        help="只入库该日期之后的数据（YYYY-MM-DD；下载仍是全量）")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -278,7 +291,7 @@ def main():
         res = sync_hist(codes, args.start, args.end)
         print(f"[OK] 历史K灌库: 成功 {res['ok']} / 失败 {res['fail']} / 写入 {res['total']} 条")
     if args.dump:
-        n = sync_dump_stock_daily(args.dump)
+        n = sync_dump_stock_daily(args.dump, start_date=args.since)
         print(f"[OK] 全市场 {args.dump} 灌库完成: {n} 条")
     if not args.spot and not args.hist and not args.dump:
         parser.print_help()

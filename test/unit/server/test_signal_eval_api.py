@@ -8,6 +8,14 @@ from server import signal_eval_service as svc
 from server.routes import signal_eval as se
 
 
+@pytest.fixture(autouse=True)
+def _isolate_eval_caches():
+    """结果级缓存是模块全局的：用例前后各清一次，避免跨用例串味。"""
+    svc.reset_caches()
+    yield
+    svc.reset_caches()
+
+
 def test_rescan_starts_and_reports_progress(monkeypatch):
     called = {"scan": False}
 
@@ -199,6 +207,9 @@ def test_overview_sync_applies_cost(monkeypatch):
              "signal_time": "2026-08-01", "confidence": 0.8,
              "sentiment": None, "core_verdict": ""}]
     monkeypatch.setattr(svc, "_load_signals", lambda: sigs)
+    # 行业基准映射默认查真库（stock_board_member / stock_daily）：unit 不连真库
+    import signal_eval.benchmarks as bm
+    monkeypatch.setattr(bm, "resolve_benchmark", lambda code: "000300")
     monkeypatch.setattr(svc, "fetch_kline",
                         lambda code, market=None: [{"date": "2026-08-01", "close": 100.0},
                                                     {"date": "2026-09-01", "close": 110.0}])
@@ -427,3 +438,321 @@ def test_bench_fresh_stock_channel_not_affected(monkeypatch):
                         lambda code, **kw: calls.append(code) or 100)
     svc._ensure_bench_fresh("600519", None)
     assert calls == []
+
+
+# ── 条件单接口 / 未识别清单过滤（仪表盘多实体契约） ──────────────
+
+def test_conditional_route(monkeypatch):
+    import asyncio
+    from server.routes import signal_eval as se
+    monkeypatch.setattr(se, "_conditional_sync",
+                        lambda cost=0.0: {"count": 7, "triggered": 1})
+    out = asyncio.run(se.conditional(0.0))
+    assert out["code"] == 0 and out["data"]["count"] == 7
+
+
+def test_unrecognized_excludes_legacy(tmp_path, monkeypatch):
+    import sqlite3
+    from signal_eval.db import init_db
+    from server.routes import signal_eval as se
+
+    db = tmp_path / "signal_eval.db"
+    init_db(str(db))
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        INSERT INTO signal (dialog_uuid,message_uuid,decision,signal_time,scope)
+        VALUES ('d','m1','buy','2026-10-01','symbol'),
+               ('d','m2','buy','2026-10-01','legacy_ambiguous');
+    """)
+    conn.commit()
+    monkeypatch.setattr(se, "get_conn", lambda: conn)
+    monkeypatch.setattr(se, "_dialog_context_msg", lambda *a, **k: "")
+    out = se._unrecognized_sync(1, 50)
+    assert out["total"] == 1 and out["items"][0]["message_uuid"] == "m1"
+
+
+# ── include_conditional 参数传递（条件单是否进入样本列表） ────────
+
+def test_signals_sync_passes_include_conditional(monkeypatch):
+    """signals?include_conditional=true → _load_signals 收到 True。"""
+    from server.routes import signal_eval as se
+    captured = {}
+    monkeypatch.setattr(
+        se, "_load_signals",
+        lambda include_conditional=False: captured.update(ic=include_conditional) or [])
+    out = se._signals_sync(None, 1, 50, 0.0, True)
+    assert captured["ic"] is True
+    assert out["total"] == 0
+
+
+def test_signals_sync_include_conditional_defaults_false(monkeypatch):
+    """不传 include_conditional → 默认 False（条件单默认不进样本）。"""
+    from server.routes import signal_eval as se
+    captured = {}
+    monkeypatch.setattr(
+        se, "_load_signals",
+        lambda include_conditional=False: captured.update(ic=include_conditional) or [])
+    out = se._signals_sync(None, 1, 50, 0.0)
+    assert captured["ic"] is False
+    assert out["total"] == 0
+
+
+def test_signals_sync_exposes_data_status_and_entry(monkeypatch):
+    """样本列表逐行带 data_status/entry_date/entry_mode（数据门控下钻用）。"""
+    from datetime import date
+    from server.routes import signal_eval as se
+
+    today = date.today().isoformat()
+    sigs = [
+        {"id": 1, "symbol_key": "sh600519", "decision": "buy",
+         "signal_time": "2026-08-01", "confidence": 0.8, "is_market_wide": 0},
+        {"id": 2, "symbol_key": "sz002714", "decision": "buy",
+         "signal_time": "2026-08-02", "confidence": 0.7, "is_market_wide": 0},
+    ]
+    returns = {
+        1: {"ret": {5: 1.0, "now": 1.0}, "peak": 1.0, "maxDD": 0.0,
+            "entry_price": 100.0, "entry_date": "2026-08-04",
+            "entry_mode": "next_open", "status": "ok",
+            "last_bar_date": today, "bars_after_entry": 6},
+        2: {"ret": {}, "peak": None, "maxDD": None, "entry_price": None,
+            "entry_date": None, "entry_mode": None, "status": "missing",
+            "last_bar_date": None, "bars_after_entry": 0},
+    }
+    monkeypatch.setattr(se, "_load_signals",
+                        lambda include_conditional=False: sigs)
+    monkeypatch.setattr(se, "_signal_returns", lambda s, cost: returns[s["id"]])
+    monkeypatch.setattr(se, "_bench_returns", lambda s: None)
+
+    out = se._signals_sync(None, 1, 50, 0.0)
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id[1]["data_status"] == "ok"
+    assert by_id[1]["entry_date"] == "2026-08-04"
+    assert by_id[1]["entry_mode"] == "next_open"
+    assert by_id[2]["data_status"] == "missing"
+    assert by_id[2]["entry_date"] is None
+    assert by_id[2]["entry_mode"] is None
+
+
+# ── 基准/alpha 只对 buy 计算（2026-11 性能 P0：144 条信号只有 24 条 buy 需要 alpha） ──
+
+def test_signals_sync_bench_only_for_buy(monkeypatch):
+    """1 buy + 2 hold：只有 buy 调 _bench_returns/_bench_code_for，hold 的 bench/alpha 为 None。"""
+    from datetime import date
+    from server.routes import signal_eval as se
+
+    today = date.today().isoformat()
+    sigs = [
+        {"id": 1, "symbol_key": "sh600519", "decision": "buy",
+         "signal_time": "2026-08-01", "confidence": 0.8, "is_market_wide": 0},
+        {"id": 2, "symbol_key": "sz002714", "decision": "hold",
+         "signal_time": "2026-08-02", "confidence": 0.7, "is_market_wide": 0},
+        {"id": 3, "symbol_key": "sz000001", "decision": "hold",
+         "signal_time": "2026-08-03", "confidence": 0.6, "is_market_wide": 0},
+    ]
+    returns = {
+        i: {"ret": {5: 1.0, "now": 2.0}, "peak": 3.0, "maxDD": -1.0,
+            "entry_price": 10.0, "status": "ok", "last_bar_date": today}
+        for i in (1, 2, 3)
+    }
+    bench_calls, code_calls = [], []
+
+    monkeypatch.setattr(se, "_load_signals", lambda include_conditional=False: sigs)
+    monkeypatch.setattr(se, "_signal_returns", lambda s, cost: returns[s["id"]])
+    monkeypatch.setattr(se, "_bench_returns", lambda s: bench_calls.append(s["id"]) or 0.5)
+    monkeypatch.setattr(se, "_bench_code_for", lambda s: code_calls.append(s["id"]) or "000300")
+
+    out = se._signals_sync(None, 1, 50, 0.0)
+    assert bench_calls == [1]
+    assert code_calls == [1]
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id[1]["bench"] == 0.5 and by_id[1]["bench_code"] == "000300"
+    assert by_id[1]["alpha"] == pytest.approx(1.5)
+    for hid in (2, 3):
+        assert by_id[hid]["bench"] is None
+        assert by_id[hid]["bench_code"] is None
+        assert by_id[hid]["alpha"] is None
+    # 收益本身不受影响（hold 也照常返回各周期收益与 data_status）
+    assert by_id[2]["returns"] == {5: 1.0, "now": 2.0}
+    assert by_id[2]["data_status"] == "ok"
+
+
+# ── 路由层结果缓存（2026-11 性能 P0） ────────────────────────────────
+
+def _matrix_fixture(monkeypatch):
+    """matrix 打桩：单个 buy 信号，返回调用计数。"""
+    from datetime import date
+    from server.routes import signal_eval as se
+
+    calls = {"returns": 0}
+    today = date.today().isoformat()
+    sigs = [{"id": 1, "symbol_key": "sh600519", "decision": "buy",
+             "signal_time": "2026-08-01", "confidence": 0.8, "is_market_wide": 0}]
+
+    def fake_returns(s, cost=0.0):
+        calls["returns"] += 1
+        return {"ret": {5: 1.0, "now": 2.0}, "peak": 2.0, "maxDD": -1.0,
+                "entry_price": 10.0, "status": "ok", "last_bar_date": today}
+
+    monkeypatch.setattr(se, "_load_signals", lambda include_conditional=False: sigs)
+    monkeypatch.setattr(se, "_signal_returns", fake_returns)
+    monkeypatch.setattr(se, "_pair_returns", lambda pairs, cost=0.0: [])
+    return calls
+
+
+def test_matrix_result_cached_and_epoch_invalidates(monkeypatch):
+    """_matrix_sync 同 cost 第二次命中缓存；cost 变 / epoch bump 后重算。"""
+    from server.routes import signal_eval as se
+
+    calls = _matrix_fixture(monkeypatch)
+    first = se._matrix_sync(0.0)
+    n = calls["returns"]
+    assert n > 0
+    assert se._matrix_sync(0.0) == first
+    assert calls["returns"] == n            # 命中结果缓存
+    se._matrix_sync(0.05)                   # cost 不同 → 重算
+    assert calls["returns"] > n
+    n2 = calls["returns"]
+    svc._bump_cache_epoch()                 # 标记后 → 重算
+    se._matrix_sync(0.0)
+    assert calls["returns"] > n2
+
+
+def test_matrix_sell_row_reverses_returns(monkeypatch):
+    """sell 行收益取反：卖出后 −10% ＝ 卖对（winrate=1），与 overview 的
+    `sell_winrate_reverse` 同口径；buy 行不变（−10% 仍是亏）。"""
+    from datetime import date
+    from server.routes import signal_eval as se
+
+    today = date.today().isoformat()
+    sigs = [
+        {"id": 1, "symbol_key": "sh600519", "decision": "buy",
+         "signal_time": "2026-08-01", "confidence": 0.8, "is_market_wide": 0},
+        {"id": 2, "symbol_key": "sz002594", "decision": "sell",
+         "signal_time": "2026-08-02", "confidence": 0.7, "is_market_wide": 0},
+    ]
+    returns = {
+        1: {"ret": {5: -10.0, "now": -10.0}, "peak": 0.0, "maxDD": -10.0,
+            "entry_price": 100.0, "status": "ok", "last_bar_date": today},
+        2: {"ret": {5: -10.0, "now": -10.0}, "peak": 0.0, "maxDD": -10.0,
+            "entry_price": 100.0, "status": "ok", "last_bar_date": today},
+    }
+    monkeypatch.setattr(se, "_load_signals", lambda include_conditional=False: sigs)
+    monkeypatch.setattr(se, "_signal_returns", lambda s, cost=0.0: returns[s["id"]])
+    monkeypatch.setattr(se, "_pair_returns", lambda pairs, cost=0.0: [])
+
+    out = se._matrix_sync(0.0)
+    rows = {r["key"]: r for r in out["rows"]}
+    buy_cells = dict(zip(out["cols"], rows["buy"]["cells"]))
+    sell_cells = dict(zip(out["cols"], rows["sell"]["cells"]))
+    assert (buy_cells[5]["n"], buy_cells[5]["winrate"]) == (1, 0.0)
+    assert (sell_cells[5]["n"], sell_cells[5]["winrate"]) == (1, 1.0)
+    assert sell_cells["now"]["winrate"] == 1.0
+    assert "反向" in rows["sell"]["label"]
+
+
+def test_matrix_confidence_rows_split_unrated(monkeypatch):
+    """置信度四档互不重叠：未评级（NULL）单列，不再被并入低置信 <0.60。
+
+    修前 `(confidence or 0)` 把 NULL 折成 0，真实库「低置信」= 14（含 1 条未评级），
+    与 dimension_stats 的 13 + 1 对不上；这里 3 条 buy 验证 高/低/未评级 各 1。
+    """
+    from datetime import date
+    from server.routes import signal_eval as se
+
+    today = date.today().isoformat()
+    sigs = [
+        {"id": 1, "symbol_key": "sh600519", "decision": "buy",
+         "signal_time": "2026-10-08", "confidence": 0.8, "is_market_wide": 0},
+        {"id": 2, "symbol_key": "sh600000", "decision": "buy",
+         "signal_time": "2026-10-09", "confidence": 0.5, "is_market_wide": 0},
+        {"id": 3, "symbol_key": "sz000001", "decision": "buy",
+         "signal_time": "2026-10-10", "confidence": None, "is_market_wide": 0},
+    ]
+    returns = {sid: {"ret": {5: 1.0, "now": 1.0}, "peak": 1.0, "maxDD": -1.0,
+                     "entry_price": 10.0, "status": "ok", "last_bar_date": today}
+               for sid in (1, 2, 3)}
+    monkeypatch.setattr(se, "_load_signals", lambda include_conditional=False: sigs)
+    monkeypatch.setattr(se, "_signal_returns", lambda s, cost=0.0: returns[s["id"]])
+    monkeypatch.setattr(se, "_pair_returns", lambda pairs, cost=0.0: [])
+
+    out = se._matrix_sync(0.0)
+    # 行顺序：方向两行 → 配对 → 高/中/低/未评级（中置信无样本时整行不出现）
+    assert [r["label"] for r in out["rows"]] == [
+        "buy 买入", "sell 卖出（反向）", "配对平仓",
+        "buy 高置信 (≥0.75)", "buy 低置信 (<0.60)", "buy 未评级"]
+
+    conf_rows = {r["label"]: r for r in out["rows"] if r["key"] == "conf"}
+    assert conf_rows["buy 高置信 (≥0.75)"]["n"] == 1      # 0.8
+    assert conf_rows["buy 低置信 (<0.60)"]["n"] == 1      # 0.5（未评级不同行）
+    assert conf_rows["buy 未评级"]["n"] == 1              # None
+    # 互不重叠：每档 5 日样本各 1 条，三档之和 = buy 信号数（修前低置信会是 2）
+    for label in conf_rows:
+        cells = dict(zip(out["cols"], conf_rows[label]["cells"]))
+        assert (cells[5]["n"], cells[5]["winrate"]) == (1, 1.0)
+    assert sum(r["n"] for r in conf_rows.values()) == 3
+
+
+def test_signals_sync_result_cached(monkeypatch):
+    """_signals_sync 同参数第二次命中缓存；bump epoch 后重新读库。"""
+    from server.routes import signal_eval as se
+
+    loads = []
+    monkeypatch.setattr(se, "_load_signals",
+                        lambda include_conditional=False: loads.append(1) or [])
+    se._signals_sync(None, 1, 50, 0.0)
+    se._signals_sync(None, 1, 50, 0.0)
+    assert len(loads) == 1
+    svc._bump_cache_epoch()
+    se._signals_sync(None, 1, 50, 0.0)
+    assert len(loads) == 2
+
+
+def test_top_and_portfolio_result_cached(monkeypatch):
+    """top / portfolio 同 cost 第二次命中缓存（空信号也缓存，避免每 5 分钟重算）。"""
+    from server.routes import signal_eval as se
+
+    loads = []
+    monkeypatch.setattr(se, "_load_signals",
+                        lambda include_conditional=False: loads.append(1) or [])
+    assert se._top_sync(0.0) == se._top_sync(0.0)
+    assert len(loads) == 1
+    assert se._portfolio_sync(0.0) == se._portfolio_sync(0.0)
+    assert len(loads) == 2
+    assert se._portfolio_sync(0.0)["dates"] == []
+
+
+# ── epoch bump 接入（补标 / 大盘标记 / 重扫） ──────────────────────────
+
+def test_mark_symbol_bumps_cache_epoch(tmp_path, monkeypatch):
+    from server.routes import signal_eval as se
+
+    db = _make_sig_db(tmp_path)
+    monkeypatch.setattr(se, "get_conn", lambda: _sig_conn(db))
+    before = svc._cache_epoch
+    se._mark_symbol_sync(1, "sz300442", "润泽科技")
+    assert svc._cache_epoch == before + 1
+
+
+def test_mark_market_wide_bumps_cache_epoch(tmp_path, monkeypatch):
+    from server.routes import signal_eval as se
+
+    db = _make_sig_db(tmp_path)
+    monkeypatch.setattr(se, "get_conn", lambda: _sig_conn(db))
+    before = svc._cache_epoch
+    se._mark_market_wide_sync(1, True)
+    assert svc._cache_epoch == before + 1
+
+
+def test_start_rescan_bumps_cache_epoch(monkeypatch):
+    from server.routes import signal_eval as se
+
+    monkeypatch.setattr(se, "scan_messages", lambda: 0)
+    before = svc._cache_epoch
+    task_id = se.start_rescan()
+    assert svc._cache_epoch >= before + 1
+    for _ in range(100):
+        if se._rescan_progress.get(task_id, {}).get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert svc._cache_epoch >= before + 2   # 开始 + 结束各失效一次

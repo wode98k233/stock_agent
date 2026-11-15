@@ -80,9 +80,12 @@ def test_classify_with_title_request_emits_sanitized_title(monkeypatch):
 
     assert titles == ["红利低波ETF 下跌归因"]
     assert result["title"] == "红利低波ETF 下跌归因"
-    system_prompt = messages[0].content
-    assert "附加任务" in system_prompt
-    assert "红利低波ETF为什么跌" in system_prompt
+    # 前缀对齐后形态：messages[0] = 共享块（增强输入），调用指令在最后一条 human。
+    # 顺序断言随形态更新，意图不变：标题指令必须真的进了分类提示词。
+    assert messages[0].content == "本轮提问"
+    instr = messages[-1].content
+    assert "附加任务" in instr
+    assert "红利低波ETF为什么跌" in instr
 
 
 def test_classify_without_title_request_skips_title_prompt(monkeypatch):
@@ -91,7 +94,9 @@ def test_classify_without_title_request_skips_title_prompt(monkeypatch):
         {"is_stock_related": True, "response": "", "title": "不应生效"},
     )
 
-    assert "附加任务" not in messages[0].content
+    # 负例必须扫**全部**消息：改后 messages[0] 已是共享块，只查它恒真（等于没测）
+    assert all("附加任务" not in m.content for m in messages)
+    assert messages[0].content == "本轮提问"
     assert result == {}  # 股票相关且无标题请求 → 保持空 dict 语义
 
 
@@ -293,3 +298,46 @@ async def _run_web_agent_query_injects_title_request(monkeypatch):
         context=context,
     )
     assert seen["first_question"] is None
+
+
+# ══════════════════════════════════════════════════════════════
+# 重放隔离：origin='replay' 时跳过自动标题
+# ══════════════════════════════════════════════════════════════
+
+def test_task_runtime_skips_title_for_replay(tmp_path):
+    asyncio.run(_task_runtime_skips_title_for_replay(tmp_path))
+
+
+async def _task_runtime_skips_title_for_replay(tmp_path):
+    from server.agent_runner import AgentRunResult
+    from server.runtime import TaskRuntime
+    from server.storage import WebStorage
+
+    storage = WebStorage(tmp_path / "web.db")
+    dialog = storage.create_dialog(
+        title="[replay] 分析红利低波ETF为什么跌", mode="react_stock", origin="replay")
+    calls = []
+
+    async def runner(*, user_input, mode, context, progress_callback,
+                     title_callback=None, title_source=""):
+        calls.append({"title_source": title_source, "title_callback": title_callback})
+        return AgentRunResult(response="完成", log_uuid="log-1", log_file=None, trace_run_id=None)
+
+    runtime = TaskRuntime(runner)
+    submitted = await runtime.submit_message(
+        storage=storage, context=SimpleNamespace(),
+        dialog_uuid=dialog["dialog_uuid"],
+        content="分析红利低波ETF为什么跌", mode="react_stock",
+    )
+    events = []
+    async for payload in runtime.iter_events(submitted["task_id"], heartbeat_interval=0.01):
+        events.append(payload)
+        if payload["event"] in ("final", "task_error"):
+            break
+
+    assert calls[0]["title_source"] == ""
+    assert calls[0]["title_callback"] is None
+    assert [e for e in events if e["event"] == "title"] == []
+    saved = storage.get_dialog(dialog["dialog_uuid"])
+    assert saved["title"] == "[replay] 分析红利低波ETF为什么跌"
+    assert saved["origin"] == "replay"

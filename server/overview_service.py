@@ -13,7 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable
 
 from config import Config
@@ -256,6 +256,85 @@ def _derive_condition_label(rules: list[dict] | None, *, side: str) -> str | Non
     return "多指标共振"
 
 
+def _strategy_health_map() -> dict[str, dict]:
+    """策略 → 最近一次回测的可信度摘要（设计文档 §11）。
+
+    硬约束：只读本地 backtest.db。**绝不**触发补数或网络请求——
+    _load_strategy_scan 里那段补尾预算注释（本文件 refresh_stale_budget_s 处）记着教训：
+    大屏块里做网络密集的串行补数会把整块拖死（块先判超时、worker 仍在跑、结果被丢弃）。
+
+    「已验证」口径与大屏黄标、策略详情页同源（server/backtest_service.py:18-19
+    的 VERIFIED_HEALTH / MIN_VERIFIED_TRADES），改一处必须改另一处。
+    """
+    from utils.cache.backtest_db import (get_strategies, get_backtest_runs,
+                                         get_result_meta_map, get_backtest_eval)
+    from server.backtest_service import VERIFIED_HEALTH, MIN_VERIFIED_TRADES
+    out: dict[str, dict] = {}
+    try:
+        strategies = get_strategies()
+    except Exception:
+        logger.warning("[overview] 策略列表读取失败", exc_info=True)
+        return out
+    for s in strategies or []:
+        sid = (s or {}).get("strategy_id") or ""
+        if not sid:
+            continue
+        info: dict = {"strategy_id": sid, "name": (s or {}).get("name") or sid,
+                      "verified": False, "status": "never", "last_run_at": "",
+                      "coverage_pct": None, "trade_count": 0, "sharpe_ratio_io": None}
+        try:
+            rows, _total = get_backtest_runs(strategy_id=sid, limit=1, offset=0)
+        except Exception:
+            logger.warning("[overview] 策略回测记录读取失败 strategy_id=%s", sid, exc_info=True)
+            out[sid] = info
+            continue
+        if rows:
+            r = rows[0]
+            run_id = r.get("run_id")
+            meta = (get_result_meta_map([run_id]) or {}).get(run_id) or {}
+            try:
+                ev = get_backtest_eval(run_id) or {}
+            except Exception:
+                ev = {}
+            health = meta.get("health") or ""
+            trades = r.get("trade_count") or 0
+            ok = (health in VERIFIED_HEALTH and meta.get("trade_sample_ok") in (1, True)
+                  and trades >= MIN_VERIFIED_TRADES)
+            info.update({
+                "verified": bool(ok),
+                # status 是「最近一次回测的体检结论」；verified 还要样本达标（两者不等价）
+                "status": ("never" if not health else
+                           "ok" if health in VERIFIED_HEALTH else
+                           "gap" if health == "data_gap" else "weak"),
+                "last_run_at": r.get("created_at") or "",
+                "coverage_pct": meta.get("coverage_pct"),
+                "trade_count": trades,
+                "sharpe_ratio_io": ev.get("sharpe_ratio_io"),
+            })
+        out[sid] = info
+    return out
+
+
+def _load_strategy_health(ctx: dict) -> dict:
+    """策略健康度块（设计文档 §11-1）：每个策略最近一次回测可不可信。
+
+    刻意不接 ctx：不依赖扫描上下文，纯本地库读取（块加载器允许忽略 ctx）。
+    """
+    health = _strategy_health_map()
+    rows = list(health.values())
+    # 已验证的排前面；同组按最近回测时间倒序
+    rows.sort(key=lambda r: (bool(r.get("verified")), r.get("last_run_at") or ""), reverse=True)
+    summary = {
+        "total": len(rows),
+        "verified": sum(1 for r in rows if r.get("verified")),
+        "never": sum(1 for r in rows if r.get("status") == "never"),
+        "gap": sum(1 for r in rows if r.get("status") == "gap"),
+        "weak": sum(1 for r in rows if r.get("status") == "weak"),
+    }
+    return {"rows": rows[:20], "summary": summary,
+            "as_of": datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+
 def _load_strategy_scan(ctx: dict) -> dict:
     from backtest.signal_scanner import SignalScanner
     codes = _scan_codes(ctx)
@@ -263,6 +342,7 @@ def _load_strategy_scan(ctx: dict) -> dict:
     if not codes:
             return {"hits": {}, "sells": {}, "scanned": 0, "names": {}, "labels": {},
                     "sell_labels": {}, "trends": {}, "as_of": as_of,
+                    "strategy_health": {},
                     "summary": {"codes": 0, "hit_codes": 0, "signals": 0,
                                 "sell_codes": 0, "sell_signals": 0, "strategies": 0}}
     configured = [s.strip() for s in (getattr(Config, "OVERVIEW_SCAN_STRATEGIES", "") or "").split(",") if s.strip()]
@@ -321,9 +401,19 @@ def _load_strategy_scan(ctx: dict) -> dict:
     except Exception:
         strategy_count = len(configured)
     trends = {c: v.get("closes") or [] for c, v in raw.items() if v.get("closes")}
+    # 策略可信度（设计文档 §11-2）：供前端给「未经验证」的策略命中打黄标。
+    # 取数失败只降级为「无可信度信息」（前端一律不打标），不拖垮扫描块本身。
+    try:
+        health_map = _strategy_health_map()
+    except Exception:
+        logger.warning("[overview] 策略可信度映射读取失败（扫描块降级）", exc_info=True)
+        health_map = {}
     return {"hits": hits, "sells": sells, "scanned": len(codes), "names": names,
             "labels": labels, "sell_labels": sell_labels, "trends": trends,
             "as_of": as_of,
+            "strategy_health": {sid: {"verified": bool(v.get("verified")),
+                                      "status": v.get("status") or ""}
+                                for sid, v in health_map.items()},
             "summary": {"codes": len(codes), "hit_codes": len(hits),
                         "signals": sum(len(v["hits"]) for v in hits.values()),
                         "sell_codes": len(sells),
@@ -375,84 +465,163 @@ def _load_review(ctx: dict) -> dict:
     }
 
 
-def _token_cost(agg: dict, price_in: float, price_out: float, price_cached: float) -> dict:
-    """按单价（元/百万 token）估算成本。
+# ── 上下文洞察 / 活跃度 / 会话上下文档案（总览大屏研究组三块） ──────────────
+# 键名事实源（2026-10-17 逐条打印核对过真实返回，勿凭记忆改）：
+#   store.llm_steps_totals(run_ids) -> {run_id: [{"step_name","extra"}, ...]}
+#       其中 extra 是 **JSON 字符串**，token 在 extra.token_usage、成本在 extra.cost
+#   store.cost_totals_for_run(run_id) -> {"total","calls","unpriced_calls","free_calls",...}
+#   calendar_query.query_trace_calendar(store, y, m)
+#       -> {"year","month","run_days": {日期: [run 字典, ...]}}（外层键是 run_days）
+#   ctx 里 storage 的键名是 "web_storage"（与既有 _load_portfolio 同一取法）
 
-    输入 token 中缓存命中部分按 cache 单价计，未命中部分按 input 单价计；
-    输出 token 全部按 output 单价计。缓存 token 大于输入时按输入封顶（防脏数据放大）。
+
+def _store_totals(run_ids: list) -> dict:
+    """按 run_id 汇总 token / 成本 ->
+    {run_id: {"total_tokens","reasoning_tokens","output_tokens","cost"}}。
+
+    ⚠️ llm_steps_totals 的真实返回是**逐 step 列表**（不是聚合好的 dict），必须逐条解析
+    extra 里的 token_usage / cost。成本与 build_context_insight 同口径：一次都没记到价
+    （cost.total 全为 None）时给 None（未计价 / 从未记录），而不是 0.0 —— 免费 ≠ 0 元。
     """
-    inp = agg.get("input_tokens", 0) or 0
-    out = agg.get("output_tokens", 0) or 0
-    cached = min(agg.get("cached_tokens", 0) or 0, inp)
-    fresh_in = max(0, inp - cached)
-    unit = 1_000_000.0
-    cost_in = fresh_in / unit * price_in
-    cost_cached = cached / unit * price_cached
-    cost_out = out / unit * price_out
-    return {
-        "total": round(cost_in + cost_cached + cost_out, 4),
-        "input": round(cost_in, 4),
-        "cached": round(cost_cached, 4),
-        "output": round(cost_out, 4),
-        "unit": "元",
-    }
+    from utils.agent_trace.context_stats import parse_extra
+    from utils.agent_trace.store import store
+    from utils.token_usage import normalize_token_usage_dict
 
-
-def _load_usage(ctx: dict) -> dict:
-    from utils.agent_trace.store import store as trace_store
-
-    ws = ctx["web_storage"]
-    today = datetime.now().date()
-    since = (datetime.now() - timedelta(days=28)).strftime("%Y-%m-%d %H:%M:%S")
-    dialogs = ws.count_dialogs_since(since)
-    messages = ws.count_messages_since(since)
-
-    runs = trace_store.list_runs(limit=2000, since=since)
-    day_index = {(today - timedelta(days=13 - i)).isoformat(): i for i in range(14)}
-    activity = [0] * 14
-    mode_dist: dict[str, int] = {}
-    duration_sum = duration_n = success = 0
-    for r in runs:
-        day = str(r.get("created_at") or "")[:10]
-        if day in day_index:
-            activity[day_index[day]] += 1
-        mode = r.get("agent_name") or "unknown"
-        mode_dist[mode] = mode_dist.get(mode, 0) + 1
-        ms = r.get("duration_ms") or 0
-        if ms:
-            duration_sum += ms
-            duration_n += 1
-        if r.get("status") == "success":
-            success += 1
-
-    # ── token 用量与成本（跨月库存量，缓存命中步骤不计） ──
-    token_days = int(getattr(Config, "OVERVIEW_TOKEN_DAYS", 14) or 14)
-    token = {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-             "cached_tokens": 0, "reasoning_tokens": 0, "cache_hit_ratio": 0.0,
-             "avg_tokens_per_call": 0, "daily": [0] * token_days,
-             "by_agent": [], "by_model": []}
+    if not run_ids:
+        return {}
     try:
-        token = trace_store.aggregate_llm_usage(since=since, days=token_days)
+        raw = store.llm_steps_totals(run_ids) or {}
     except Exception as e:
-        logger.warning("[overview] token 聚合失败: %s", e)
-    price_in = float(getattr(Config, "OVERVIEW_TOKEN_PRICE_IN", 2.0) or 0)
-    price_out = float(getattr(Config, "OVERVIEW_TOKEN_PRICE_OUT", 8.0) or 0)
-    price_cached = float(getattr(Config, "OVERVIEW_TOKEN_PRICE_CACHED", 0.2) or 0)
-    cost = _token_cost(token, price_in, price_out, price_cached)
+        logger.warning("[overview] llm_steps_totals 失败: %s", e)
+        return {}
+    out: dict = {}
+    for rid, steps in raw.items():
+        total_tokens = reasoning_tokens = output_tokens = 0
+        cost_sum = 0.0
+        priced = False
+        for step in steps or []:
+            # ⚠️ extra 是自由 JSON：坏 JSON / JSON 列表 / 字符串 / null 都可能出现。
+            # 解析一律走 context_stats.parse_extra（同族模块的唯一 extra 解析入口，
+            # 非 dict 一律回空 dict）—— 脏值绝不能穿透到块级。
+            extra = parse_extra(step.get("extra") if isinstance(step, dict) else None)
+            # cache_hit 伪步骤（A8 缓存命中，非真实调用）跳过 —— 与
+            # store.aggregate_llm_usage 的 extra.cache_hit 过滤同口径，
+            # 否则本块与月库聚合 / context_stats 三个入口结论分叉。
+            if not extra or extra.get("cache_hit"):
+                continue
+            # ⚠️ token 取值必须走仓库唯一归一入口：缺 total_tokens 时它回退
+            # input + output。直读 extra.token_usage.total_tokens 会在缺该键时
+            # 静默得 0 并累计进大屏 KPI（任务 2 在 _usage 上踩过同一写法）。
+            # token_usage 非 dict（脏值）视为未采集，不抛。
+            usage = extra.get("token_usage")
+            if isinstance(usage, dict):
+                usage = normalize_token_usage_dict(usage)
+                total_tokens += int(usage.get("total_tokens") or 0)
+                reasoning_tokens += int(usage.get("reasoning_tokens") or 0)
+                # 输出侧同样逐 step 累加：output_tokens 是「思考 + 回答」的分母（铁律 2），
+                # 会话卡的迷你环 / 「占输出 X%」都靠它 —— 与上面两个量同源、同归一入口。
+                output_tokens += int(usage.get("output_tokens") or 0)
+            cost = extra.get("cost")
+            amount = None
+            if isinstance(cost, dict) and cost.get("total") is not None:
+                try:
+                    amount = float(cost["total"])
+                except (TypeError, ValueError):
+                    amount = None      # 脏值：按未计价处理，不抛、也不按 0 计入金额
+            if amount is not None:
+                cost_sum += amount
+                priced = True
+        out[rid] = {"total_tokens": total_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "output_tokens": output_tokens,
+                    "cost": round(cost_sum, 6) if priced else None}
+    return out
 
-    return {
-        "dialogs": dialogs, "messages": messages, "runs": len(runs),
-        "success_rate": round(success / len(runs) * 100, 1) if runs else None,
-        "avg_sec": round(duration_sum / duration_n / 1000, 1) if duration_n else None,
-        "activity": activity,
-        "modes": sorted(mode_dist.items(), key=lambda kv: -kv[1])[:4],
-        "recent": ws.list_dialogs(limit=5),
-        "token": token,
-        "cost": cost,
-        "token_days": token_days,
-        "pricing": {"model": getattr(Config, "OVERVIEW_TOKEN_MODEL", "DeepSeek v4.1 Flash"),
-                    "in": price_in, "out": price_out, "cached": price_cached},
-    }
+
+def _load_context_insight(ctx: dict) -> dict:
+    """上下文洞察：KPI + 近 N 天双柱 + Token 构成（输出拆思考 / 回答）。
+
+    ⚠️ 本 loader 是**委托** context_stats.build_context_insight —— 空区间与三态护栏
+    已经做在那里（命中率判**分母** input_tokens；cost 三态：已计价 / 免费 0.0 /
+    未计价或从未记录 -> None）。这里**不许**再写一遍守卫：改用更差的判据（llm_calls）
+    会把任务 7 审查抓出的 bug（「有调用但全缺 token_usage」误报命中 0%）引回来。
+    """
+    from utils.agent_trace import context_stats
+
+    days = int(getattr(Config, "OVERVIEW_TOKEN_DAYS", 14) or 14)
+    return context_stats.build_context_insight(days=days)
+
+
+def _load_activity(ctx: dict) -> dict:
+    """近 8 周活跃度热力图，复用 calendar_query 的按月聚合（不重写聚合）。
+
+    ⚠️ 返回结构外层键是 **run_days**（不是 dialog_days），run 字典里取 total_tokens。
+    """
+    from datetime import date
+
+    from utils.agent_trace.calendar_query import query_trace_calendar
+    from utils.agent_trace.store import store
+
+    today = date.today()
+    by_day: dict = {}
+    for back in range(7, -1, -1):
+        index = today.year * 12 + (today.month - 1) - back
+        year, month = index // 12, index % 12 + 1
+        try:
+            payload = query_trace_calendar(store, year, month) or {}
+        except Exception as e:
+            logger.warning("[overview] 活跃度取 %s-%s 失败: %s", year, month, e)
+            continue
+        for day, runs in (payload.get("run_days") or {}).items():
+            by_day[day] = sum(int((r or {}).get("total_tokens") or 0) for r in runs)
+    # 日期升序（热力图按周排列；月库内返回顺序不保证）
+    days_list = [{"date": d, "tokens": by_day[d]} for d in sorted(by_day)]
+    return {"days": days_list[-56:]}
+
+
+def _load_context_sessions(ctx: dict, days: int = 7) -> dict:
+    """会话上下文档案。标题来自 web_dialogs，run 映射来自 latest_trace_runs_for_dialogs。"""
+    from datetime import datetime, timedelta, timezone
+
+    storage = ctx.get("web_storage")
+    if storage is None:
+        return {"sessions": [], "days": days}
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        dialogs = [d for d in (storage.list_dialogs(limit=200) or [])
+                   if (d.get("updated_at") or d.get("created_at") or "") >= since]
+    except Exception as e:
+        logger.warning("[overview] 会话档案取对话失败: %s", e)
+        return {"sessions": [], "days": days}
+    try:
+        run_map = storage.latest_trace_runs_for_dialogs(
+            [d.get("dialog_uuid") for d in dialogs]) or {}
+    except Exception as e:
+        logger.warning("[overview] 会话档案取 run 映射失败: %s", e)
+        run_map = {}
+    try:
+        totals = _store_totals([rid for rid in run_map.values() if rid])
+    except Exception as e:
+        # 与上面 run_map 同款降级：单个脏 step 不能让整块档案失败 —— 照常列出会话，
+        # token / 成本留 None（未采集），不显示成 0。
+        logger.warning("[overview] 会话档案汇总 token 失败: %s", e)
+        totals = {}
+    sessions = []
+    for dialog in dialogs:
+        uuid = dialog.get("dialog_uuid")
+        run_id = run_map.get(uuid)
+        agg = totals.get(run_id) or {}
+        sessions.append({"dialog_uuid": uuid, "title": dialog.get("title") or "未命名",
+                         "agent_mode": dialog.get("current_mode"), "run_id": run_id,
+                         "created_at": dialog.get("created_at"),
+                         "billed_tokens": agg.get("total_tokens"),
+                         "cost": agg.get("cost"),
+                         "reasoning_tokens": agg.get("reasoning_tokens"),
+                         # 输出总量：卡片据此算 thinking = min(reasoning, output)、
+                         # answer = output - thinking（思考 + 回答 ≡ 输出）。
+                         # 缺 run / 汇总失败 -> None = 未采集（前端只画轨道，不画假 0）。
+                         "output_tokens": agg.get("output_tokens")})
+    return {"sessions": sessions, "days": days}
 
 
 def _load_thesis_portfolio(ctx: dict) -> dict:
@@ -560,9 +729,17 @@ BLOCKS: list[Block] = [
     Block("macro", "宏观指标看板", "right", "research", 12, 0, _load_macro),
     Block("thesis", "研究台账", "center", "research", 12, 0, _load_thesis),
     Block("todos", "待办与提醒", "left", "research", 12, 0, _load_todos),
-    Block("usage", "Agent 使用统计", "right", "research", 12, 0, _load_usage),
+    # 总览大屏研究组三块（任务 11）：usage 块 id 保持不变（前端与既有测试按 id 取），
+    # 只换标题与 loader —— payload 形状随之变更。
+    # ⚠️ 旧 usage 形状（dialogs/messages/token/cost/pricing 那套）已随任务 13 清理**整链删除**，
+    # 别再按旧键去对前端适配器（以实现为准：本块现在只回 _load_context_insight 的键）。
+    Block("usage", "上下文洞察", "right", "research", 12, 0, _load_context_insight),
+    Block("activity", "活跃度", "left", "research", 12, 0, _load_activity),
+    Block("sessions", "会话上下文档案", "center", "research", 0, 0,
+          _load_context_sessions, _SLOW_BLOCK_TIMEOUT_S),
     Block("thesis_portfolio", "组合层配比", "center", "research", 12, 0, _load_thesis_portfolio),
-    Block("quality", "质量观测", "center", "research", 6, 0, _load_quality),
+    Block("quality", "质量观测", "center", "research", 6, 0, _load_quality,
+          _SLOW_BLOCK_TIMEOUT_S),
     Block("review", "评测与信号胜率", "center", "research", 6, 0, _load_review),
     Block("storage", "数据中心存储", "left", "research", 12, 0, _load_storage),
     Block("runtime", "运行状态", "left", "system", 12, 0, _load_runtime),
@@ -570,6 +747,7 @@ BLOCKS: list[Block] = [
     Block("shortline", "短线情绪", "center", "market", 7, 0, _load_shortline, _SLOW_BLOCK_TIMEOUT_S),
     Block("portfolio", "持仓概览", "center", "market", 7, 0, _load_portfolio, _SLOW_BLOCK_TIMEOUT_S),
     Block("watchlist", "自选速览", "center", "market", 5, 0, _load_watchlist, _SLOW_BLOCK_TIMEOUT_S),
+    Block("strategy_health", "策略健康度", "center", "system", 0, 0, _load_strategy_health, _SLOW_BLOCK_TIMEOUT_S),
     Block("strategy_scan", "策略扫描", "center", "system", 0, 0, _load_strategy_scan, _SCAN_TIMEOUT_S),
 ]
 
@@ -588,6 +766,28 @@ def _select_blocks(blocks: list[str] | None) -> list[Block]:
         return list(BLOCKS)
     wanted = set(blocks)
     return [b for b in BLOCKS if b.id in wanted]
+
+
+def _release_thread_conns() -> None:
+    """释放**当前线程**的连接缓存 —— 线程局部缓存不会随线程死亡自动回收。
+
+    ⚠️ 为什么必须在这里释放（任务 13 实测，先量后改）：
+    _load_block 每装一块都新建一个 ThreadPoolExecutor(1)，线程跑完即死；而
+    utils.agent_trace.store 的连接缓存是**线程局部**的（_MAX_CONNS_PER_THREAD 是
+    **每线程** LRU）→ 那批连接既不会被 LRU 淘汰，也随线程一起失去引用，永不关闭。
+    实测：5 次 activity 强刷 = 5 个线程 × 5 个存在月库 → 连接数 0→25 只增不减；
+    再加 3 次 sessions → 40。任务 11 把读 trace 的块从 1 个（旧 usage）变成 3 个
+    （usage/activity/sessions），故这是**既有泄漏被放大**。
+
+    只关本线程的连接（store.close_thread_conns 的实现保证不碰其他线程），
+    且调用点在 loader **返回之后** —— 此时本线程已不再使用这些连接。
+    """
+    try:
+        from utils.agent_trace.store import store as trace_store
+        trace_store.close_thread_conns()
+    except Exception:
+        # 释放失败绝不能影响块结果（本函数只做收尾，失败即为「没释放」）
+        logger.debug("[overview] 释放线程连接缓存失败", exc_info=True)
 
 
 def _load_block(block: Block, ctx: dict, force: bool) -> dict:
@@ -611,10 +811,20 @@ def _load_block(block: Block, ctx: dict, force: bool) -> dict:
             return _hit()
         if not force and cached and ttl > 0 and (time.time() - cached[0]) <= ttl:
             return _hit()
+
+        def _invoke():
+            # 在 **worker 线程内**调用 loader 并在返回后释放该线程的连接缓存：
+            # 这条线程是本块专用（pool 上限 1、用完即 shutdown），loader 返回后不会再被谁读到。
+            # ⚠️ 释放动作必须留在 worker 线程里 —— close_thread_conns 只关「当前线程」的缓存。
+            try:
+                return block.loader(ctx)
+            finally:
+                _release_thread_conns()
+
         try:
             pool = ThreadPoolExecutor(max_workers=1)
             try:
-                payload = pool.submit(block.loader, ctx).result(timeout=block.timeout)
+                payload = pool.submit(_invoke).result(timeout=block.timeout)
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
             with _cache_guard:

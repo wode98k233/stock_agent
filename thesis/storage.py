@@ -223,23 +223,44 @@ class ThesisStorage:
         return _snapshot_row(row) if row else None
 
     def get_history(self, thesis_id: str, days: int = 90) -> list[dict]:
-        """升序历史点（供趋势图）：只吐趋势需要的字段，不搬 factors JSON。"""
+        """升序历史点（供趋势图）：只吐趋势需要的字段，不搬整份 factors JSON。
+
+        逐因子除了 `scores`，还吐 `values` / `pct_ranks` / `units` / `statuses`：
+        页面要回答「总分今天为什么涨」，只给分数看不到读数从哪到哪（同样 +1 分，
+        1.58% → 1.60% 与 2.9% → 1.5% 的含义完全不同）。这几个映射都是按因子 key
+        索引的扁平字典，180 个点 × 7 个因子也只有几 KB，故随历史一起返回，
+        不再让前端为每个因子单独请求。
+        """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT trade_date, total, valid_count, factor_count, verdict,"
+                "SELECT trade_date, data_asof, total, valid_count, factor_count, verdict,"
                 "       factors_json FROM thesis_snapshot WHERE thesis_id = ?"
                 " ORDER BY trade_date DESC LIMIT ?", (thesis_id, max(1, days))).fetchall()
         out = []
         for r in reversed(rows):
-            scores = {f.get("key"): f.get("score")
-                      for f in _loads(r["factors_json"], [])}
+            factors = _loads(r["factors_json"], [])
+            scores, values, pct_ranks, units, statuses = {}, {}, {}, {}, {}
+            for f in factors:
+                k = f.get("key")
+                if not k:
+                    continue
+                scores[k] = f.get("score")
+                values[k] = f.get("value")
+                pct_ranks[k] = f.get("pct_rank")
+                units[k] = f.get("unit") or ""
+                statuses[k] = f.get("status") or ""
             out.append({
                 "trade_date": r["trade_date"],
+                "data_asof": r["data_asof"],
                 "total": r["total"],
                 "valid_count": r["valid_count"],
                 "factor_count": r["factor_count"],
                 "verdict": r["verdict"],
                 "scores": scores,
+                "values": values,
+                "pct_ranks": pct_ranks,
+                "units": units,
+                "statuses": statuses,
             })
         return out
 

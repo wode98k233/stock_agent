@@ -3,6 +3,7 @@
 所有 Agent 模式需继承此基类
 """
 import asyncio
+import contextvars
 import logging
 from typing import Optional, Callable
 from datetime import datetime
@@ -103,6 +104,68 @@ def _build_portfolio_block(user_input: str, db_path: str | None = None) -> str:
         return "\n".join(lines)
     except Exception:
         return ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 精简输入（无记忆）注册表 —— 给 classify / clarify / planner 这套「开头短调用」用
+# ═══════════════════════════════════════════════════════════════
+# 背景（2026-10-18 实测）：_enrich_user_input 的增强输入里 [相关记忆片段] 占 classify
+# 输入的 95%（4,686 字符 ≈ 2,929 token），而这四个调用（classify / clarify /
+# unified planner / PDOR planner）要它没用——分类看的是 [用户问题] + **history**，
+# 规划看的是 [用户问题] + 技能目录 + 模板指引（见各调用点注释里的行号依据）。
+# 且这段白带的记忆每 run 全额付费：共享块含 [用户问题]，跨 run 前缀恒不命中。
+#
+# 做法：_enrich_user_input 构建增强输入时**顺手产出**「去掉 [相关记忆片段] 的同一份块」
+# （片段级并行拼接，构建时就区分，**不做任何正则删段**），登记在下面这张表里；
+# 四个调用点用 get_lean_input(共享块) 取精简版，agent 主链仍拿完整块。
+#
+# 取舍登记（前缀对齐 vs 每 run 全额省 5,800 token）：
+#   改前 classify/clarify/PDOR planner 的 messages[0] 与 state["input"] 逐字节相同（PRD-A11
+#   前缀对齐族）。改后它们改为共用**精简块**：四者之间仍逐字节相同（同族共享照旧成立），
+#   与 state["input"]（agent 主链）的同一性没了。这份同一性实测收益 ≈ 0——共享块含
+#   [用户问题]，跨 run 恒不命中，且各短调用静态指令 < 1 块，provider 前缀缓存从第 0 字节
+#   比到 [用户问题] 就分叉；换来的是**每 run 稳省 ≈5,800 token 全额**（分类 ≈2,929 +
+#   规划 ≈2,929）。**这是刻意取舍，不要为了「对齐 state["input"]」把记忆加回来。**
+#
+# ⚠️ 以「完整块原文」为键：并发 run（同进程多个 task/线程）各查各的键，不会互相串。
+# ⚠️ 查不到（单测直调节点、未走 enrich 的调用路径）→ **原样返回完整块**，行为退化成改动前，
+#    绝不会把别的 run 的精简块喂给本 run（失败方向是「多带记忆」，不是「喂错输入」）。
+# ⚠️ **观测/测试提示（2026-10-18 实测踩坑）**：这张表是 ContextVar，而 `asyncio.run()` 会
+#    **拷贝**当前 context —— run 内 `set()` 的条目**不回流**到调用方。所以测试里要读本表，
+#    必须在**同一个 context / 同一个 event loop 内**读（例如把 spy 包在 run 内读一眼）；
+#    在 `asyncio.run` 之外读只会拿到空表，会被误判成「clarify 漏登记孪生」。
+#    实例：`scripts/devtools/verify_clarify_lean_input.py` 第一版就因此误报，改为在 run 内读后四条全绿。
+_LEAN_REGISTRY_MAX = 16
+_lean_registry: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "lean_input_registry", default=None
+)
+
+
+def register_lean_input(full_text: str, lean_text: str) -> None:
+    """登记「完整块 → 无记忆精简块」。由 _enrich_user_input / clarify 调用。"""
+    if not full_text or not lean_text:
+        return
+    reg = _lean_registry.get()
+    if reg is None:
+        reg = {}
+        _lean_registry.set(reg)
+    reg[full_text] = lean_text
+    # dict 保序：超限丢最早登记的几条（长时间运行的 Web 进程不涨内存）
+    if len(reg) > _LEAN_REGISTRY_MAX:
+        for key in list(reg)[: len(reg) - _LEAN_REGISTRY_MAX]:
+            reg.pop(key, None)
+
+
+def get_lean_input(full_text: str) -> str:
+    """取与完整块配套的无记忆精简块；无登记时**原样返回**（安全回退，见上方取舍登记）。"""
+    if not full_text:
+        return full_text
+    reg = _lean_registry.get()
+    if reg:
+        lean = reg.get(full_text)
+        if lean:
+            return lean
+    return full_text
 
 
 class BaseAgent:
@@ -207,12 +270,19 @@ class BaseAgent:
         memory_block = ""
         market_status = ""
 
+        # 精简块与完整块**同源并行拼接**：每个片段各拼一次，[相关记忆片段] 只拼进完整块。
+        # 这样精简块的四段（[背景信息]/[用户问题]/[市场状态]/## 用户画像）与完整块逐字节相同，
+        # 且**构建时就区分**——绝不用正则从完整文本里删记忆段（脆弱且会误伤）。
+        lean_parts = [enriched]
+
         # 市场开市/休市状态
         try:
             from utils.trading_calendar import get_market_status_text
             market_status = get_market_status_text()
             if market_status and "正常开市" not in market_status:
-                enriched += f"\n[市场状态] {market_status}"
+                seg = f"\n[市场状态] {market_status}"
+                enriched += seg
+                lean_parts.append(seg)
         except Exception:
             pass
 
@@ -221,11 +291,15 @@ class BaseAgent:
             profile = UserProfileManager(user_id="default")
             profile_ctx = profile.get_context_hint() or ""
             if profile_ctx:
-                enriched += "\n" + profile_ctx
+                seg = "\n" + profile_ctx
+                enriched += seg
+                lean_parts.append(seg)
         except Exception:
             profile_ctx = ""
 
         # 相关记忆片段（方案A：拼接 session 历史提升召回）
+        # ⚠️ 只进完整块、**不进精简块**：classify/clarify/planner 走 get_lean_input 拿精简版，
+        #    agent 主链（state["input"]）仍拿完整块。理由与取舍见 register_lean_input 上方注释。
         try:
             sdk = get_sdk()
             context = _build_memory_context(user_input, history)
@@ -239,7 +313,9 @@ class BaseAgent:
         try:
             portfolio_block = _build_portfolio_block(user_input)
             if portfolio_block:
-                enriched += "\n" + portfolio_block
+                seg = "\n" + portfolio_block
+                enriched += seg
+                lean_parts.append(seg)
         except Exception:
             portfolio_block = ""
 
@@ -282,4 +358,6 @@ class BaseAgent:
             except Exception:
                 pass
 
+        # 登记「完整块 → 精简块」，供 classify/clarify/planner 取用（详见模块上方取舍登记）
+        register_lean_input(enriched, "".join(lean_parts))
         return enriched

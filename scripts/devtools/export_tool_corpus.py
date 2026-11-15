@@ -47,13 +47,36 @@ def _print_stats(title: str, per_tool: dict) -> None:
     print(f"{'合计':28s} {total:5d}")
 
 
+def _has_steps_table(db_path: str) -> bool:
+    """库里有 steps 表才可导出（trace 主库只剩 reviews → 跳过）。打不开视为不可用。"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            return conn.execute(
+                "select 1 from sqlite_master where type='table' and name='steps'"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
 def _resolve_dbs(db_arg: str) -> list[str]:
-    """解析待导出的 trace 库：显式 --db 单库；默认主库 + 全部月库。"""
+    """解析待导出的 trace 库：显式 --db 单库；默认主库 + 全部月库。
+
+    ⚠️ 2026-10-17 修复：2026-09-23 trace **按月分库**后，主库只剩 `reviews`，
+    `runs/steps/messages` 都在 `db/agent_trace/agent_trace_YYYYMM.db`。旧实现把主库
+    也塞进候选 → `build_records()` 无条件 `select ... from steps` 直接
+    `OperationalError: no such table: steps`，导出中断（并连带
+    `tool_compress_replay.py` 的语料断供）。这里按「有没有 steps 表」过滤。
+    """
     if db_arg:
-        return [db_arg] if os.path.isfile(db_arg) else []
-    from utils.agent_trace.store import store
-    paths = [store.main_db_path()] + store.list_month_dbs()
-    return [p for p in paths if os.path.isfile(p)]
+        candidates = [db_arg] if os.path.isfile(db_arg) else []
+    else:
+        from utils.agent_trace.store import store
+        candidates = [p for p in [store.main_db_path()] + store.list_month_dbs()
+                      if os.path.isfile(p)]
+    return [p for p in candidates if _has_steps_table(p)]
 
 
 def main(argv=None) -> int:

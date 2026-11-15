@@ -25,6 +25,33 @@ from utils.cache.backtest_db import (
 )
 
 
+def _days_covering(gap_start: str, gap_end: str = '', *, today: Optional[str] = None,
+                   buffer_days: int = 15, minimum: int = 60, maximum: int = 2000) -> int:
+    """缺口区间 → fetch_and_store_daily 的滚动窗口天数（设计 §6）。
+
+    数据源只支持「最近 N 天」（utils/cache/market_data_db.py::fetch_and_store_daily(code, days=250)），
+    因此按「今天 − gap_start」的自然日差 + 缓冲换算；拉到的是超集，写库走 upsert 覆盖。
+    gap_end 暂不参与计算（保留形参，将来换支持区间取数的源再用）。
+    """
+    from datetime import date, datetime
+
+    def _parse(value: Any) -> Optional[date]:
+        text = str(value or '').strip()[:10]
+        for fmt in ('%Y-%m-%d', '%Y%m%d', '%Y/%m/%d'):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    start = _parse(gap_start)
+    if start is None:
+        return minimum
+    ref = _parse(today) or date.today()
+    span = (ref - start).days + max(0, int(buffer_days))
+    return max(minimum, min(maximum, span))
+
+
 class DataCollector:
     """数据采集器"""
 

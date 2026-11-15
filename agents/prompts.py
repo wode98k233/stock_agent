@@ -5,8 +5,95 @@
 import os
 import json
 
-def get_skill_selector_prompt(skill_catalog: str, template: dict = None) -> str:
-    """直接把报告模板和技能目录发给LLM，让LLM自己决定需要什么技能"""
+def build_template_digest(template: dict) -> str:
+    """把模板压成「选技能够用」的结构化摘要（PRD-A11 FR-5.1）。
+
+    **为什么可以砍**：选技能只需要知道「这份报告要拿哪些数据」，而
+    「这段报告该怎么写」写在 ``sections[].prompt`` 正文里，属报告正文层信息。
+    两条离线证据（24 个模板全覆盖）：
+      ① 技能名的出现位置全部另有出处（``skill_plan`` / ``data_contract`` /
+         ``required_skills`` / ``fallback_skills``），正文里没有独占的；
+      ② ``sections[].prompt`` 正文里**零处**提到工具名 / 数据源 / "调用·获取·查询"
+         这类指向技能的措辞（``scripts/devtools/probe_selector_compact_risk.py`` 可复验）。
+    因此紧凑化对技能选择的信息损失 ≈ 0，不需要真实 LLM 的 A/B。
+
+    **保留**（都是"要什么数据"的直接依据）：
+      · ``required_skills`` —— 模板硬性要求的技能
+      · ``skill_plan`` —— 技能 + 用途 + fallback，最直接的依据
+      · ``data_contract`` —— 数据契约（槽位 / 字段 / 工具能力 / 是否硬性）
+      · ``sections`` 的 title / data_slots / core_slots / required —— 维度与所需槽位
+    **丢弃**：``sections[].prompt`` 正文、``qa_rules``、``output_blocks``、
+      ``report_family`` / ``verbosity`` / ``max_report_words`` 等排版类字段。
+    """
+    parts: list[str] = []
+    name = template.get("name") or template.get("id") or ""
+    tid = template.get("id") or ""
+    parts.append(f"### 模板：{name}（id={tid}）")
+
+    req = template.get("required_skills")
+    if req:
+        parts.append(f"- **必须选择的技能**：{', '.join(map(str, req))}")
+
+    plan = template.get("skill_plan") or []
+    if plan:
+        parts.append("- **技能计划（技能 → 用途）**：")
+        for step in plan:
+            if not isinstance(step, dict):
+                continue
+            line = f"  - {step.get('skill', '')}：{step.get('purpose', '')}"
+            fb = step.get("fallback_skills")
+            if fb:
+                line += f"（备选：{'、'.join(map(str, fb))}）"
+            parts.append(line)
+
+    fb_all = template.get("fallback_skills")
+    if fb_all:
+        parts.append(f"- 备选技能：{'、'.join(map(str, fb_all))}"
+                      f"（仅在主技能无法满足数据契约时使用）")
+
+    dc = template.get("data_contract") or []
+    if dc:
+        parts.append("- **必需数据（契约）**：")
+        for item in dc:
+            if not isinstance(item, dict):
+                continue
+            hard = "硬性" if item.get("hard_required", True) else "可选"
+            line = f"  - [{hard}] {item.get('slot', '')}"
+            if item.get("description"):
+                line += f"：{item['description']}"
+            if item.get("fields"):
+                line += f"；字段：{'、'.join(map(str, item['fields']))}"
+            if item.get("tool_capabilities"):
+                line += f"；能力：{'、'.join(map(str, item['tool_capabilities']))}"
+            parts.append(line)
+
+    secs = template.get("sections") or []
+    if secs:
+        parts.append("- **报告维度（只需要什么数据，不需要怎么写）**：")
+        for sec in secs:
+            if not isinstance(sec, dict):
+                continue
+            line = f"  - {sec.get('title', '')}"
+            if not sec.get("required", False):
+                line += "（数据不足时留一句「数据缺失」）"
+            if sec.get("data_slots"):
+                core = set(sec.get("core_slots") or [])
+                slots = [f"{s}*" if s in core else str(s) for s in sec["data_slots"]]
+                line += f"；所需数据：{'、'.join(slots)}"
+            parts.append(line)
+        parts.append("  （* 为核心数据）")
+    return "\n".join(parts)
+
+
+def get_skill_selector_prompt(skill_catalog: str, template: dict = None,
+                              mode: str = "full") -> str:
+    """把报告模板 + 技能目录发给 LLM，让它决定需要什么技能。
+
+    :param mode: ``full`` = 模板 JSON 全文（回退档）；
+        ``compact`` = :func:`build_template_digest` 的结构化摘要（PRD-A11 FR-5.1）。
+        生产默认值由 ``Config.SKILL_SELECTOR_PROMPT_MODE`` 决定，见
+        ``SelectSkillsNode``。
+    """
     from utils.app_paths import get_agents_dir
     try:
         if template is None:
@@ -22,12 +109,18 @@ def get_skill_selector_prompt(skill_catalog: str, template: dict = None) -> str:
             with open(template_path, "r", encoding="utf-8") as f:
                 template = json.load(f)
         
-        # 把模板内容序列化为JSON字符串
-        template_json = json.dumps(template, ensure_ascii=False, indent=2)
+        # 按 mode 产出模板部分：compact 用结构化摘要（体积约 1/4~1/3），full 用 JSON 全文
+        if str(mode).lower() == "compact":
+            template_json = build_template_digest(template)
+            header = ("## 当前报告模板（决定你需要什么数据；已压成结构化摘要，"
+                      "数据维度与所需槽位见下）")
+        else:
+            template_json = json.dumps(template, ensure_ascii=False, indent=2)
+            header = "## 当前报告模板（决定你需要什么数据）"
         
         return f"""你是选股雷达的技能选择器。
 
-## 当前报告模板（决定你需要什么数据）
+{header}
 {template_json}
 
 ## 可用技能目录
@@ -133,6 +226,9 @@ CLASSIFIER_TITLE_INSTRUCTION = """
 
 CLARIFY_PROMPT = """你是选股雷达的澄清助手。用户已提出分析请求，在正式开工前，判断是否缺少「不补充就问不清楚」的关键信息。
 
+【当前问题优先】只针对本次【当前用户问题】生成澄清问题；对话历史仅用于理解代词和已提供的信息。
+不得把历史里的旧任务当成当前任务；不得重复追问历史已明确回答过的信息；如果历史与当前问题无关，忽略它。
+
 只有缺失信息会显著改变结论或操作建议时才提问，例如：
 - 资金/仓位规模、投资期限（短线/中线/长线）、风险偏好
 - 具体标的或候选范围、关注维度（技术面/基本面/消息面/资金面）
@@ -144,6 +240,15 @@ CLARIFY_PROMPT = """你是选股雷达的澄清助手。用户已提出分析请
 - 问与投资决策无关的问题
 
 最多生成 {max_q} 个问题；每个问题给 2~4 个选项：label 是给用户看的中文文案；value 是回传标识，**必须使用与 label 相同的中文短语**（禁止 intraday_snapshot 这类英文/拼音 key）；recommended 必须是某个 option 的 value；allow_custom 表示允许用户自由输入（默认 true）。
+
+如果是「想验证一个交易想法/策略」这类输入（出现买卖动作 + 指标或条件 + 胜率/回测/验证等字样），
+问题必须覆盖下面四项，一项都不能少：
+① 标的是哪只（或哪一篮子）——不要默认某只票
+② 什么条件算「买入」
+③ 什么条件算「卖出」（T+1 制度下要说明是次日开盘卖还是当日收盘卖）
+④ 拿哪段区间验证（要给出「含大跌/含熊市」这类区间选项，避免只测牛市）
+每题的选项必须是**可以直接执行的中文短语**（例如「收盘价上穿 5 日均线」「MACD 金叉」「次日开盘卖出」「近 1 年」），
+不要出现「看情况」「视市场而定」这类无法执行的选项。
 
 严格输出 JSON（不要其他文字）：
 {{"questions": [{{"id": "q1", "question": "…", "options": [{{"label": "…", "value": "…"}}], "recommended": "…", "allow_custom": true}}]}}
@@ -351,3 +456,18 @@ SKILL_GAP_PROMPT = """当前技能的工具连续失败，需要从可用技能�
 返回严格 JSON：{"active_skill": "技能名", "reason": "一句话理由"}
 """
 
+
+TASK_SPEC_PROMPT = """你是选股雷达的任务结构抽取器。根据【用户问题】和【澄清回答】，抽出这次分析任务的实体清单。
+
+规则：
+1. 只抽问题里明确出现的分析对象（方向/标的组）；同一方向下的多个 ETF 归入该实体的 candidates，不要拆成多个实体。
+2. 用户没提到的字段留空（horizon/position/focus），不得编造；不得从常识补全。
+3. candidates 尽量带 6 位代码；只有中文名时 code 留空。
+4. 最多 5 个实体；没有明确实体就返回 {"entities": []}。
+
+严格输出 JSON（不要其他文字）：
+{"entities": [{"key": "科技", "kind": "direction", "horizon": "1-5天",
+  "candidates": [{"code": "159516", "name": "半导体设备ETF"}],
+  "position": "半仓以上", "focus": ["技术面", "资金流向"]}],
+ "global": {"focus": ["技术面", "资金流向"]}}
+"""

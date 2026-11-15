@@ -136,61 +136,67 @@ async def executor_node(state: PdorState, ctx: AgentContext, run_config=None) ->
     return {"plan_steps": new_steps, "_failed_tools": failed_tools}
 
 
-def _build_context_for_step(step: dict, state: dict, ctx: AgentContext = None) -> list:
-    """构建上下文消息：对话历史 + 已完成步骤摘要 + 用户约束 + 当前任务"""
-    messages = []
-
-    # 对话历史
-    if ctx and ctx.memory and ctx.memory.enabled:
-        history = ctx.memory.get_history()
-        if history:
-            messages.extend(history)
-
-    # 已完成步骤摘要
-    completed = [s for s in state.get("plan_steps", []) if s.get("status") == "success"]
-    if completed:
-        summary = "\n".join([f"- Step {s['step']} [{s['skill']}]: {s.get('result', '')}" for s in completed])
-        messages.append(("system", f"已完成的步骤摘要：\n{summary}"))
-
-    # 用户约束
-    constraints = state.get("constraints", "")
-    if constraints:
-        messages.append(("system", f"[用户约束] {constraints}"))
-
-    messages.append(("user", f"请执行以下信息收集任务：{step['purpose']}"))
-    return messages
-
-
 async def _run_react_step(step, state, ctx, llm, logger, failed_tools: list = None) -> tuple:
-    """执行步骤（调用 ReAct 子图）。返回 (final_result, tool_results)"""
+    """执行步骤（调用 ReAct 子图）。返回 (final_result, tool_results)
+
+    ⚠️ PRD-A11 FR-10/11：内层 agent 必须与主链/planner **同前缀形态**
+    `[REACT][history][guidance][user(raw input)] + 尾部(执行规则+技能详情+已完成摘要+约束+步骤指令)`。
+    旧形态把工具详情插在 context **最前**、以 `("user", "请执行以下信息收集任务：…")` 收尾，
+    且未传 tail_system → 走 graph.py 的 else 分支 → messages[0] 是**每步不同**的 system，
+    与工具族第 0 字节分叉；叠加「按技能挑工具子集」（位置 0 随技能漂移），
+    每步首调恒冷启动。改后与 plan executor 同款。
+    """
     from agents.common_react.graph import run_react_subgraph
-    from agents.shared.tool_utils import merge_tools_for_step
+    from agents.shared.tool_utils import merge_tools_for_skills
     from tools.skills import SkillPromptBuilder
 
     registry = ctx.skill_registry
-    tools = merge_tools_for_step(registry, step["skill"], selected_skills=state.get("selected_skills", []), logger=logger)
+    # full 档：与内层 agent **同一份全量工具**（`for_binding=True` → 全量 52，与技能无关）——
+    # tools 在 payload 位置 0，按技能挑子集会让该位置随 step 漂移、跨步/跨 run 恒不命中。
+    tools = merge_tools_for_skills(
+        registry, [step["skill"]],
+        selected_skills=state.get("selected_skills", []),
+        logger=logger, log_tag="E", fallback_skill=step["skill"], for_binding=True,
+    )
     _record_skill_activate(step["skill"], [t.name for t in tools], "pdor_step", step["step"])
 
-    # 构建上下文（原 build_context_for_step，内联）
-    context_messages = _build_context_for_step(step, state, ctx)
+    # 尾部：技能详情 + 已完成步骤摘要 + 用户约束 + 当前步骤指令
+    tail_extra: list[str] = []
     tools_detail = SkillPromptBuilder.build_tools_detail_prompt(registry, step["skill"])
+    if tools_detail:
+        tail_extra.append(f"可用工具详情：\n{tools_detail}")
 
-    # 在 context 前插入工具详情（无详情时不插入空 system）
-    full_context = [
-        *( [("system", f"可用工具详情：\n{tools_detail}")] if tools_detail else [] ),
-        *context_messages,
-    ]
+    completed = [s for s in state.get("plan_steps", []) if s.get("status") == "success"]
+    if completed:
+        summary = "\n".join([f"- Step {s['step']} [{s['skill']}]: {s.get('result', '')}" for s in completed])
+        tail_extra.append(f"已完成的步骤摘要：\n{summary}")
+
+    constraints = state.get("constraints", "")
+    if constraints:
+        tail_extra.append(f"[用户约束] {constraints}")
+
+    tail_extra.append(f"[当前步骤指令] 请执行以下信息收集任务：{step['purpose']}")
+
+    # 上下文头部：对话历史 + 用户原话（与 planner / 内层 guidance 同源，保证逐字节一致）
+    context_messages = []
+    if ctx.memory and ctx.memory.enabled:
+        history = ctx.memory.get_history()
+        if history:
+            context_messages.extend(history)
+    context_messages.append(("user", state["input"]))
 
     result = await run_react_subgraph(
         llm=llm,
         tools=tools,
         step_purpose=step["purpose"],
-        context_messages=full_context,
+        context_messages=context_messages,
+        tail_system="\n\n".join(tail_extra),
         budget=ctx.budget,
         logger=logger,
         metadata={"pdor_context": "react_step"},
         failed_tools=failed_tools,
         template_id=state.get("template_id"),
+        guidance_input=state["input"],
     )
 
     return result["final_result"], result["tool_results"]

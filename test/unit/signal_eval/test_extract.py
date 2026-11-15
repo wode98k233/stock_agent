@@ -512,3 +512,140 @@ def test_backlog_cleanup_keeps_manual_marks(tmp_path, monkeypatch):
     conn.close()
     assert result["removed"] == 0
     assert n == 1
+
+
+# ── 仪表盘多实体契约：groups 逐组提取 ─────────────────────────────
+
+from signal_eval.db import init_db
+from signal_eval.extract import _insert_signal, _signals_items
+
+_DASH_3 = {
+    "decision_type": "buy", "confidence_level": 0.62, "sentiment_score": 68,
+    "core_verdict": "三方向整体可参与",
+    "groups": [
+        {"key": "科技", "horizon": "1-5天", "decision": "buy", "confidence": 0.66,
+         "stance": "可参与但只低吸", "signal_symbol": "159516", "signal_name": "半导体设备ETF",
+         "entry": {"type": "pullback", "low": 0.46, "high": 0.47}, "invalidation": "破0.456"},
+        {"key": "消费", "horizon": "1-2个月", "decision": "buy", "confidence": 0.55,
+         "stance": "方向成立但今天不是加仓点", "signal_symbol": "159928",
+         "entry": {"type": "breakout", "low": 0.69}, "invalidation": "破0.676"},
+        {"key": "医疗", "horizon": "1-2年", "decision": "buy", "confidence": 0.70,
+         "stance": "长线最优", "signal_symbol": "513060",
+         "entry": {"type": "pullback", "high": 0.50}, "invalidation": "破0.485"},
+    ],
+}
+
+
+def test_groups_emit_one_signal_per_group():
+    items = _signals_items(_DASH_3, "科技 消费 医疗")
+    assert [i["symbol_key"] for i in items] == ["sz159516", "sz159928", "sh513060"]
+    assert [i["group_key"] for i in items] == ["科技", "消费", "医疗"]
+    assert all(i["conditional"] == 1 for i in items)
+    assert [i["entry_type"] for i in items] == ["pullback", "breakout", "pullback"]
+    assert [i["horizon_days"] for i in items] == [5, 20, 250]
+
+
+def test_groups_without_object_emit_nothing():
+    dash = {"decision_type": "buy", "groups": [
+        {"key": "科技", "decision": "buy", "signal_symbol": ""},
+        {"key": "消费", "decision": "buy", "signal_symbol": "abc"},
+    ]}
+    assert _signals_items(dash, "随便") == []
+
+
+def test_group_duplicate_symbol_kept_once():
+    dash = {"decision_type": "buy", "groups": [
+        {"key": "科技", "decision": "buy", "signal_symbol": "159516"},
+        {"key": "半导体", "decision": "buy", "signal_symbol": "159516"},
+    ]}
+    items = _signals_items(dash, "")
+    assert len(items) == 1 and items[0]["group_key"] == "科技"
+
+
+def test_insert_group_signal_writes_new_columns(tmp_path):
+    import sqlite3
+    db = tmp_path / "signal_eval.db"
+    init_db(str(db))
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    items = _signals_items(_DASH_3, "")
+    row = {"id": 645, "dialog_uuid": "d1", "created_at": "2026-11-04T13:25:41Z"}
+    assert _insert_signal(conn, row, items[0]) == 1
+    conn.commit()
+    r = conn.execute("SELECT * FROM signal").fetchone()
+    assert r["symbol_key"] == "sz159516"
+    assert r["group_key"] == "科技"
+    assert r["horizon_days"] == 5
+    assert r["entry_type"] == "pullback"
+    assert r["conditional"] == 1
+    assert r["scope"] == "symbol"
+    assert '"groups": 3' in r["group_summary"]
+
+
+def test_group_confidence_falls_back_to_dash_top_level():
+    """组内不写 confidence → 回退 dash 顶层 confidence_level（不是 None）。"""
+    dash = {
+        "decision_type": "buy", "confidence_level": 0.62,
+        "groups": [{"key": "科技", "decision": "buy", "signal_symbol": "159516"}],
+    }
+    items = _signals_items(dash, "")
+    assert len(items) == 1
+    assert items[0]["confidence"] == 0.62
+    # 对照：组自带 confidence 时以组为准，不被顶层覆盖
+    assert [i["confidence"] for i in _signals_items(_DASH_3, "")] == [0.66, 0.55, 0.70]
+
+
+def test_group_verdict_prefers_stance_then_note():
+    """verdict 取值优先级：stance > note > None（空串视为未提供）。"""
+    dash = {
+        "decision_type": "buy",
+        "groups": [
+            {"key": "A", "decision": "buy", "signal_symbol": "159516",
+             "stance": "可参与", "note": "备注"},
+            {"key": "B", "decision": "buy", "signal_symbol": "159928",
+             "stance": "", "note": "备注B"},
+            {"key": "C", "decision": "buy", "signal_symbol": "513060",
+             "stance": "", "note": ""},
+        ],
+    }
+    items = _signals_items(dash, "")
+    assert [i["group_key"] for i in items] == ["A", "B", "C"]
+    assert [i["verdict"] for i in items] == ["可参与", "备注B", None]
+
+
+def test_group_entry_without_bounds_degrades_to_unverifiable():
+    """entry 声明了 type 但缺 low/high → 降级 unverifiable，仍算条件单。"""
+    dash = {
+        "decision_type": "buy",
+        "groups": [{
+            "key": "科技", "decision": "buy", "signal_symbol": "159516",
+            "entry": {"type": "pullback"},
+        }],
+    }
+    items = _signals_items(dash, "")
+    assert len(items) == 1
+    item = items[0]
+    assert item["symbol_key"] == "sz159516"
+    assert item["entry_type"] == "unverifiable"
+    assert item["conditional"] == 1
+    assert item["entry_low"] is None and item["entry_high"] is None
+
+
+def test_group_summary_counts_votes_conditional_and_best():
+    """group_summary 六个键齐全：组数/多空票数/条件单数/最高置信组。"""
+    dash = {
+        "decision_type": "buy",
+        "groups": [
+            {"key": "科技", "decision": "buy", "confidence": 0.70, "signal_symbol": "159516",
+             "entry": {"type": "pullback", "low": 0.46}},
+            {"key": "消费", "decision": "buy", "confidence": 0.55, "signal_symbol": "159928",
+             "entry": {"type": "breakout", "high": 0.70}},
+            {"key": "医疗", "decision": "hold", "confidence": 0.66, "signal_symbol": "513060"},
+        ],
+    }
+    items = _signals_items(dash, "")
+    assert len(items) == 3
+    summary = json.loads(items[0]["group_summary"])
+    assert set(summary) == {"groups", "buy", "hold", "sell", "conditional", "best"}
+    assert summary == {"groups": 3, "buy": 2, "hold": 1, "sell": 0,
+                       "conditional": 2, "best": "科技"}

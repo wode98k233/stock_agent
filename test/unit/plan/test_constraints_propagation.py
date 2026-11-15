@@ -73,16 +73,19 @@ def test_executor_prompt_includes_constraints_label():
     kwargs = test_executor_prompt_includes_constraints_label._captured
     assert kwargs is not None, "run_react_subgraph should have been called"
 
+    # ⚠️ 前缀形态对齐（PRD-A11 FR-10/11）后，用户约束随**尾部**投递，
+    #    不再插在 history 与 user 之间（否则内层 payload 立即分叉、前缀失效）。
     context_msgs = kwargs.get("context_messages", [])
     all_content = ""
     for msg in context_msgs:
         if isinstance(msg, tuple) and len(msg) == 2:
             all_content += str(msg[1]) + "\n"
+    all_content += str(kwargs.get("tail_system", ""))
 
     assert "[用户约束]" in all_content, \
-        f"context_messages should contain [用户约束] label. Got:\n{all_content[:800]}"
+        f"payload (context_messages + tail_system) should contain [用户约束] label. Got:\n{all_content[:800]}"
     assert "只查询寒武纪相关数据" in all_content, \
-        f"context_messages should contain user_constraints text. Got:\n{all_content[:800]}"
+        f"payload should contain user_constraints text. Got:\n{all_content[:800]}"
 
 
 def test_executor_prompt_no_constraints_no_label():

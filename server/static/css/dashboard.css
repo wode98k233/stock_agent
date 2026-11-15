@@ -757,3 +757,19 @@
   font-size: 11px;
   margin-left: 4px;
 }
+
+/* ── 多实体方向卡片（groups） ── */
+.dash-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.dash-group-card { border: 1px solid var(--border, #1f2937); border-radius: 10px; padding: 10px 12px; background: var(--detail-bg, #f8fafc); }
+.dash-group-head { display: flex; align-items: center; gap: 8px; }
+.dash-group-key { font-weight: 600; font-size: 13px; }
+.dash-group-horizon { font-size: 11px; color: var(--text-secondary, #94a3b8); border: 1px solid var(--border, #1f2937); border-radius: 999px; padding: 0 6px; }
+.dash-group-decision { margin-left: auto; font-size: 12px; font-weight: 600; }
+.dash-group-stance { margin-top: 6px; font-size: 11.5px; color: var(--text-secondary, #94a3b8); }
+.dash-group-note { margin-top: 4px; font-size: 10.5px; color: var(--text-secondary, #6b7280); }
+.dash-group-cands { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.dash-group-cand { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; color: var(--text-secondary, #94a3b8); }
+.dash-group-cand.primary { color: var(--text, #1c2430); }
+.dash-group-cand-code { font-family: ui-monospace, Consolas, monospace; font-size: 10.5px; opacity: .8; }
+.dash-group-cand-note { font-size: 10.5px; opacity: .7; }
+.dash-group-foot { margin-top: 8px; font-size: 10.5px; color: var(--text-secondary, #94a3b8); border-top: 1px dashed var(--border, #1f2937); padding-top: 6px; }

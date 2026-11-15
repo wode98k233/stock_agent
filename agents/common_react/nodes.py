@@ -92,6 +92,7 @@ class SubAgentNode(BaseAgentNode):
                 budget=budget,
                 parent_run_id=parent_run_id,
                 run_config=config,
+                tools=self.tools,   # PRD-A11 FR-2：压缩 fork 需要绑同一份 tools
             )
 
         return messages

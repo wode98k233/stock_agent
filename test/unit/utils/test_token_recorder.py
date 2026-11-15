@@ -79,11 +79,14 @@ class TestRecorderModelAttribution:
         req_ctx.record_llm(300, 900, 0, 300, "react-tool-compress", model="glm-b")
 
         by_model = req_ctx.metrics["llm_by_model"]
+        # PRD-A9 M-1/M-3：新增 cache_read / cache_creation 两列
         assert by_model["gpt-a"] == {
             "calls": 2, "in": 3000, "out": 300, "cached": 500, "reasoning": 50,
+            "cache_read": 0, "cache_creation": 0,
         }
         assert by_model["glm-b"] == {
             "calls": 1, "in": 300, "out": 900, "cached": 0, "reasoning": 300,
+            "cache_read": 0, "cache_creation": 0,
         }
         # 总量口径不受影响
         assert req_ctx.metrics["llm_tokens_in"] == 3300
@@ -212,3 +215,180 @@ class TestModelDetailFormatting:
         assert "模型明细" in output
         assert "按模型=gpt-4o 1次 356.5k+92.8k" in output
         assert "glm-4-flash 1次 6.5k+17k" in output
+
+
+# ── PRD-A9 M-1/M-2/M-6：prompt 缓存读写观测 ──────────────────────
+
+
+def _cache_response(usage: dict, prefix_fp: str = ""):
+    out = {"model_name": "glm-4-flash", "token_usage": usage}
+    if prefix_fp:
+        out["prefix_sha256"] = prefix_fp
+    return _MockResponse(llm_output=out)
+
+
+class TestCacheReadWriteObservability:
+    """cache_read / cache_creation 从 usage 一路透传到 metrics 分桶。"""
+
+    def test_deepseek_fields_mapped(self):
+        """DeepSeek 口径 prompt_cache_hit_tokens → cache_read_input_tokens。"""
+        from utils.token_usage import _extract_cache_fields
+
+        got = _extract_cache_fields(
+            {"prompt_cache_hit_tokens": 4096, "prompt_cache_miss_tokens": 1536}
+        )
+        assert got["cache_read_input_tokens"] == 4096
+        assert got["cached_tokens"] == 4096
+        # DeepSeek 不对缓存写入单独计价
+        assert got["cache_creation_input_tokens"] == 0
+        assert got["cache_miss_input_tokens"] == 1536
+
+    def test_anthropic_fields_kept_separate(self):
+        """Anthropic 的读写两列必须分列，不能被合并成一个 cached。"""
+        from utils.token_usage import _extract_cache_fields
+
+        got = _extract_cache_fields(
+            {"cache_read_input_tokens": 1000, "cache_creation_input_tokens": 300}
+        )
+        assert got["cache_read_input_tokens"] == 1000
+        assert got["cache_creation_input_tokens"] == 300
+
+    def test_recorded_into_metrics_buckets(self, req_ctx):
+        resp = _cache_response({
+            "prompt_tokens": 5000,
+            "completion_tokens": 100,
+            "prompt_cache_hit_tokens": 3000,
+            "prompt_cache_miss_tokens": 2000,
+        })
+        TokenRecorder(_Logger(), "report-fast", [MetricsBackend()]).on_llm_end(resp)
+
+        assert req_ctx.metrics["llm_cache_read"] == 3000
+        assert req_ctx.metrics["llm_cache_creation"] == 0
+        bucket = req_ctx.metrics["llm_cache_by_label"]["report-fast"]
+        assert bucket["cache_read"] == 3000
+        assert bucket["in"] == 5000
+        mbucket = req_ctx.metrics["llm_by_model"]["glm-4-flash"]
+        assert mbucket["cache_read"] == 3000
+
+    def test_legacy_backend_signature_still_records(self):
+        """旧签名后端（无 cache_read/cache_creation）不得因新参数而静默丢记录。
+
+        on_llm_end 用 except Exception: pass 吞异常，若直接传新参数会 TypeError
+        → 后端一条记录都收不到，且无任何报错。
+        """
+        recorded = []
+
+        class _LegacyBackend:
+            def record(self, tokens_in, tokens_out, label, cached_tokens=0,
+                       reasoning_tokens=0, model=""):
+                recorded.append((tokens_in, tokens_out, label, model))
+
+        resp = _cache_response({"prompt_tokens": 5000, "completion_tokens": 100,
+                                "prompt_cache_hit_tokens": 3000})
+        TokenRecorder(_Logger(), "x", [_LegacyBackend()]).on_llm_end(resp)
+        assert recorded == [(5000, 100, "x", "glm-4-flash")]
+
+    def test_kwargs_backend_gets_new_params(self):
+        got = []
+
+        class _KwBackend:
+            def record(self, tokens_in, tokens_out, label, cached_tokens=0,
+                       reasoning_tokens=0, model="", **kw):
+                got.append(kw)
+
+        resp = _cache_response({"prompt_tokens": 5000, "completion_tokens": 100,
+                                "cache_read_input_tokens": 4000,
+                                "cache_creation_input_tokens": 500})
+        TokenRecorder(_Logger(), "x", [_KwBackend()]).on_llm_end(resp)
+        assert got and got[0]["cache_read"] == 4000 and got[0]["cache_creation"] == 500
+
+    def test_prefix_fingerprint_logged(self):
+        """前缀指纹应出现在日志行，便于跨请求 diff。"""
+        stream = io.StringIO()
+        raw = logging.getLogger("test.prefix_fp")
+        raw.setLevel(logging.INFO)
+        raw.handlers.clear()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_FileFormatter())
+        handler.addFilter(_make_filter())
+        raw.addHandler(handler)
+
+        resp = _cache_response({"prompt_tokens": 5000, "completion_tokens": 100},
+                               prefix_fp="a1b2c3d4e5f60718")
+        TokenRecorder(RadarLogger(raw, "pf"), "report-fast", []).on_llm_end(resp)
+
+        out = stream.getvalue()
+        assert "prefix_fp=a1b2c3d4e5f60718" in out
+
+
+class TestRecorderBaseUrlAttribution:
+    """成本计算的 base_url 必须取「响应回填的实际端点」（2026-10-15 修复）。
+
+    故障形态：compress 旁路模型走 sensenova，成本却统一用全局默认端点
+    （opencode）反查 → 9 次调用被误归 opencode-zen，且按 opencode 价目
+    计了价（deepseek-v4-flash 恰是 deepseek-v4.1-flash 的别名，静默合并）。
+    """
+
+    @pytest.fixture
+    def captured_compute(self, monkeypatch):
+        captured = {}
+        from utils import pricing
+
+        def _spy(usage, model="", base_url="", provider="", ts=None):
+            captured.update(usage=usage, model=model, base_url=base_url)
+            return None
+
+        monkeypatch.setattr(pricing, "compute_cost", _spy)
+        return captured
+
+    def test_uses_response_base_url(self, req_ctx, captured_compute):
+        """响应带了 base_url 时必须用它（旁路端点识别）"""
+        resp = _MockResponse(llm_output={
+            "model_name": "deepseek-v4-flash",
+            "base_url": "https://token.sensenova.cn/v1",
+            "token_usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        })
+        recorder = TokenRecorder(_Logger(), "react-tool-compress", [MetricsBackend()])
+        recorder.on_llm_start(None, ["x"])
+        recorder.on_llm_end(resp)
+
+        assert captured_compute["base_url"] == "https://token.sensenova.cn/v1"
+        assert captured_compute["model"] == "deepseek-v4-flash"
+
+    def test_falls_back_to_default_base_url(self, req_ctx, captured_compute):
+        """响应缺失 base_url（老路径/流式）→ 回落全局默认端点，旧行为不变"""
+        from utils import pricing
+
+        recorder = TokenRecorder(_Logger(), "agent", [MetricsBackend()])
+        recorder.on_llm_start(None, ["x"])
+        recorder.on_llm_end(_make_response("glm-4-flash"))
+
+        assert captured_compute["base_url"] == pricing.default_base_url()
+
+    def test_provider_bucket_follows_actual_endpoint(self, req_ctx, monkeypatch):
+        """端到端：sensenova 端点的调用进入 by_provider 时不能记到默认端点名下。
+
+        不打桩 compute_cost，用真实 pricing —— 断言 token 桶的供应商键。
+
+        键是**价目里的 provider 名**（sensenova），不是 host：与 opencode-zen 同口径。
+        2026-10-15 sensenova 收进价目前，该键回落到 host 字面量 token.sensenova.cn；
+        真正要守的不变量是「别记成默认端点的供应商」，即下面的 opencode-zen 断言。
+        """
+        from utils import pricing
+
+        monkeypatch.setattr(pricing, "default_base_url",
+                            lambda: "https://opencode.ai/zen/go/v1")
+        resp = _MockResponse(llm_output={
+            "model_name": "deepseek-v4-flash",
+            "base_url": "https://token.sensenova.cn/v1",
+            "token_usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        })
+        recorder = TokenRecorder(_Logger(), "react-tool-compress", [MetricsBackend()])
+        recorder.on_llm_start(None, ["x"])
+        recorder.on_llm_end(resp)
+
+        by = req_ctx.metrics["llm_by_provider"]
+        assert "sensenova" in by
+        assert "opencode-zen" not in by        # 不变量：不得记到默认端点名下
+        assert by["sensenova"]["calls"] == 1
+        assert by["sensenova"]["cost"] == 0.0  # 免费源，金额 0 但已计价

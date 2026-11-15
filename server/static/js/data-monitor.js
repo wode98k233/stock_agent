@@ -247,6 +247,7 @@
       this._renderAssets(assets);
       this._renderRank(assets);
       document.getElementById('dmAssetsHint').textContent = `共 ${assets.length} 项 · 点击行展开表级明细`;
+      this._renderBacktestCoverage(data.backtest_coverage || {});
     }
 
     _aggregate(assets) {
@@ -276,6 +277,24 @@
           <div class="dm-sub">${c.n} 项 · ${c.record.toLocaleString()} 记录 · 占 ${c.pct}%</div>
         </div>`;
       }).join('');
+    }
+
+    _renderBacktestCoverage(cov) {
+      const el = document.getElementById('dmBacktestCov');
+      if (!el) return;
+      if (!cov || !cov.days) { el.innerHTML = ''; return; }
+      const rows = (cov.low_runs || []).slice(0, 8).map(r =>
+        '<div class="dm-btcov-row"><code>' + (r.run_id || '') + '</code>'
+        + '<span>' + (r.code || '') + ' ' + (r.stock_name || '') + '</span>'
+        + '<span class="pct">' + (r.coverage_pct === null || r.coverage_pct === undefined
+            ? '—' : Number(r.coverage_pct).toFixed(1) + '%') + '</span>'
+        + '<span class="bars">' + (r.data_bars || 0) + '/' + (r.expected_bars || 0) + ' 根</span>'
+        + '<span class="when">' + ((r.created_at || '').slice(0, 10)) + '</span></div>').join('');
+      el.innerHTML = '<div class="dm-btcov-h">回测覆盖率巡检 <span class="dm-hint">'
+        + '阈值 ' + cov.threshold_pct + '% · 近 ' + cov.days + ' 天</span></div>'
+        + '<div class="dm-btcov-line">' + (cov.hint || '') + '</div>'
+        + (rows ? '<div class="dm-btcov-list">' + rows + '</div>' : '')
+        + (cov.error ? '<div class="dm-hint">' + cov.error + '</div>' : '');
     }
 
     _renderAssets(assets) {

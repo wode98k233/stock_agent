@@ -95,11 +95,17 @@ async def _run_web_agent_query_uses_explicit_mode_without_changing_default(monke
     context = WebAgentContext(skill_register="register", session_stats=stats)
     events = []
 
+    async def _forbidden_gate(**kwargs):
+        raise AssertionError("turn_type=chat 时绝不能进策略闸门")
+
+    monkeypatch.setattr("agents.shared.strategy_gate.intercept_strategy_turn",
+                        _forbidden_gate)
     result = await run_web_agent_query(
         user_input="分析贵州茅台",
         mode="pdor",
         context=context,
         progress_callback=events.append,
+        turn_type="chat",
     )
 
     assert result.response == "模拟 Agent 回答"

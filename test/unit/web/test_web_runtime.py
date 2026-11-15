@@ -319,3 +319,157 @@ async def _task_runtime_shutdown_clears_handles_and_queues(tmp_path):
 
     assert runtime.event_manager._task_handles == {}
     assert runtime.event_manager._queues == {}
+
+
+# ── 过程流（transcript）run 归属：绑定优先，禁止猜「最近 running」 ──
+# 事故：库里陈旧 running 残留行 + 新任务 run 尚未建立 → 轮询器把上一次（甚至上个月）
+# 任务的 think/工具条目推给刚提问的对话，刷新后才正常。见 server/runtime/trace_poller.py。
+
+
+def _trace_conn(runs: dict[str, list[tuple]]) -> "object":
+    """内存 trace 库（steps/messages），runs = {run_id: [(step_id, tool_name), ...]}。
+
+    ⚠️ messages 表必须与真实 schema 一致（role/content 均在）——transcript 构造器按
+    `role='ai'` + `(reasoning 非空 OR content 非空)` 过滤，缺列会直接抛
+    OperationalError，而轮询器是 `except Exception: pass` 静默吞掉的（表现为
+    「一条条目都推不出来」，排查成本极高）。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE steps (id INTEGER PRIMARY KEY, run_id TEXT, step_type TEXT,"
+        " step_name TEXT, input TEXT, output TEXT, status TEXT, duration_ms REAL,"
+        " error TEXT, extra TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, step_id INTEGER, seq INTEGER,"
+        " role TEXT NOT NULL, content TEXT, tool_calls TEXT, tool_call_id TEXT,"
+        " reasoning TEXT)"
+    )
+    for run_id, steps in runs.items():
+        for sid, name in steps:
+            conn.execute(
+                "INSERT INTO steps(id,run_id,step_type,step_name,status) VALUES(?,?,?,?,?)",
+                (sid, run_id, "tool", name, "success"),
+            )
+    conn.commit()
+    return conn
+
+
+def test_trace_poller_binds_explicit_run_and_ignores_stale_running(monkeypatch):
+    """陈旧 running 行不得被当成本任务的 run；bind_run 后只推绑定 run 的条目。"""
+    asyncio.run(_trace_poller_binds_explicit_run(monkeypatch))
+
+
+async def _trace_poller_binds_explicit_run(monkeypatch):
+    from server.runtime.trace_poller import TracePoller
+    from utils.agent_trace.store import TraceStore
+
+    conn = _trace_conn({"run-stale": [(1, "old_tool")], "run-task": [(2, "new_tool")]})
+    monkeypatch.setattr(TraceStore, "conn_for_run", lambda self, rid: conn)
+    # 模拟历史残留：不带 since 的 running 查询会命中 run-stale
+    monkeypatch.setattr(
+        TraceStore, "find_latest_run",
+        lambda self, status="", since="": ({"id": "run-stale"} if not since else None),
+    )
+    monkeypatch.setattr(TracePoller, "FALLBACK_GRACE_S", 0.01)
+
+    events: list = []
+    poller = TracePoller(lambda task_id, payload: events.append(payload))
+    await poller.start_polling("task-1", {}, interval=0.02,
+                               since="2026-10-11T01:55:00+00:00")
+    await asyncio.sleep(0.15)
+
+    # 兜底扫描被 since 挡住 → 不得推出陈旧 run 的任何条目
+    assert [e for e in events if e["event"] == "transcript"] == []
+
+    # worker 回传绑定 → 只推本任务 run 的条目
+    poller.bind_run("task-1", "run-task")
+    await asyncio.sleep(0.15)
+    assert [e["data"]["tool_name"] for e in events if e["event"] == "transcript"] == \
+        ["new_tool"]
+
+    await poller.stop_polling("task-1")
+    assert poller._bound_runs == {} and poller._since == {}
+    conn.close()
+
+
+def test_trace_poller_find_running_run_passes_since(monkeypatch):
+    """兜底扫描必须把任务创建时间下界透传给 store（否则跨月命中残留）。"""
+    from server.runtime.trace_poller import TracePoller
+    from utils.agent_trace.store import TraceStore
+
+    captured = {}
+
+    def fake_find(self, status="", since=""):
+        captured.update(status=status, since=since)
+        return {"id": "run-x"}
+
+    monkeypatch.setattr(TraceStore, "find_latest_run", fake_find)
+    assert TracePoller._find_running_run("2026-10-11T01:55:00+00:00") == "run-x"
+    assert captured == {"status": "running", "since": "2026-10-11T01:55:00+00:00"}
+
+
+def test_task_runtime_binds_trace_run_before_finish(monkeypatch, tmp_path):
+    """worker 回传 trace run → TaskRecord 与轮询器在任务结束前就绑定（快照/extra 同源）。"""
+    asyncio.run(_task_runtime_binds_trace_run(monkeypatch, tmp_path))
+
+
+async def _task_runtime_binds_trace_run(monkeypatch, tmp_path):
+    from server.agent_runner import AgentRunResult
+    from server.runtime import TaskRuntime
+    from server.runtime.trace_poller import TracePoller
+    from server.storage import WebStorage
+
+    started: dict = {}
+    bound: dict = {}
+
+    async def fake_start_polling(self, task_id, seen_versions, interval=1.5, since=""):
+        started[task_id] = since
+
+    async def fake_noop(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(TracePoller, "start_polling", fake_start_polling)
+    monkeypatch.setattr(TracePoller, "bind_run",
+                        lambda self, task_id, run_id: bound.update({task_id: run_id}))
+    monkeypatch.setattr(TracePoller, "flush_remaining", fake_noop)
+    monkeypatch.setattr(TracePoller, "stop_polling", fake_noop)
+
+    holder: dict = {}
+    during: dict = {}
+
+    async def fake_runner(*, user_input, mode, context, progress_callback,
+                          trace_run_callback=None, **kwargs):
+        # run 建立 → 立刻回传（模拟 Agent 首个进度事件时机的回调）
+        trace_run_callback("run-early")
+        runtime = holder["rt"]
+        rec = next(iter(runtime.task_manager._tasks.values()))
+        during["trace_run_id"] = rec.trace_run_id
+        during["bound"] = dict(bound)
+        progress_callback(ProgressEvent(ProgressType.CLASSIFIER, "分类完成", timestamp=1.0))
+        return AgentRunResult(response="ok", log_uuid="l1", log_file="f1",
+                              trace_run_id="run-early")
+
+    storage = WebStorage(tmp_path / "web.db")
+    dialog = storage.create_dialog(title="新对话", mode="react_stock")
+    runtime = TaskRuntime(fake_runner)
+    holder["rt"] = runtime
+
+    submitted = await runtime.submit_message(
+        storage=storage, context=SimpleNamespace(),
+        dialog_uuid=dialog["dialog_uuid"], content="给我分析下电池板块", mode="react_stock",
+    )
+    async for payload in runtime.iter_events(submitted["task_id"], heartbeat_interval=0.01):
+        if payload["event"] in ("final", "task_error"):
+            break
+
+    task_id = submitted["task_id"]
+    # 任务执行中（未结束）就已绑定：TaskRecord + 轮询器
+    assert during["trace_run_id"] == "run-early"
+    assert during["bound"] == {task_id: "run-early"}
+    # 轮询器拿到的 since = 任务创建时间（兜底扫描的下界）
+    assert started[task_id] == runtime.get_task(task_id)["created_at"]
+    assert runtime.get_task(task_id)["trace_run_id"] == "run-early"

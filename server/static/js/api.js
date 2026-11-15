@@ -65,11 +65,23 @@ window.StockRadar.api = (() => {
     return fetchJSON(`/api/dialogs/${dialogUuid}/messages`).then((d) => d.items || d || []);
   }
 
-  function sendMessage(dialogUuid, content, mode) {
+  function sendMessage(dialogUuid, content, mode, turnType, attachments) {
+    const body = { content, mode, turn_type: turnType || "auto" };
+    if (attachments && attachments.length) body.attachments = attachments;
     return fetchJSON(`/api/dialogs/${dialogUuid}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, mode }),
+      // turn_type 是后端硬开关：chat 绝不进策略闸门；auto 才允许启发式识别。
+      body: JSON.stringify(body),
+    });
+  }
+
+  // 图片上传（base64 JSON，服务端落盘后返回 {id,url}）
+  function uploadImage(name, mime, data) {
+    return fetchJSON("/api/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name || "", mime: mime || "", data: data || "" }),
     });
   }
 
@@ -127,11 +139,22 @@ window.StockRadar.api = (() => {
     });
   }
 
-  function applyConfig(changes) {
+  function applyConfig(changes, secrets) {
+    const payload = { changes: changes || {} };
+    // 敏感项只写不读：只有用户真的填了值才带上来（留空 = 保持原值）
+    if (secrets && Object.keys(secrets).length) payload.secrets = secrets;
     return fetchJSON("/api/config/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ changes }),
+      body: JSON.stringify(payload),
+    });
+  }
+
+  function testConfig(kind, target, query) {
+    return fetchJSON("/api/config/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, target: target || "", query: query || "" }),
     });
   }
 
@@ -256,10 +279,30 @@ window.StockRadar.api = (() => {
     });
   }
 
-  function getKline(code, days, market) {
+  /** 区间参数统一拼在 URL 尾部。
+   * days 仍然带上：服务端只在给了 start_date 时才忽略它，而信号/技术面那类
+   * 「按天数取窗口」的接口还没吃 range —— 少带一个参数它们就退化成默认值。 */
+  function _appendRange(url, range) {
+    if (range && range.start_date && range.end_date) {
+      url += `&start_date=${encodeURIComponent(range.start_date)}`;
+      url += `&end_date=${encodeURIComponent(range.end_date)}`;
+    }
+    return url;
+  }
+
+  // range = {start_date, end_date}（YYYY-MM-DD，含两端）可选；不传就是原来的按天数取。
+  function getKline(code, days, market, range) {
     let url = `/api/chart/kline/${encodeURIComponent(code)}?days=${days || 120}`;
     if (market) url += `&market=${encodeURIComponent(market)}`;
-    return fetchJSON(url);
+    return fetchJSON(_appendRange(url, range));
+  }
+
+  /** K 线技术面标注（斐波那契三种 / 自动趋势线 / 支撑阻力带）。
+   * 复权口径与 getKline 一致，返回里的 dates 用于把标注索引映射回图上的 bar。 */
+  function getTaAnnotations(code, days, market, range) {
+    let url = `/api/chart/ta/${encodeURIComponent(code)}?days=${days || 250}`;
+    if (market) url += `&market=${encodeURIComponent(market)}`;
+    return fetchJSON(_appendRange(url, range));
   }
 
   function syncKline(code, days, source) {
@@ -333,6 +376,10 @@ window.StockRadar.api = (() => {
   async function getBacktestStrategies(category) {
     const qs = category ? `?category=${encodeURIComponent(category)}` : '';
     return fetchJSON(`/api/backtest/strategies${qs}`);
+  }
+
+  async function getStrategyLifecycle(strategyId, runLimit = 50) {
+    return fetchJSON(`/api/backtest/strategies/${encodeURIComponent(strategyId)}/lifecycle?run_limit=${runLimit}`);
   }
 
   async function saveBacktestStrategy(data) {
@@ -671,6 +718,22 @@ window.StockRadar.api = (() => {
     return fetchJSON(`/api/portfolio/positions${qs}`, { cache: "no-store" });
   }
 
+  // 账户历史快照（ADR-008）
+  function getPortfolioSnapshots(days) {
+    return fetchJSON(`/api/portfolio/snapshots?days=${days || 90}`, { cache: "no-store" });
+  }
+
+  function getPortfolioSnapshotPositions(day) {
+    return fetchJSON(`/api/portfolio/snapshots/${encodeURIComponent(day)}/positions`,
+      { cache: "no-store" });
+  }
+
+  /** 区间内的持仓明细（构成流用，一次拿完避免逐天请求） */
+  function getPortfolioSnapshotComposition(days) {
+    return fetchJSON(`/api/portfolio/snapshots/positions?days=${days || 90}`,
+      { cache: "no-store" });
+  }
+
   function getPortfolioSummary() {
     return fetchJSON("/api/portfolio/summary");
   }
@@ -722,5 +785,71 @@ window.StockRadar.api = (() => {
     return fetchJSON("/api/portfolio/eastmoney/session");
   }
 
-  return { fetchJSON, getDialogs, createDialog, getMessages, sendMessage, getHealth, getModes, getDataSources, getTask, getTaskTranscript, getTraceSteps, getTraceChain, getDialogTrace, getCorrelation, getStepDetail, getConfig, saveConfig, applyConfig, getNotificationStatus, testNotification, sendNotification, getReportTemplates, getReportTemplate, saveReportTemplate, getDashboards, getDashboard, saveDashboard, getDashboardAssociations, saveDashboardAssociations, importDashboard, deleteDialog, sendBudgetDecision, cancelTask, clarifyDecision, getCalendar, getWatchlist, addWatchlist, deleteWatchlist, syncWatchlist, getWatchlistQuotes, getWatchlistQuote, getKline, syncKline, getSignals, searchChartStock, scanStrategySignals, getRouteRules, saveRouteRules, routeTest, getBacktestStrategies, saveBacktestStrategy, deleteBacktestStrategy, runBacktest, getBacktestRuns, getBacktestRunDetail, getBacktestKline, deleteBacktestRun, streamCleanFailed, runBatchBacktest, listBatches, getBatch, deleteBatch, rerunBatchItem, rerunBatchFailed, streamBatchProgress, runMultiBacktest, getMulti, listMulti, deleteMulti, streamMultiProgress, listTestSets, createTestSet, getTestSet, updateTestSet, deleteTestSet, createDataTask, getDataTasks, getDataTask, pauseDataTask, resumeDataTask, cancelDataTask, getDataStats, getDataIndices, getHotNews, getStockNews, getSectorFlow, getStockFlow, getNorthFlow, getRuns, getAttribution, getMonitorRules, addMonitorRule, patchMonitorRule, deleteMonitorRule, getMonitorAlerts, markMonitorAlertsRead, clearMonitorAlerts, getMonitorStatus, sendMonitorTest, getPortfolioPositions, getPortfolioSummary, getPortfolioTrades, addPortfolioTrade, deletePortfolioTrade, portfolioFromSignal, eastmoneyPreview, eastmoneyImport, getEastmoneySession };
+  // ── 引擎能力清单 + 扩展提议（AI 出方案 → 人审）──
+  function getCapabilityCatalog() {
+    return fetchJSON("/api/capability/catalog");
+  }
+
+  function getCapabilityProposals(status) {
+    return fetchJSON("/api/capability/proposals" + (status ? "?status=" + encodeURIComponent(status) : ""));
+  }
+
+  function proposeCapability(payload) {
+    return fetchJSON("/api/capability/proposals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  function proposeCapabilityFromRun(runUuid) {
+    return fetchJSON("/api/capability/proposals/from-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_uuid: runUuid || "" }),
+    });
+  }
+
+  function reviewCapabilityProposal(payload) {
+    return fetchJSON("/api/capability/proposals/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  // ── 定价目录（成本 / 计价）──
+  function getPricingCatalog() {
+    return fetchJSON("/api/pricing/catalog");
+  }
+
+  function validatePricingCatalog(catalog) {
+    return fetchJSON("/api/pricing/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ catalog }),
+    });
+  }
+
+  function savePricingCatalog(catalog) {
+    return fetchJSON("/api/pricing/catalog", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ catalog }),
+    });
+  }
+
+  function trialPricingCost(payload) {
+    return fetchJSON("/api/pricing/trial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  function resetPricingCatalog() {
+    return fetchJSON("/api/pricing/reset", { method: "POST" });
+  }
+
+  return { fetchJSON, uploadImage, getDialogs, createDialog, getMessages, sendMessage, getHealth, getModes, getDataSources, getTask, getTaskTranscript, getTraceSteps, getTraceChain, getDialogTrace, getCorrelation, getStepDetail, getConfig, saveConfig, applyConfig, testConfig, getNotificationStatus, testNotification, sendNotification, getReportTemplates, getReportTemplate, saveReportTemplate, getDashboards, getDashboard, saveDashboard, getDashboardAssociations, saveDashboardAssociations, importDashboard, deleteDialog, sendBudgetDecision, cancelTask, clarifyDecision, getCalendar, getWatchlist, addWatchlist, deleteWatchlist, syncWatchlist, getWatchlistQuotes, getWatchlistQuote, getKline, getTaAnnotations, syncKline, getSignals, searchChartStock, scanStrategySignals, getRouteRules, saveRouteRules, routeTest, getBacktestStrategies, getStrategyLifecycle, saveBacktestStrategy, deleteBacktestStrategy, runBacktest, getBacktestRuns, getBacktestRunDetail, getBacktestKline, deleteBacktestRun, streamCleanFailed, runBatchBacktest, listBatches, getBatch, deleteBatch, rerunBatchItem, rerunBatchFailed, streamBatchProgress, runMultiBacktest, getMulti, listMulti, deleteMulti, streamMultiProgress, listTestSets, createTestSet, getTestSet, updateTestSet, deleteTestSet, createDataTask, getDataTasks, getDataTask, pauseDataTask, resumeDataTask, cancelDataTask, getDataStats, getDataIndices, getHotNews, getStockNews, getSectorFlow, getStockFlow, getNorthFlow, getRuns, getAttribution, getMonitorRules, addMonitorRule, patchMonitorRule, deleteMonitorRule, getMonitorAlerts, markMonitorAlertsRead, clearMonitorAlerts, getMonitorStatus, sendMonitorTest, getPortfolioPositions, getPortfolioSnapshots, getPortfolioSnapshotPositions, getPortfolioSnapshotComposition, getPortfolioSummary, getPortfolioTrades, addPortfolioTrade, deletePortfolioTrade, portfolioFromSignal, eastmoneyPreview, eastmoneyImport, getEastmoneySession, getPricingCatalog, validatePricingCatalog, savePricingCatalog, trialPricingCost, resetPricingCatalog, getCapabilityCatalog, getCapabilityProposals, proposeCapability, proposeCapabilityFromRun, reviewCapabilityProposal };
 })();

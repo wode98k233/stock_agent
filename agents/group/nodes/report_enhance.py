@@ -98,6 +98,11 @@ async def report_enhance_node(state: GroupState, ctx: AgentContext, run_config=N
     if data_doc:
         response = data_doc + "\n\n---\n\n" + response
 
+    # fork_sink：接收 report-fast **实际发出的 payload**，供紧随其后的仪表盘复用同一前缀
+    # （PRD-A11「报告 → 仪表盘」）。group 的仪表盘是**直调 append_dashboard**、不经 state，
+    # 所以这里直接把它当 conversation 传下去即可。
+    fork_sink: dict = {}
+
     # 报告后处理
     if Config.REPORT_ENABLE_ANALYSIS_ENGINE:
         # 证据通道：把 group 产物表达为「可下钻条目」，让报告层先看索引、
@@ -121,6 +126,7 @@ async def report_enhance_node(state: GroupState, ctx: AgentContext, run_config=N
                 # raw_result 只是下钻种子：原始数据由 tool_calls 条目通道承载。
                 # 显式声明而非靠判断推断 —— 该判断在 report_builder 里是五个模式共享的。
                 raw_result_is_seed=True,
+                fork_sink=fork_sink,
             )
             if enhanced:
                 response = enhanced
@@ -132,18 +138,31 @@ async def report_enhance_node(state: GroupState, ctx: AgentContext, run_config=N
         try:
             from agents.analysis.dashboard_node import append_dashboard
             from agents.analysis.dashboard_node import _tool_calls_to_slot_results
+            from agents.analysis.dashboard_generator import _truncate_report
 
             slot_results = _tool_calls_to_slot_results(state.get("tool_calls", []))
             template_id = state.get("template_id") or Config.REPORT_TEMPLATE
+
+            # PRD-A11「报告 → 仪表盘」：报告 payload 是本 run 刚发出的、仪表盘紧随其后
+            # → 复用它当前缀可命中缓存（实测 plan/pdor dashboard 17%→86%）。
+            # 报告输出以 ai 消息接在前缀后；尾部由 report_fork 档只留仪表盘任务。
+            report_conversation = None
+            report_fork = False
+            if fork_sink.get("messages"):
+                report_conversation = [*fork_sink["messages"], ("ai", _truncate_report(response))]
+                report_fork = True
 
             enhanced_with_dashboard = await append_dashboard(
                 report=response,
                 slot_results=slot_results,
                 template_id=template_id,
                 user_input=state["input"],
+                task_spec=state.get("task_spec"),
                 budget=budget,
                 logger=logger,
                 run_config=run_config,
+                conversation=report_conversation,
+                report_fork=report_fork,
             )
             if enhanced_with_dashboard and enhanced_with_dashboard is not response:
                 response = enhanced_with_dashboard

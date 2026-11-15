@@ -237,11 +237,13 @@ MERGE_BATCH1_EXPECTED_TOOLS = {
     # 来自原 sentiment_analysis
     "analyze_news_sentiment",
     "search_news_by_keyword",
+    # 2026-10-15 起追加：全市场广度（成交额合计/涨跌家数），修「指数成交额相加当市场总量」事故
+    "get_market_breadth",
 }
 
 
 def test_market_review_merges_batch1_skills(register):
-    """Batch 1 合并验收：market_review 承接 two 技能的 8 个工具，且旧技能已消失。"""
+    """Batch 1 合并验收：market_review 承接 two 技能的 8 个工具 + 全市场广度 1 个，且旧技能已消失。"""
     meta = register.get_skill("market_review")
     assert meta is not None, "market_review 未注册"
     assert meta.enabled, "market_review 应为启用状态"

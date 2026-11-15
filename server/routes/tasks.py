@@ -52,7 +52,10 @@ async def get_task_transcript(request: Request, task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="task 不存在")
     from server.runtime import transcript
-    entries = transcript.entries_for_task(task.get("trace_run_id"))
+    # trace_run_id 由 worker 建 run 时回填；未回填的窗口（run 还没建立）用任务创建时间
+    # 兜底扫描，避免命中库里陈旧 running 残留行而返回上一次任务的条目。
+    entries = transcript.entries_for_task(
+        task.get("trace_run_id"), since=task.get("created_at"))
     return {"entries": entries, "task_status": task.get("status")}
 
 

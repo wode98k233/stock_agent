@@ -64,6 +64,9 @@ _CAPABILITY_SKILL_MAP = {
     "fund_flow": ["mx_data", "money_flow"],
     "stock_screening": ["mx_xuangu", "stock_analysis"],
     "news_search": ["mx_search", "market_review"],
+    # 全市场广度（成交额合计/涨跌家数/涨停跌停）：market_review 的 get_market_breadth 是
+    # 单一来源，mx_data 仅作降级备源（2026-10-15 大盘总结数字口径事故后新增）
+    "market_breadth": ["market_review", "mx_data"],
     "valuation": ["mx_data", "valuation"],
     "macro_data": ["macro_data", "mx_data"],
     "user_input": [],
@@ -76,6 +79,7 @@ CAPABILITY_DESCRIPTIONS = {
     "fund_flow": "资金流向：主力资金、北向资金、融资融券、龙虎榜",
     "stock_screening": "选股筛选：多条件筛选、行业筛选、概念股筛选",
     "news_search": "新闻/公告搜索：最新新闻、研报、公告和情感分析",
+    "market_breadth": "市场广度：全市场成交额合计（沪深京）、涨跌家数（含平盘）、涨停跌停统计",
     "valuation": "估值分析：PE/PB历史分位、估值对比、PEG计算",
     "macro_data": "宏观数据：M2/M1/M0、LPR、CPI、GDP、PMI 及国债收益率时序",
     "user_input": "用户提供的信息：成本价、仓位、风险偏好等，无需工具调用",
@@ -218,12 +222,24 @@ def load_template(template_id: Optional[str] = None) -> dict:
 
 
 def _compose_v2_template(template: dict, template_dir: str) -> dict:
-    """将 v2 场景模板中的 output_blocks 组装为旧引擎可消费的 sections。"""
+    """将 v2 场景模板中的 output_blocks 组装为旧引擎可消费的 sections。
+
+    ``scale_blocks_to_max``：块配额按各自**相对权重**等比放大到 ``max_report_words``。
+    `blocks/*.json` 是 24 个模板共享的（core_summary / next_watch / risk_warning
+    各被 23 个模板引用），直接改块里的绝对值会波及所有模板；但只放开
+    ``max_report_words`` 而块配额不动的话，块配额又成了更紧的天花板。
+    两者必须联动 —— 等比缩放让**全文上限成为唯一旋钮**：改模板里一个数字即可，
+    块之间的篇幅比例保持不变（core_summary 仍是最重的块，beginner_translation 仍最轻）。
+    """
     composed = copy.deepcopy(template)
-    sections = []
-    for block_id in composed.get("output_blocks", []):
-        block = _load_block(block_id, template_dir)
-        sections.append(block)
+    sections = [_load_block(b, template_dir) for b in composed.get("output_blocks", [])]
+    if composed.get("scale_blocks_to_max"):
+        total = sum(s.get("max_words") or 0 for s in sections)
+        target = int(composed.get("max_report_words") or 0)
+        if total > 0 and target > 0:
+            for s in sections:
+                if s.get("max_words"):
+                    s["max_words"] = max(50, round(s["max_words"] * target / total))
     composed["sections"] = sections
     return composed
 
@@ -367,6 +383,10 @@ def _active_intent_boosts(text: str, enabled_ids: set) -> dict:
 
     经 `_valid_intent_rules` 消毒后再消费；模板未启用的意图被忽略
     （不会把分加到一个不可用的模板上）。
+
+    同模板可有多条规则（如 quick_lookup 的显式声明词族 + 自然说法词族）：
+    取**最高 boost**；同分保留**先命中**的那条 —— 行为与规则书写顺序无关，
+    展示标签也稳定（不再由"后写覆盖"隐式决定）。
     """
     boosts: dict = {}
     for rule in _valid_intent_rules(_load_intent_rules().get("intents", [])):
@@ -374,7 +394,9 @@ def _active_intent_boosts(text: str, enabled_ids: set) -> dict:
         if tid not in enabled_ids:
             continue
         if _match_intent(text, rule):
-            boosts[tid] = (rule["boost"], f"（意图优先：{rule['label']}）")
+            prev = boosts.get(tid)
+            if prev is None or rule["boost"] > prev[0]:
+                boosts[tid] = (rule["boost"], f"（意图优先：{rule['label']}）")
     return boosts
 
 

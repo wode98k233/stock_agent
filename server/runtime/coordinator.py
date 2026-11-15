@@ -32,6 +32,28 @@ def _strip_ansi(text: str) -> str:
 Runner = Callable[..., Awaitable["AgentRunResult"]]
 
 
+def _cost_of_run(run_id: str | None) -> dict | None:
+    """这一轮花了多少钱（元）—— 从该 run 的 llm step + 按次计费的 tool step 里 SUM
+    （记录时已算好，含价目快照）。
+
+    ⚠️ 不在这里重算：价目改了以后历史账单不能被改写（设计文档 §5.1）。
+    取不到（没开 trace / 未计价）就返回 None，界面显示「未计价」而不是「¥0.00」。
+    """
+    run_id = str(run_id or "")
+    if not run_id:
+        return None
+    try:
+        from utils.agent_trace.store import store
+        summary = store.cost_totals_for_run(run_id)
+    except Exception:
+        return None
+    # 只有「按次计费服务」的轮次（如一次对话只搜了两个网页、没调 LLM）也必须出成本卡，
+    # 否则那笔钱在界面上完全不可见。
+    if not summary.get("calls") and not summary.get("service_calls"):
+        return None
+    return summary
+
+
 class TaskRuntime:
     """管理 Web 请求触发的后台 Agent 任务（协调各职责组件）。"""
 
@@ -65,10 +87,29 @@ class TaskRuntime:
         dialog_uuid: str,
         content: str,
         mode: str,
+        turn_type: str = "auto",
+        attachments: list[dict] | None = None,
     ) -> dict:
         content = content.strip()
         if not content:
             raise ValueError("content 不能为空")
+
+        # 图片附件：v1 只把图转成文字拼进本轮问题，后续 agent 链路仍是纯文本
+        attachments_meta: list[dict] = []
+        captions: list[str] = []
+        for idx, att in enumerate(attachments or [], 1):
+            att_id = str((att or {}).get("id") or "")
+            if not att_id:
+                continue
+            from server.vision_service import caption_upload
+            caption = caption_upload(att_id)
+            if caption is None:
+                continue  # 文件不存在/已过期：跳过，不阻断本轮
+            caption = caption or "（识别失败，未能读取图片内容）"
+            captions.append(f"[图片{idx}] {caption}")
+            attachments_meta.append({**att, "caption": caption})
+        if captions:
+            content = content + "\n\n" + "\n".join(captions)
         running_task_id = storage.has_running_task(dialog_uuid)
         if running_task_id:
             raise RunningTaskError(running_task_id)
@@ -78,7 +119,7 @@ class TaskRuntime:
         title_source = ""
         if Config.WEB_DIALOG_AUTO_TITLE:
             dialog = storage.get_dialog(dialog_uuid)
-            if dialog and not dialog.get("title_auto"):
+            if dialog and not dialog.get("title_auto") and dialog.get("origin") != "replay":
                 first_user = next(
                     (m["content"] for m in storage.list_messages(dialog_uuid)
                      if m["role"] == "user" and str(m.get("content") or "").strip()),
@@ -94,6 +135,8 @@ class TaskRuntime:
             status="completed",
             mode=mode,
             task_id=task_id,
+            attachments=(json.dumps(attachments_meta, ensure_ascii=False)
+                         if attachments_meta else None),
         )
         assistant_message = storage.create_message(
             dialog_uuid=dialog_uuid,
@@ -119,7 +162,7 @@ class TaskRuntime:
         self.event_manager.create_queue(task_id)
         self.event_manager.set_event_loop()
         handle = asyncio.create_task(
-            self._run_task(storage, context, task_id, content, mode, title_source)
+            self._run_task(storage, context, task_id, content, mode, title_source, turn_type)
         )
         self.event_manager.register_handle(task_id, handle)
 
@@ -139,6 +182,7 @@ class TaskRuntime:
         content: str,
         mode: str,
         title_source: str = "",
+        turn_type: str = "auto",
     ):
         task = self.task_manager.get_task(task_id)
         self.task_manager.update_task(task, status="running")
@@ -146,15 +190,23 @@ class TaskRuntime:
 
         _progress_events: list[dict] = []
         _trace_run_id: str | None = None
+        _cost_summary: dict | None = None
 
         def _extra_json() -> str | None:
-            """落库 extra：进度事件 + transcript 条目（think/tool，供刷新/切回回放）。"""
+            """落库 extra：进度事件 + transcript 条目（think/tool，供刷新/切回回放）+ 成本。
+
+            成本放在这里而不是新加一列：web_messages.extra 本就是「这一轮的旁挂数据」，
+            前端回放时按 type 取用（cost 条目只有 type、没有 entry_id，
+            所以不会进过程流回放路径）。
+            """
             events = list(_progress_events)
             try:
                 from server.runtime import transcript as _transcript
                 events += _transcript.entries_for_task(_trace_run_id)
             except Exception:
                 pass
+            if _cost_summary:
+                events.append({"type": "cost", **(_cost_summary or {})})
             return json.dumps(events, ensure_ascii=False, default=str) if events else None
 
         def progress_callback(event: ProgressEvent):
@@ -167,7 +219,7 @@ class TaskRuntime:
             """worker 线程内回调：先落库（复核 title_auto）再推 SSE，保证刷新/切换一致。"""
             try:
                 dialog = storage.get_dialog(task.dialog_uuid)
-                if not dialog or dialog.get("title_auto"):
+                if not dialog or dialog.get("title_auto") or dialog.get("origin") == "replay":
                     return
                 storage.update_dialog(task.dialog_uuid, title=title, title_auto=1)
                 self.event_manager.put_event(task_id, {
@@ -177,29 +229,26 @@ class TaskRuntime:
             except Exception:
                 pass
 
+        def trace_run_callback(run_id: str) -> None:
+            """worker 线程回调：Agent 建好 trace run 后立刻绑定（轮询器 + TaskRecord）。
+
+            不绑定的话轮询器只能猜「最近一条 running run」——分库扫描会跨月回退到
+            陈旧 running 残留行，过程流就会显示上一次（甚至上个月）任务的执行过程。
+            绑定后 /api/tasks/{id}/transcript 快照与 extra 落库也都指向同一条 run。
+            """
+            nonlocal _trace_run_id
+            if not run_id:
+                return
+            _trace_run_id = run_id
+            self.trace_poller.bind_run(task_id, run_id)
+            self.task_manager.update_task(task, trace_run_id=run_id)
+
         trace_versions: dict[int, str] = {}
-        await self.trace_poller.start_polling(task_id, trace_versions)
+        await self.trace_poller.start_polling(
+            task_id, trace_versions, since=task.created_at or "")
 
         def budget_decision_callback(cb_payload: dict) -> str:
-            # 澄清反问：暂存问题清单，供 /clarify 路由落库问答消息
-            if (cb_payload or {}).get("reason") == "clarify":
-                from agents.shared.clarify import CLARIFY_TIMEOUT
-                self._pending_clarify[task_id] = cb_payload
-                # 多等 10s 余量：前端倒计时归零后先亮红灯、再自动提交推荐选项，
-                # 别让后端抢先超时把「已展示的作答」变成 404
-                wait_s = float(cb_payload.get("timeout_s") or 300) + 10
-                try:
-                    decision = self.budget_coordinator.request_decision(
-                        task_id, cb_payload, timeout=wait_s, timeout_value=CLARIFY_TIMEOUT,
-                    )
-                finally:
-                    self._pending_clarify.pop(task_id, None)
-                if decision == CLARIFY_TIMEOUT:
-                    # 超时兜底：前端没提交（页面关闭/断线），问答无人落库，
-                    # 这里按推荐选项补写进对话历史，并通知还开着的页面收起弹窗
-                    self._persist_clarify_timeout(storage, task, task_id, cb_payload)
-                return decision
-            return self.budget_coordinator.request_decision(task_id, cb_payload)
+            return self._resolve_user_decision(storage, task, task_id, cb_payload)
 
         def cancel_check() -> bool:
             return self.cancel_coordinator.is_cancelled(task_id)
@@ -216,9 +265,12 @@ class TaskRuntime:
                 budget_decision_callback=budget_decision_callback,
                 cancel_check=cancel_check,
                 title_callback=title_callback if title_source else None,
+                trace_run_callback=trace_run_callback,
                 title_source=title_source,
+                turn_type=turn_type,
             )
             _trace_run_id = getattr(result, "trace_run_id", None)
+            _cost_summary = _cost_of_run(_trace_run_id)
             extra_json = _extra_json()
             clean_response = _strip_ansi(result.response or "")
             storage.update_message(
@@ -260,6 +312,8 @@ class TaskRuntime:
                         "log_file": result.log_file,
                         "trace_run_id": result.trace_run_id,
                         "mode": mode,
+                        # 本次花费（元）：合计 / 按供应商 / 缓存省下的钱 / 未计价调用数
+                        "cost": _cost_summary or {},
                     },
                 }
             )
@@ -338,6 +392,38 @@ class TaskRuntime:
     def get_pending_clarify(self, task_id: str) -> dict | None:
         """当前等待用户回答的澄清问题清单（无则 None）。"""
         return self._pending_clarify.get(task_id)
+
+    # 走澄清弹窗通道的决策类型：普通澄清反问 + 策略槽位确认卡。
+    # 两者前端是同一个弹窗、提交也走同一个 POST /api/tasks/{id}/clarify，
+    # 因此必须一起进 _pending_clarify（否则提交会 404「没有等待中的澄清问题」）。
+    CLARIFY_REASONS = ("clarify", "strategy_slots")
+
+    def _resolve_user_decision(self, storage, task, task_id: str, cb_payload: dict) -> str:
+        """worker 线程侧统一决策入口：澄清弹窗（含策略槽位）与预算决策。
+
+        Returns:
+            用户提交的答案 JSON / CLARIFY_TIMEOUT / 预算场景的 continue|cancel。
+        """
+        reason = (cb_payload or {}).get("reason")
+        if reason in self.CLARIFY_REASONS:
+            from agents.shared.clarify import CLARIFY_TIMEOUT
+            self._pending_clarify[task_id] = cb_payload
+            # 多等 10s 余量：前端倒计时归零后先亮红灯、再自动提交推荐选项，
+            # 别让后端抢先超时把「已展示的作答」变成 404
+            wait_s = float(cb_payload.get("timeout_s") or 300) + 10
+            try:
+                decision = self.budget_coordinator.request_decision(
+                    task_id, cb_payload, timeout=wait_s, timeout_value=CLARIFY_TIMEOUT,
+                )
+            finally:
+                self._pending_clarify.pop(task_id, None)
+            if decision == CLARIFY_TIMEOUT and reason == "clarify":
+                # 超时兜底：前端没提交（页面关闭/断线），问答无人落库，
+                # 这里按推荐选项补写进对话历史，并通知还开着的页面收起弹窗。
+                # 策略槽位卡不走这里：超时由策略闸门按已解析口径直接开跑（不落问答消息）。
+                self._persist_clarify_timeout(storage, task, task_id, cb_payload)
+            return decision
+        return self.budget_coordinator.request_decision(task_id, cb_payload)
 
     def _persist_clarify_timeout(self, storage, task, task_id: str, payload: dict) -> None:
         """澄清超时无人作答：问答补写进对话历史 + 推 SSE 让页面收起弹窗。

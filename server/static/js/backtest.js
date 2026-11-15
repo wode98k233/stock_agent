@@ -29,6 +29,7 @@
       await this._loadStrategies();
       this._bindEvents();
       this._bindEditorEvents();
+      this._bindGapEvents();
       this._renderChips();
       this.refreshTestSets();
       this._bindDragAndResize();
@@ -69,10 +70,12 @@
         }).join('');
         const builtinBadge = s.is_builtin ? '<span class="builtin-badge">内置</span>' : '';
         const safeId = this._esc(s.strategy_id);
-        const actions = s.is_builtin ? '' : `
+        const actions = `
           <div class="card-actions" onclick="event.stopPropagation()">
+            <button class="bt-card-action-btn" onclick="window._btPanel.openLifecycle('${safeId}')">详情</button>
+            ${s.is_builtin ? '' : `
             <button class="bt-card-action-btn" onclick="window._btPanel.editStrategy('${safeId}')">编辑</button>
-            <button class="bt-card-action-btn danger" onclick="window._btPanel.deleteStrategy('${safeId}')">删除</button>
+            <button class="bt-card-action-btn danger" onclick="window._btPanel.deleteStrategy('${safeId}')">删除</button>`}
           </div>`;
         return `<div class="bt-strategy-card" data-id="${safeId}" onclick="window._btPanel.selectStrategy('${safeId}')">
           <div class="name">${this._esc(s.name)}${builtinBadge}</div>
@@ -84,6 +87,162 @@
       if (this.strategies.length > 0) this.selectStrategy(this.strategies[0].strategy_id);
     }
 
+    async openLifecycle(strategyId) {
+      const panel = document.getElementById('btLifecyclePanel');
+      if (!panel) return;
+      panel.style.display = 'block';
+      panel.innerHTML = '<div class="bt-lc-head"><div class="bt-lc-title">策略详情</div>'
+        + '<button class="bt-card-action-btn" onclick="window._btPanel.closeLifecycle()">关闭</button></div>'
+        + '<div class="bt-lc-body bt-lc-empty">加载中…</div>';
+      try {
+        const res = await window.StockRadar.api.getStrategyLifecycle(strategyId);
+        this._renderLifecycle(res);
+      } catch (e) {
+        const body = panel.querySelector('.bt-lc-body');
+        if (body) body.innerHTML = '<div class="bt-lc-empty">加载失败：' + this._esc(e.message || e) + '</div>';
+      }
+    }
+
+    closeLifecycle() {
+      const panel = document.getElementById('btLifecyclePanel');
+      if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+    }
+
+    /* ── 策略详情的三个出口：评测 / 盯盘 / 研发面板（原来这块是死胡同） ── */
+    gotoSignalEval() {
+      this.closeLifecycle();
+      const btn = document.getElementById('btRightTabSignalEval');
+      if (btn) btn.click();
+    }
+
+    gotoMonitor() {
+      this.closeLifecycle();
+      const m = window.StockRadar && window.StockRadar.monitorPanel;
+      if (m && m.toggle) m.toggle();
+    }
+
+    /* 回测历史里的「研发过程」：打开策略研究面板并载入那一次 run */
+    openResearchRun(runUuid) {
+      const p = window.StockRadar && window.StockRadar.strategyResearchPanel;
+      if (!p || !p.open) return;
+      p.open();
+      if (p.loadRun && runUuid) p.loadRun(runUuid, { subscribe: false });
+    }
+
+    gotoStrategyResearch() {
+      this.closeLifecycle();
+      const p = window.StockRadar && window.StockRadar.strategyResearchPanel;
+      if (p && p.open) p.open();
+    }
+
+    _lcPct(v, digits = 1) {
+      if (v === null || v === undefined || v === '') return '—';
+      const n = Number(v);
+      return Number.isFinite(n) ? (n * 100).toFixed(digits) + '%' : '—';
+    }
+
+    _lcNum(v, digits = 2) {
+      if (v === null || v === undefined || v === '') return '—';
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(digits) : '—';
+    }
+
+    _renderLifecycle(d) {
+      const panel = document.getElementById('btLifecyclePanel');
+      if (!panel) return;
+      const s = d.strategy || {};
+      const runs = d.runs || [];
+      const ev = d.evals || {};
+      const fw = d.forward || {};
+      const mon = d.monitor || {};
+      const iters = d.iterations || [];
+      const ORIGIN = { manual: '手工', batch: '批量', multi: '多策略', research: '研发', eval: '评判' };
+
+      // ① 回测记录
+      const runRows = runs.length ? runs.map(r => {
+        const meta = (this._HEALTH_META || {})[r.health] || null;
+        const healthCell = meta ? '<span class="bt-health-badge">' + meta.text + '</span>'
+                                : '<span class="bt-lc-muted">—</span>';
+        return '<tr>'
+          + '<td>' + this._esc(r.created_at || '') + '</td>'
+          + '<td>' + this._esc(r.code) + ' ' + this._esc(r.stock_name || '') + '</td>'
+          + '<td><span class="bt-lc-origin">' + this._esc(ORIGIN[r.origin] || r.origin || '—') + '</span></td>'
+          + '<td>' + healthCell + '</td>'
+          + '<td>' + this._lcPct(r.total_return) + '</td>'
+          + '<td>' + this._lcNum(r.sharpe_ratio) + '</td>'
+          + '<td>' + this._lcPct(r.win_rate) + '</td>'
+          + '<td>' + (r.trade_count === null || r.trade_count === undefined ? '—' : r.trade_count) + '</td>'
+          + '<td>' + (r.status === 'completed'
+              ? '<button class="bt-card-action-btn" onclick="window._btPanel.closeLifecycle();window._btPanel.viewRun(\'' + this._esc(r.run_id) + '\')">查看</button>'
+              : '<span class="bt-lc-muted">' + this._esc(r.status || '—') + '</span>') + '</td>'
+          + '</tr>';
+      }).join('') : '<tr><td colspan="9" class="bt-lc-empty">还没有回测记录</td></tr>';
+
+      // ② 评判（样本内外对照）
+      const evCounts = Object.keys(ev.counts || {}).map(k => k + ' ' + ev.counts[k]).join(' / ') || '—';
+      const evRows = (ev.rows || []).slice(0, 5).map(r => '<tr>'
+        + '<td>' + this._esc(r.run_id) + '</td>'
+        + '<td>' + this._esc(r.verdict || '—') + (r.overfit_flag ? ' ⚠ 过拟合嫌疑' : '') + '</td>'
+        + '<td>' + this._lcNum(r.is_sharpe) + ' / ' + this._lcNum(r.oos_sharpe) + '</td>'
+        + '<td>' + this._lcNum(r.sharpe_ratio_io) + '</td>'
+        + '<td>' + this._esc(r.split_date || '—') + '</td>'
+        + '</tr>').join('');
+
+      // ③ 前瞻跟踪（诚实口径：样本不够就直说）
+      const mature = fw.mature_count || 0;
+      const fwLine = (fw.win_rate === null || fw.win_rate === undefined)
+        ? '前瞻样本不足（成熟 ' + mature + ' 条），无法判断策略前瞻有效性'
+        : '前瞻胜率 ' + this._lcPct(fw.win_rate) + '（成熟 ' + mature + '/' + (fw.signal_count || 0) + ' 条）';
+      const wilson = (fw.wilson_ci && fw.wilson_ci.length === 2)
+        ? '95% Wilson 区间 ' + this._lcPct(fw.wilson_ci[0]) + ' ~ ' + this._lcPct(fw.wilson_ci[1]) : '';
+
+      // ④ 落地
+      const monRows = (mon.rules || []).length ? mon.rules.map(r => '<tr>'
+        + '<td>' + this._esc(r.stock_code) + ' ' + this._esc(r.stock_name || '') + '</td>'
+        + '<td>' + this._esc(r.rule_type) + '</td>'
+        + '<td>' + (r.threshold === null || r.threshold === undefined ? '—' : r.threshold) + '</td>'
+        + '<td>' + (r.enabled ? '启用' : '停用') + '</td>'
+        + '<td>' + this._esc(r.remark || '') + '</td>'
+        + '</tr>').join('') : '<tr><td colspan="5" class="bt-lc-empty">没有盯盘规则</td></tr>';
+
+      // ⑤ 迭代史（strategy_hash 反查，只有研发出来的策略才有）
+      const iterRows = iters.length ? iters.map(it => '<tr>'
+        + '<td>' + (it.round === null || it.round === undefined ? '—' : it.round) + '</td>'
+        + '<td>' + this._esc(it.verdict || '—') + (it.overfit_flag ? ' ⚠' : '') + '</td>'
+        + '<td>' + this._lcNum((it.oos_metrics || {}).sharpe) + '</td>'
+        + '<td>' + this._esc(it.hypothesis || '') + '</td>'
+        + '</tr>').join('') : '';
+
+      panel.innerHTML = '<div class="bt-lc-head">'
+        + '<div class="bt-lc-title">' + this._esc(s.name || s.strategy_id || '') + ' '
+        + (d.verified
+          ? '<span class="bt-lc-ok" title="历史上至少有一次回测通过体检（数据完整、成交样本 ≥ 5 笔）">✓ 曾通过体检</span>'
+          : '<span class="bt-lc-warn" title="历史上没有任何一次回测通过体检（数据完整、成交样本 ≥ 5 笔）">⚠ 尚未通过体检</span>')
+        + '</div>'
+        + '<button class="bt-card-action-btn" onclick="window._btPanel.closeLifecycle()">关闭</button></div>'
+        + '<div class="bt-lc-body">'
+        + '<div class="bt-lc-block"><div class="bt-lc-h">① 回测记录（' + runs.length + ' / ' + (d.runs_total || 0) + '）</div>'
+        + '<table class="bt-lc-table"><thead><tr><th>时间</th><th>标的</th><th>来源</th><th>体检</th>'
+        + '<th>总收益</th><th>夏普</th><th>胜率</th><th>笔数</th><th>操作</th></tr></thead><tbody>' + runRows + '</tbody></table></div>'
+        + '<div class="bt-lc-block"><div class="bt-lc-h">② 评判（' + (ev.evaluated || 0) + ' 次：' + evCounts + '）</div>'
+        + (evRows ? '<table class="bt-lc-table"><thead><tr><th>run</th><th>结论</th><th>IS / OOS 夏普</th>'
+            + '<th>比值</th><th>切分日</th></tr></thead><tbody>' + evRows + '</tbody></table>'
+          : '<div class="bt-lc-empty">还没有样本内外对照（回测完成后会自动补跑）</div>') + '</div>'
+        + '<div class="bt-lc-block"><div class="bt-lc-h">③ 前瞻跟踪'
+        + '<button class="bt-lc-link" onclick="window._btPanel.gotoSignalEval()" title="去 AI 信号评测页看全部信号的兑现情况">去信号评测 ›</button></div>'
+        + '<div class="bt-lc-line">' + fwLine + '</div>'
+        + (wilson ? '<div class="bt-lc-line bt-lc-muted">' + wilson + '</div>' : '')
+        + '<div class="bt-lc-line bt-lc-muted">已跟踪 ' + (fw.days_tracked || 0) + ' 天</div></div>'
+        + '<div class="bt-lc-block"><div class="bt-lc-h">④ 落地（盯盘规则 ' + (mon.matched || 0) + '）'
+        + '<button class="bt-lc-link" onclick="window._btPanel.gotoMonitor()" title="打开盯盘面板看这些规则的实时触发">去盯盘面板 ›</button></div>'
+        + '<table class="bt-lc-table"><thead><tr><th>标的</th><th>类型</th><th>阈值</th><th>状态</th>'
+        + '<th>备注</th></tr></thead><tbody>' + monRows + '</tbody></table></div>'
+        + (iterRows ? '<div class="bt-lc-block"><div class="bt-lc-h">⑤ 研发迭代史（strategy_hash 反查）'
+            + '<button class="bt-lc-link" onclick="window._btPanel.gotoStrategyResearch()" title="打开策略研究面板，看这个策略每一轮的想法与改动">打开策略研究 ›</button></div>'
+            + '<table class="bt-lc-table"><thead><tr><th>轮次</th><th>结论</th><th>OOS 夏普</th>'
+            + '<th>假设</th></tr></thead><tbody>' + iterRows + '</tbody></table></div>' : '')
+        + '</div>';
+    }
     selectStrategy(id) {
       // 多策略模式：toggle 选中
       if (this._multiMode) {
@@ -171,6 +330,8 @@
       const editor = document.getElementById('btEditor');
       if (!editor) return;
       editor.style.display = 'block';
+      // v3 F4 编辑器模式：隐藏策略列表，编辑区占满整宽（380px 侧栏放不下条件树）
+      if (this.modal) this.modal.classList.add('bt-editor-mode');
       await this._ensureMeta();
 
       this._editingId = strategyId || null;
@@ -210,6 +371,7 @@
     closeEditor() {
       const editor = document.getElementById('btEditor');
       if (editor) editor.style.display = 'none';
+      if (this.modal) this.modal.classList.remove('bt-editor-mode');
       // 关闭 AI 面板
       const aiPrompt = document.getElementById('btAiPrompt');
       if (aiPrompt) aiPrompt.style.display = 'none';
@@ -323,7 +485,9 @@
       const params = data.params || {};
       this._builderParams = Object.keys(params).map(k => {
         const p = params[k] || {};
-        return { key: k, value: p.value ?? 0, min: p.min ?? 0, max: p.max ?? 999, step: p.step ?? 1, label: p.label ?? k, type: p.type ?? 'float' };
+        // _def 记模板默认值：参数卡「恢复默认」按钮用（v3 F3）
+        return { key: k, value: p.value ?? 0, _def: p.value ?? 0, min: p.min ?? 0, max: p.max ?? 999, step: p.step ?? 1, label: p.label ?? k, type: p.type ?? 'float',
+                 help: p.help ?? '', recommended: p.recommended ?? null };
       });
       this._builderBuyRules = this._parseRules(data.conditions?.buy);
       this._builderSellRules = this._parseRules(data.conditions?.sell);
@@ -339,10 +503,11 @@
 
     _parseRules(cond) {
       if (!cond || !cond.rules) return [];
+      // v3 S3：嵌套组递归解析成**可编辑**的树节点（旧行为：整组序列化成字符串
+      // 原样带回，界面上组内完全改不了）
       return cond.rules.map(r => {
         if (r.type === 'group') {
-          // 嵌套组不支持可视化编辑，回退时保留原始 JSON
-          return { _raw: JSON.stringify(r) };
+          return { type: 'group', logic: r.logic || 'AND', rules: this._parseRules({ rules: r.rules }) };
         }
         return {
           left: this._defToForm(r.left),
@@ -354,6 +519,7 @@
 
     _defToForm(def) {
       if (!def) return { type: 'value', value: 0 };
+      if (def.factor) return { type: 'factor', factor: def.factor };   // v3 S4-B
       if (def.func) {
         const args = (def.args || []).map(a => {
           if (typeof a === 'string' && a.startsWith('{') && a.endsWith('}')) return a;
@@ -381,14 +547,36 @@
       const el = document.getElementById('btBuilderParams');
       if (!el) return;
       if (!this._builderParams.length) { el.innerHTML = '<div class="bt-builder-empty">暂无参数，条件中用 {参数名} 自动创建</div>'; return; }
-      el.innerHTML = this._builderParams.map((p, i) => `
-        <div class="bt-builder-param-row">
-          <input value="${this._esc(p.key)}" placeholder="参数名" class="bt-builder-param-key" onchange="window._btPanel._builderUpdateParam(${i},'key',this.value)">
-          <input value="${this._esc(p.label)}" placeholder="标签" class="bt-builder-param-label" onchange="window._btPanel._builderUpdateParam(${i},'label',this.value)">
-          <input type="number" value="${p.value}" placeholder="默认值" class="bt-builder-param-val" onchange="window._btPanel._builderUpdateParam(${i},'value',parseFloat(this.value)||0)">
-          <button class="bt-builder-param-del" onclick="window._btPanel._builderRemoveParam(${i})" title="删除">✕</button>
-        </div>
-      `).join('');
+      /* v3 F3 参数可读化：默认值 + 人话解释 + 推荐区间 + 一键恢复。
+         help/recommended 来自模板 params（json_templates/*.json）。 */
+      el.innerHTML = this._builderParams.map((p, i) => {
+        const out = p.recommended && (p.value < p.recommended[0] || p.value > p.recommended[1]);
+        return `
+        <div class="bt-builder-param${out ? ' out' : ''}" data-pi="${i}">
+          <div class="bt-builder-param-row">
+            <input value="${this._esc(p.key)}" placeholder="参数名" class="bt-builder-param-key" onchange="window._btPanel._builderUpdateParam(${i},'key',this.value)">
+            <input value="${this._esc(p.label)}" placeholder="标签" class="bt-builder-param-label" onchange="window._btPanel._builderUpdateParam(${i},'label',this.value)">
+            <input type="number" value="${p.value}" placeholder="默认值" class="bt-builder-param-val" onchange="window._btPanel._builderUpdateParam(${i},'value',parseFloat(this.value)||0)">
+            <span class="bt-builder-param-rec">${p.recommended ? `推荐 ${p.recommended[0]}–${p.recommended[1]}` : ''}</span>
+            <button class="bt-builder-param-del" onclick="window._btPanel._builderRemoveParam(${i})" title="删除">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          ${p.help ? `<div class="bt-builder-param-help">${this._esc(p.help)}</div>` : ''}
+          <div class="bt-builder-param-foot">
+            <span class="bt-builder-param-out">超出推荐区间，可能过拟合或不稳定（不阻断保存）</span>
+            ${p._def !== undefined ? `<button class="bt-btn-ghost-sm" onclick="window._btPanel._builderResetParam(${i})">恢复默认 ${p._def}</button>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    _builderResetParam(i) {
+      const p = this._builderParams[i];
+      if (!p || p._def === undefined) return;
+      p.value = p._def;
+      this._builderRenderParams();
+      this._builderRefreshJson();
     }
 
     _builderRenderRules(side) {
@@ -397,23 +585,120 @@
       if (!el) return;
       if (!rules.length) {
         el.innerHTML = `<div class="bt-builder-empty">${side === 'buy' ? '无条件买入（每次 bar 都买入）' : '无卖出条件（仅靠止损止盈离场）'}</div>`;
-        return;
+      } else {
+        el.innerHTML = rules.map((r, i) => this._renderRuleNode(side, r, String(i), 0)).join('');
       }
-      el.innerHTML = rules.map((r, i) => {
-        if (r._raw) return `<div class="bt-builder-rule"><span style="color:var(--muted);font-size:11px">嵌套组（编辑暂不支持）</span><button class="bt-builder-rule-del" onclick="window._btPanel._builderRemoveRule('${side}',${i})">✕</button></div>`;
-        return `<div class="bt-builder-rule">
-          <div class="bt-builder-rule-row">
-            <span class="bt-builder-rule-side">左</span>${this._valuePickerHtml(r.left, `${side}L${i}`)}
+      this._builderRenderPreview(side);
+    }
+
+    /* ── v3 S3 嵌套条件树 ─────────────────────────────────────
+       path 形如 "0/1"（空串 = 根层），寻址 _builderBuyRules 里的节点。
+       深度上限 3（根 + 2 层子组）：再深已无法一眼读懂布尔含义。
+       序列化 _rulesToJson 会跳过空组，预览区同步提示。 */
+    _rulesArrAt(side, path) {
+      let rules = side === 'buy' ? this._builderBuyRules : this._builderSellRules;
+      for (const i of path) {
+        const g = rules[i];
+        if (!g || g.type !== 'group') return null;
+        rules = g.rules || [];
+      }
+      return rules;
+    }
+
+    _nodeAt(side, path) {
+      const idx = String(path || '').split('/').filter(x => x !== '').map(Number);
+      if (!idx.length) return null;
+      const arr = this._rulesArrAt(side, idx.slice(0, -1));
+      return arr ? arr[idx[idx.length - 1]] : null;
+    }
+
+    _renderRuleNode(side, r, path, depth) {
+      if (r.type === 'group') {
+        const kid = (r.rules || []).map((c, i) =>
+          this._renderRuleNode(side, c, path + '/' + i, depth + 1)).join('');
+        const addGroup = depth < 2
+          ? `<button class="bt-btn-ghost-sm" onclick="window._btPanel._builderAddGroupAt('${side}','${path}')">+ 子组</button>` : '';
+        return `<div class="bt-builder-group" data-depth="${depth}">
+          <div class="bt-builder-group-head">
+            <span class="bt-builder-group-tag">组</span>
+            <select class="bt-logic-select" onchange="window._btPanel._builderGroupLogic('${side}','${path}',this.value)">
+              <option value="AND"${r.logic === 'AND' ? ' selected' : ''}>同时满足 (AND)</option>
+              <option value="OR"${r.logic === 'OR' ? ' selected' : ''}>任一满足 (OR)</option>
+            </select>
+            <span class="bt-builder-group-n">本组 ${r.rules.length} 条</span>
+            <button class="bt-builder-group-del" onclick="window._btPanel._builderRemoveAt('${side}','${path}')">删除组</button>
           </div>
-          <div class="bt-builder-rule-row">
-            <select class="bt-builder-op" onchange="window._btPanel._builderUpdateRule('${side}',${i},'op',this.value)">${this._opOptions(r.op)}</select>
+          <div class="bt-builder-group-body">${kid || '<div class="bt-builder-empty">空组（保存时将被忽略）</div>'}</div>
+          <div class="bt-builder-group-foot">
+            <button class="bt-builder-add-rule" onclick="window._btPanel._builderAddLeafAt('${side}','${path}')">+ 条件</button>
+            ${addGroup}
           </div>
-          <div class="bt-builder-rule-row">
-            <span class="bt-builder-rule-side">右</span>${this._valuePickerHtml(r.right, `${side}R${i}`)}
-          </div>
-          <button class="bt-builder-rule-del" onclick="window._btPanel._builderRemoveRule('${side}',${i})">✕</button>
         </div>`;
-      }).join('');
+      }
+      return `<div class="bt-builder-rule">
+        <div class="bt-builder-rule-row">
+          <span class="bt-builder-rule-side">左</span>${this._valuePickerHtml(r.left, `${side}:${path}:L`)}
+        </div>
+        <div class="bt-builder-rule-row">
+          <select class="bt-builder-op" onchange="window._btPanel._builderRuleProp('${side}','${path}','op',this.value)">${this._opOptions(r.op)}</select>
+        </div>
+        <div class="bt-builder-rule-row">
+          <span class="bt-builder-rule-side">右</span>${this._valuePickerHtml(r.right, `${side}:${path}:R`)}
+        </div>
+        <button class="bt-builder-rule-del" onclick="window._btPanel._builderRemoveAt('${side}','${path}')" title="移除">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>`;
+    }
+
+    _builderRenderPreview(side) {
+      const el = document.getElementById(side === 'buy' ? 'btBuyPreview' : 'btSellPreview');
+      if (!el) return;
+      const logic = document.getElementById(side === 'buy' ? 'btBuyLogic' : 'btSellLogic')?.value || 'AND';
+      const rules = side === 'buy' ? this._builderBuyRules : this._builderSellRules;
+      const empty = this._countEmptyGroups(rules);
+      const text = this._condText(rules, logic);
+      el.innerHTML = '当 <b>' + this._esc(text || '（无条件）') + '</b> 时' + (side === 'buy' ? '买入' : '卖出')
+        + (empty ? ` <span style="color:var(--warn,#c88a1e)">· ${empty} 个空组将被忽略</span>` : '');
+    }
+
+    _countEmptyGroups(rules) {
+      let n = 0;
+      (rules || []).forEach(r => {
+        if (r.type === 'group') {
+          if (!(r.rules || []).length) n++;
+          n += this._countEmptyGroups(r.rules);
+        }
+      });
+      return n;
+    }
+
+    _condText(rules, logic) {
+      const parts = (rules || []).map(r =>
+        r.type === 'group' ? this._condText(r.rules, r.logic || 'AND') : this._leafText(r)
+      ).filter(Boolean);
+      if (!parts.length) return '';
+      const j = parts.join(logic === 'AND' ? ' 且 ' : ' 或 ');
+      return parts.length > 1 ? `（${j}）` : j;
+    }
+
+    _leafText(r) {
+      const meta = this._btMeta || {};
+      const label = (def) => {
+        if (def.type === 'indicator') {
+          const im = meta.indicators?.[def.func] || {};
+          let t = im.label || def.func;
+          if (def.field) t += '·' + (((im.fields || []).find(f => f.value === def.field) || {}).label || def.field);
+          (def.args || []).forEach(a => {
+            if (typeof a !== 'string' || a.startsWith('{')) t += ' ' + a;   // 数字/参数引用才展示，'close' 之类数据引用略
+          });
+          return t;
+        }
+        if (def.type === 'data') return ((meta.data_refs || []).find(d => d.value === def.data) || {}).label || def.data;
+        return String(def.value ?? '');
+      };
+      const op = ((meta.operators || []).find(o => o.value === r.op) || {}).label || r.op;
+      return `${label(r.left)} ${op} ${label(r.right)}`;
     }
 
     _valuePickerHtml(def, prefix) {
@@ -428,11 +713,19 @@
 
       let html = `<select class="bt-builder-val-type" onchange="window._btPanel._builderChangeValType('${prefix}',this.value)">
         <option value="indicator" ${type === 'indicator' ? 'selected' : ''}>指标</option>
+        <option value="factor" ${type === 'factor' ? 'selected' : ''}>因子</option>
         <option value="data" ${type === 'data' ? 'selected' : ''}>价格数据</option>
         <option value="value" ${type === 'value' ? 'selected' : ''}>固定值</option>
       </select>`;
 
-      if (type === 'indicator') {
+      if (type === 'factor') {
+        // v3 S4-B：因子操作数（时序语义：该票自己的因子值，不是横截面排名）
+        const factorOptions = (meta.factors || []).map(f =>
+          `<option value="${f.field}" ${def.factor === f.field ? 'selected' : ''} title="${f.description || ''}">因子 · ${f.label}</option>`
+        ).join('');
+        html += `<select class="bt-builder-val-factor" onchange="window._btPanel._builderChangeValFactor('${prefix}',this.value)">${factorOptions}</select>`;
+        html += `<input class="bt-builder-val-num" type="number" step="any" value="${def.value ?? 0}" onchange="window._btPanel._builderChangeValValue('${prefix}',parseFloat(this.value)||0)">`;
+      } else if (type === 'indicator') {
         html += `<select class="bt-builder-val-func" onchange="window._btPanel._builderChangeValFunc('${prefix}',this.value)">${indicatorOptions}</select>`;
         // args
         const funcMeta = meta.indicators?.[def.func || 'ma'] || {};
@@ -493,7 +786,6 @@
       });
       // 自动从规则中提取未定义的 {param} 引用
       this._collectAllRules().forEach(r => {
-        if (r._raw) return;
         [r.left, r.right].forEach(side => {
           if (side.type === 'indicator') (side.args || []).forEach(a => {
             if (typeof a === 'string' && a.startsWith('{') && a.endsWith('}')) {
@@ -531,18 +823,28 @@
       };
     }
 
-    _collectAllRules() { return [...this._builderBuyRules, ...this._builderSellRules]; }
+    _collectAllRules() {
+      const walk = (rules) => (rules || []).flatMap(r =>
+        r.type === 'group' ? walk(r.rules) : [r]);
+      return [...walk(this._builderBuyRules), ...walk(this._builderSellRules)];
+    }
 
     _rulesToJson(rules) {
+      // v3 S3：递归序列化嵌套组。空组**跳过**（空组在布尔语义里没有意义，
+      // 保留会让编译器困惑）；预览区会提示「有 N 个空组将被忽略」。
       return rules.map(r => {
-        if (r._raw) return JSON.parse(r._raw);
+        if (r.type === 'group') {
+          const kids = this._rulesToJson(r.rules || []);
+          if (!kids.length) return null;
+          return { type: 'group', logic: r.logic || 'AND', rules: kids };
+        }
         return {
           type: 'indicator',
           left: this._formToDef(r.left),
           op: r.op,
           right: this._formToDef(r.right),
         };
-      });
+      }).filter(Boolean);
     }
 
     _formToDef(fd) {
@@ -551,6 +853,7 @@
         if (fd.field) d.field = fd.field;
         return d;
       }
+      if (fd.type === 'factor') return { factor: fd.factor || 'close_position_20' };  // v3 S4-B
       if (fd.type === 'data') return { data: fd.data || 'close' };
       return { value: fd.value ?? 0 };
     }
@@ -563,7 +866,11 @@
     }
 
     _builderUpdateParam(i, prop, val) {
-      if (this._builderParams[i]) { this._builderParams[i][prop] = val; this._builderRefreshJson(); }
+      if (this._builderParams[i]) {
+        this._builderParams[i][prop] = val;
+        this._builderRefreshJson();
+        if (prop === 'value') this._builderRenderParams();   // 重新判定「超出推荐区间」
+      }
     }
 
     _builderRemoveParam(i) {
@@ -572,32 +879,87 @@
       this._builderRefreshJson();
     }
 
-    _builderAddRule(side) {
-      const rule = { left: { type: 'indicator', func: 'ma', args: ['close', 5] }, op: 'cross_above', right: { type: 'indicator', func: 'ma', args: ['close', 20] } };
-      if (side === 'buy') this._builderBuyRules.push(rule);
-      else this._builderSellRules.push(rule);
+    _builderAddRule(side) { this._builderAddLeafAt(side, ''); }
+
+    /* ── v3 S3：path 寻址的增删改（根 = ''，子组 = "0/1"）────────── */
+    _builderAddLeafAt(side, path) {
+      const arr = this._rulesArrAt(side, path.split('/').filter(x => x !== '').map(Number));
+      if (!arr) return;
+      arr.push({ left: { type: 'indicator', func: 'ma', args: ['close', 5] }, op: 'cross_above', right: { type: 'indicator', func: 'ma', args: ['close', 20] } });
       this._builderRenderRules(side);
       this._builderRefreshJson();
     }
 
-    _builderRemoveRule(side, i) {
-      if (side === 'buy') this._builderBuyRules.splice(i, 1);
-      else this._builderSellRules.splice(i, 1);
+    _builderAddGroupAt(side, path) {
+      const arr = this._rulesArrAt(side, path.split('/').filter(x => x !== '').map(Number));
+      if (!arr) return;
+      arr.push({ type: 'group', logic: 'AND', rules: [
+        { left: { type: 'indicator', func: 'ma', args: ['close', 5] }, op: 'cross_above', right: { type: 'indicator', func: 'ma', args: ['close', 20] } },
+      ] });
       this._builderRenderRules(side);
       this._builderRefreshJson();
     }
 
-    _builderUpdateRule(side, i, prop, val) {
-      const arr = side === 'buy' ? this._builderBuyRules : this._builderSellRules;
-      if (arr[i]) { arr[i][prop] = val; this._builderRefreshJson(); }
+    _builderRemoveAt(side, path) {
+      const idx = path.split('/').filter(x => x !== '').map(Number);
+      const last = idx.pop();
+      const arr = this._rulesArrAt(side, idx);
+      if (!arr) return;
+      arr.splice(last, 1);
+      this._builderRenderRules(side);
+      this._builderRefreshJson();
+    }
+
+    _builderRuleProp(side, path, prop, val) {
+      const n = this._nodeAt(side, path);
+      if (n) {
+        n[prop] = val;
+        this._builderRefreshJson();
+        this._builderRenderPreview(side);
+      }
+    }
+
+    _builderGroupLogic(side, path, val) {
+      if (!path) {
+        const el = document.getElementById(side === 'buy' ? 'btBuyLogic' : 'btSellLogic');
+        if (el) el.value = val;
+      } else {
+        const g = this._nodeAt(side, path);
+        if (g) g.logic = val;
+      }
+      this._builderRefreshJson();
+      this._builderRenderPreview(side);
+    }
+
+    _resolvePrefix(prefix) {
+      // v3 S3：prefix 格式 `${side}:${path}:${L|R}`，path 空串 = 根层叶子
+      const m = prefix.match(/^(buy|sell):([0-9/]*):(L|R)$/);
+      if (!m) return null;
+      const node = this._nodeAt(m[1], m[2]);
+      return node ? (m[3] === 'L' ? node.left : node.right) : null;
+    }
+
+    _builderOnRuleChanged(prefix) {
+      const side = (prefix || '').split(':')[0] || 'buy';
+      this._builderRenderRules(side);
+      this._builderRefreshJson();
     }
 
     _builderChangeValType(prefix, newType) {
       const def = this._resolvePrefix(prefix);
       if (!def) return;
       if (newType === 'indicator') { def.type = 'indicator'; def.func = 'ma'; def.args = ['close', 5]; def.field = ''; }
+      else if (newType === 'factor') { def.type = 'factor'; def.factor = 'close_position_20'; }   // v3 S4-B
       else if (newType === 'data') { def.type = 'data'; def.data = 'close'; }
       else { def.type = 'value'; def.value = 0; }
+      this._builderOnRuleChanged(prefix);
+    }
+
+    _builderChangeValFactor(prefix, field) {   // v3 S4-B
+      const def = this._resolvePrefix(prefix);
+      if (!def) return;
+      def.type = 'factor';
+      def.factor = field;
       this._builderOnRuleChanged(prefix);
     }
 
@@ -648,12 +1010,6 @@
       const rule = rules[parseInt(idx)];
       if (!rule) return null;
       return lr === 'L' ? rule.left : rule.right;
-    }
-
-    _builderOnRuleChanged(prefix) {
-      const m = prefix.match(/^(buy|sell)/);
-      if (m) this._builderRenderRules(m[1]);
-      this._builderRefreshJson();
     }
 
     _builderToggleChart(type, on) {
@@ -947,6 +1303,7 @@
         slippage: parseFloat(document.getElementById('btSlippage')?.value) || 0.001,
         adjust_type: document.getElementById('btAdjust')?.value || 'qfq',
         t_plus_1: document.getElementById('btTPlus1')?.checked ?? true,
+        price_limit_mode: document.getElementById('btLimitMove')?.checked === false ? 'off' : 'enforce',
         lot_size: assetType === 'board' ? 1 : (document.getElementById('btLotSize100')?.checked ? 100 : 1),
         stop_loss: parseFloat(document.getElementById('btStopLoss')?.value) || 0,
         take_profit: parseFloat(document.getElementById('btTakeProfit')?.value) || 0,
@@ -1002,6 +1359,7 @@
         slippage: parseFloat(document.getElementById('btSlippage')?.value) || 0.001,
         adjust_type: document.getElementById('btAdjust')?.value || 'qfq',
         t_plus_1: document.getElementById('btTPlus1')?.checked ?? true,
+        price_limit_mode: document.getElementById('btLimitMove')?.checked === false ? 'off' : 'enforce',
         lot_size: assetType === 'board' ? 1 : (document.getElementById('btLotSize100')?.checked ? 100 : 1),
         stop_loss: parseFloat(document.getElementById('btStopLoss')?.value) || 0,
         take_profit: parseFloat(document.getElementById('btTakeProfit')?.value) || 0,
@@ -1059,7 +1417,198 @@
       });
     }
 
+    _HEALTH_META = {
+      ok: { text: '体检通过', cls: 'ok' },
+      no_signal: { text: '零交易', cls: 'warn' },
+      insufficient_bars: { text: '窗口过短', cls: 'warn' },
+      data_gap: { text: '数据缺口', cls: 'warn' },
+      bad_strategy: { text: '条件未生效', cls: 'bad' },
+      invalid_params: { text: '参数不可行', cls: 'muted' },
+      error: { text: '执行出错', cls: 'bad' }
+    };
+
+    _ORIGIN_LABEL = { manual: '手工', batch: '批量', multi: '多策略', research: '研发' };
+
+    _originBadge(origin) {
+      const label = this._ORIGIN_LABEL[origin];
+      if (!label) return '';
+      return '<span class="bt-origin bt-origin-' + origin + '">' + label + '</span>';
+    }
+
+    _renderHealthBadge(r) {
+      const el = document.getElementById('btHealth');
+      if (!el) return;
+      const health = r && r.health;
+      if (!health) { el.style.display = 'none'; return; }
+      const meta = this._HEALTH_META[health] || { text: health, cls: 'muted' };
+      const parts = ['<span class="bt-health-badge">' + meta.text + '</span>'];
+      if (r.health_detail) {
+        parts.push('<span class="bt-health-detail">' + r.health_detail + '</span>');
+      }
+      if (r.expected_bars) {
+        const pct = ((r.coverage_pct || 0) * 100).toFixed(1);
+        parts.push('<span class="bt-health-detail">数据 ' + (r.data_bars || 0) + '/' + r.expected_bars + ' 根（覆盖 ' + pct + '%）</span>');
+      }
+      if (r.trade_count > 0 && !r.trade_sample_ok) {
+        parts.push('<span class="bt-health-detail">样本不足 5 笔，胜率不具统计意义</span>');
+      }
+      el.className = 'bt-health ' + meta.cls;
+      el.innerHTML = parts.join('');
+      el.style.display = 'block';
+    }
+
+    _bindGapEvents() {
+      const box = document.getElementById('btGap');
+      if (!box) return;
+      box.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-gap-run]');
+        if (!btn || btn.disabled) return;
+        const runId = btn.dataset.gapRun;
+        const index = Number(btn.dataset.gapIndex || 0);
+        if (btn.dataset.gapStage === 'rerun') this._rerunAfterHeal(runId, btn);
+        else this._healGap(runId, index, btn);
+      });
+    }
+
+    _renderGapBlock(runId, result) {
+      const el = document.getElementById('btGap');
+      if (!el) return;
+      if (!result || result.health !== 'data_gap') { el.style.display = 'none'; el.innerHTML = ''; return; }
+      let gaps = [];
+      try { gaps = JSON.parse(result.gaps_json || '[]'); } catch (e) { gaps = []; }
+      if (!gaps.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      const pct = (result.coverage_pct === null || result.coverage_pct === undefined)
+        ? '—' : (result.coverage_pct * 100).toFixed(1) + '%';
+      const rows = gaps.map((g, i) =>
+        '<tr><td>' + (g.start || '—') + ' ~ ' + (g.end || '—') + '</td><td>' + (g.missing || 0) + ' 个交易日</td>' +
+        '<td><button class="bt-gap-btn" data-gap-run="' + runId + '" data-gap-index="' + i + '">补这段数据</button></td></tr>').join('');
+      el.innerHTML = '<div class="bt-gap"><div class="bt-gap-hd">数据缺口 ' + gaps.length + ' 段 · 覆盖率 ' + pct +
+        '　<span class="bt-gap-tip">补完这段数据可以点「补完，重跑一次」</span></div><table>' + rows + '</table></div>';
+      el.style.display = 'block';
+    }
+
+    _renderEvalBlock(evaluation, runId) {
+      const el = document.getElementById('btEval');
+      if (!el) return;
+      const meta = {
+        ok:                  { text: '样本内外一致', cls: 'ok' },
+        overfit_suspect:     { text: '过拟合嫌疑', cls: 'bad' },
+        insufficient_sample: { text: '样本不足', cls: 'warn' },
+        oos_negative:        { text: '样本外为负', cls: 'bad' },
+        failed:              { text: '评判失败', cls: 'warn' },
+      };
+      if (!evaluation) {
+        // 评判是后台补跑（设计文档 §7）：首屏看不到属正常，等几秒自动回填
+        el.innerHTML = '<div class="bt-eval empty">样本内外对照 · 尚未评判<span class="bt-eval-note">（正在后台补跑，稍后自动刷新）</span></div>';
+        el.style.display = 'block';
+        if (runId) this._scheduleEvalRefresh(runId, 0);
+        return;
+      }
+      const m = meta[evaluation.verdict] || { text: evaluation.verdict || '未知', cls: 'warn' };
+      const row = (k, v) => '<tr><td>' + k + '</td><td>' + (v === null || v === undefined || v === '' ? '—' : v) + '</td></tr>';
+      let html = '<div class="bt-eval ' + m.cls + '"><div class="bt-eval-hd">样本内外对照 · ' + m.text + '</div><table>';
+      html += row('样本内夏普', evaluation.is_sharpe);
+      html += row('样本外夏普', evaluation.oos_sharpe);
+      html += row('IS/OOS 夏普比', evaluation.sharpe_ratio_io);
+      html += row('切分日', evaluation.split_date);
+      html += '</table>';
+      if (evaluation.verdict === 'overfit_suspect') {
+        html += '<div class="bt-eval-note">IS/OOS 夏普比超过 1.3，按业务规则不得当选最优。</div>';
+      }
+      if (evaluation.verdict === 'insufficient_sample') {
+        html += '<div class="bt-eval-note">样本不足 10 笔，无法区分策略有效与运气。</div>';
+      }
+      if (evaluation.error_message) {
+        html += '<div class="bt-eval-note">' + evaluation.error_message + '</div>';
+      }
+      html += '</div>';
+      el.innerHTML = html;
+      el.style.display = 'block';
+    }
+
+    _scheduleEvalRefresh(runId, attempt) {
+      if (attempt >= 5) {
+        // 5 次仍拿不到评判：这次 run 不在自动评判路径上（批量/多策略/研发路径不自动补跑，见设计文档 §7 偏差 1）
+        const box = document.getElementById('btEval');
+        const note = box ? box.querySelector('.bt-eval-note') : null;
+        if (note) note.textContent = '（本次未自动评判：只有手工回测会自动补跑，可点「重跑一次」再评）';
+        return;
+      }
+      setTimeout(async () => {
+        try {
+          const data = await window.StockRadar.api.getBacktestRunDetail(runId);
+          if (data && data.eval) {
+            this._lastEval = data.eval;
+            this._renderEvalBlock(data.eval, runId);
+          } else {
+            this._scheduleEvalRefresh(runId, attempt + 1);
+          }
+        } catch (e) { /* 静默：评判是后台补跑，失败不影响主结果 */ }
+      }, 6000);
+    }
+
+    async _healGap(runId, gapIndex, btn) {
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '正在建补数任务…';
+      try {
+        const res = await fetch('/api/data/from-gap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ run_id: runId, gap_index: gapIndex })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+        btn.textContent = '补数中…（' + (data.days || 0) + ' 天窗口）';
+        let done = false;
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const r2 = await fetch('/api/data/tasks/' + encodeURIComponent(data.task_id));
+          if (!r2.ok) continue;
+          const task = await r2.json();
+          const st = String((task && task.status) || '');
+          if (st === 'completed' || st === 'done') { done = true; break; }
+          if (st === 'failed' || st === 'cancelled') throw new Error(task.error_message || ('任务状态 ' + st));
+        }
+        btn.disabled = false;
+        if (done) {
+          btn.textContent = '补完，重跑一次';
+          btn.dataset.gapStage = 'rerun';
+        } else {
+          btn.textContent = '补数还在跑，稍后再点一次';
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = label;
+        alert('补数失败：' + ((e && e.message) || e));
+      }
+    }
+
+    async _rerunAfterHeal(runId, btn) {
+      btn.disabled = true;
+      btn.textContent = '正在重跑…';
+      try {
+        const res = await fetch('/api/backtest/runs/' + encodeURIComponent(runId) + '/rerun', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'data_gap_healed' })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+        btn.textContent = '已重跑：' + (data.run_id || '');
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = '重跑失败，再点一次';
+        alert('重跑失败：' + ((e && e.message) || e));
+      }
+    }
+
     _showResult(r, config) {
+      // 空态占位（.bt-empty 是 height:100% 的整屏留白）与进行态都在这里收口：
+      // 历史查看 / 批量钻取路径过去只切 tab 不隐藏它们，结果上方会留一大片空白。
+      const emptyEl = document.getElementById('btEmpty');
+      if (emptyEl) emptyEl.style.display = 'none';
+      document.getElementById('btRunning').classList.remove('visible');
       document.getElementById('btResult').style.display = 'block';
       const s = this.strategies.find(s => s.strategy_id === this.selectedStrategy);
       const adjLabel = config.adjust_type === 'qfq' ? '前复权' : config.adjust_type === 'hfq' ? '后复权' : '不复权';
@@ -1083,6 +1632,10 @@
           </div>`;
       }
 
+      this._renderHealthBadge(r);
+      this._renderGapBlock(this.currentRunId, r);
+      this._renderEvalBlock(this._lastEval, this.currentRunId);
+
       // 警告信息
       const warnEl = document.getElementById('btWarnings');
       if (warnEl && r.warnings && r.warnings.length > 0) {
@@ -1104,28 +1657,35 @@
           <div class="bt-metric"><div class="label">超额收益</div><div class="value ${r.excess_return >= 0 ? 'positive' : 'negative'}">${(r.excess_return * 100).toFixed(2)}%</div></div>` : '';
         const neutralHtml = r.neutral_count > 0 ? `
           <div class="bt-metric"><div class="label">中性交易</div><div class="value neutral">${r.neutral_count} 笔</div></div>` : '';
+        // P1：多重检验校正夏普（DSR>95% 视为统计显著；N = 试过的次数）
+        const dsrHtml = r.deflated_sharpe != null ? `
+          <div class="bt-metric" title="试了 N 次后的多重检验校正：夏普非「运气所致」的概率（>95% 视为显著）"><div class="label">校正夏普(DSR)</div><div class="value ${r.deflated_sharpe >= 0.95 ? 'positive' : 'neutral'}">${(r.deflated_sharpe * 100).toFixed(1)}%<span style="font-size:10px;color:var(--muted);margin-left:4px;">N=${r.trial_count || 1}</span></div></div>` : '';
         metrics.innerHTML = `
           <div class="bt-metric"><div class="label">总收益率</div><div class="value ${r.total_return >= 0 ? 'positive' : 'negative'}">${(r.total_return * 100).toFixed(2)}%</div></div>
           <div class="bt-metric"><div class="label">年化收益率</div><div class="value ${r.annual_return >= 0 ? 'positive' : 'negative'}">${(r.annual_return * 100).toFixed(2)}%</div></div>
-          <div class="bt-metric"><div class="label">夏普比率</div><div class="value neutral">${(r.sharpe_ratio || 0).toFixed(2)}</div></div>
+          <div class="bt-metric"><div class="label">夏普比率</div><div class="value neutral">${r.sharpe_ratio != null ? r.sharpe_ratio.toFixed(2) : '—'}</div></div>
           <div class="bt-metric"><div class="label">最大回撤</div><div class="value negative">${((r.max_drawdown || 0) * 100).toFixed(2)}%</div></div>
           <div class="bt-metric"><div class="label">Calmar 比率</div><div class="value neutral">${(r.calmar_ratio || 0).toFixed(2)}</div></div>
-          <div class="bt-metric"><div class="label">胜率</div><div class="value neutral">${((r.win_rate || 0) * 100).toFixed(1)}%</div></div>
+          <div class="bt-metric"><div class="label">胜率</div><div class="value neutral">${r.win_rate == null ? '—' : (r.win_rate * 100).toFixed(1) + '%'}</div></div>
           <div class="bt-metric"><div class="label">盈亏比</div><div class="value neutral">${(r.profit_factor || 0).toFixed(2)}</div></div>
           <div class="bt-metric"><div class="label">交易次数</div><div class="value neutral">${r.trade_count || 0}</div></div>
           <div class="bt-metric"><div class="label">最大连续盈利</div><div class="value positive">${r.max_consecutive_wins || 0} 次</div></div>
           <div class="bt-metric"><div class="label">最大连续亏损</div><div class="value negative">${r.max_consecutive_losses || 0} 次</div></div>
           <div class="bt-metric"><div class="label">平均持仓天数</div><div class="value neutral">${r.avg_holding_days || 0} 天</div></div>
           <div class="bt-metric"><div class="label">最终资产</div><div class="value positive">¥${(r.final_equity || 0).toLocaleString()}</div></div>
-          ${benchmarkHtml}${neutralHtml}`;
+          ${benchmarkHtml}${neutralHtml}${dsrHtml}`;
       }
 
+      // 收益归因瀑布：解释"总收益率"这个数字是怎么来的，放在净值曲线之前
+      this._renderWaterfall(r, config);
       // 净值曲线（含基准对比）
       if (r.equity_curve?.length > 0) this._renderEquityChart(r.equity_curve, r);
       // 回撤曲线
       if (r.drawdown_curve?.length > 0) this._renderDrawdownChart(r.drawdown_curve);
-      // 月度热力图
+      // 月度热力图（A 股惯例：涨红跌绿）
       if (r.monthly_returns) this._renderMonthlyHeatmap(r.monthly_returns);
+      // 分年拆解（P1）
+      if (r.yearly_stats) this._renderYearlyTable(r.yearly_stats);
       // 交易记录
       if (r.trades?.length > 0) this._renderTrades(r.trades);
       // 行情 K 线 + 买卖点
@@ -1201,6 +1761,127 @@
       window.addEventListener('resize', () => chart.resize());
     }
 
+    // ── 收益归因瀑布（借 lieflat F9 的语法）──
+    // 从「按理想价成交」一路走到「净收益」，每段是一笔可归因的损耗。
+    // 跳数锚定在净值收益上反推，四段必然闭合：
+    //   净值 + 费用 = 成交收益；成交收益 + 滑点 = 理想价收益
+    _renderWaterfall(r, config) {
+      const old = document.getElementById('btWaterfallBox');
+      if (old) old.remove();
+      const trades = r.trades || [];
+      if (!trades.length) return;
+      const cash = (config && config.initial_cash) || r.initial_cash || 0;
+      if (!cash) return;
+
+      let feeAbs = 0, slipAbs = 0;
+      trades.forEach((t) => {
+        feeAbs += Number(t.commission) || 0;
+        slipAbs += Number(t.slippage_cost) || 0;
+      });
+      const net = Number(r.total_return) || 0;
+      const fee = feeAbs / cash;
+      const slip = slipAbs / cash;
+      // 两段损耗都接近 0 时没有可归因的东西，不画
+      if (fee < 0.0005 && slip < 0.0005) return;
+
+      const trade = net + fee;
+      const ideal = trade + slip;
+      const steps = [
+        { label: '理想价收益', v: ideal, kind: 'total' },
+        { label: '滑点', v: -slip, kind: 'delta' },
+        { label: '成交收益', v: trade, kind: 'subtotal' },
+        { label: '交易费用', v: -fee, kind: 'delta' },
+        { label: '净收益', v: net, kind: 'total' },
+      ];
+
+      const W = 900, H = 300, L = 72, R = 24, TOP = 30, BASE = 238;
+      const vals = steps.map(s => s.v);
+      const hi = Math.max(...vals) * 1.18, lo = Math.min(0, ...vals) * 1.15;
+      const Y = v => BASE - (v - lo) / (hi - lo) * (BASE - TOP);
+      const slot = (W - L - R) / steps.length;
+      const BW = Math.min(72, slot * 0.5);
+      const INK = '#1C1C1A', MUTED = '#8F8E88', UP = '#E74C3C', DOWN = '#176B5B';
+
+      let s = '';
+      const gstep = (hi - lo) > 0.2 ? 0.05 : 0.02;
+      for (let g = Math.ceil(lo / gstep) * gstep; g <= hi + 1e-9; g += gstep) {
+        const isZero = Math.abs(g) < 1e-9;
+        s += `<line x1="${L - 16}" y1="${Y(g)}" x2="${W - R}" y2="${Y(g)}"`
+          + ` stroke="${isZero ? '#B0AFA9' : '#F2F3F0'}" stroke-width="${isZero ? 1.3 : 1}"/>`;
+        s += `<text x="${L - 22}" y="${Y(g) + 3.5}" font-size="8.5"`
+          + ` fill="${isZero ? '#6B7280' : MUTED}" text-anchor="end">${(g * 100).toFixed(0)}%</text>`;
+      }
+      let prev = 0;
+      steps.forEach((st, i) => {
+        const v = st.v;
+        const cx = L + slot * i + slot / 2;
+        const x = cx - BW / 2;
+        const y0 = st.kind === 'delta' ? Y(prev) : Y(0);
+        const y1 = st.kind === 'delta' ? Y(prev + v) : Y(v);
+        const top = Math.min(y0, y1), h = Math.max(2, Math.abs(y1 - y0));
+        const fill = st.kind === 'delta' ? (v >= 0 ? UP : DOWN) : (st.kind === 'total' ? INK : MUTED);
+        s += `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${BW}" height="${h.toFixed(1)}"`
+          + ` rx="3" fill="${fill}"/>`;
+        const labY = (st.kind === 'delta' ? (v >= 0 ? top - 6 : top + h + 12)
+          : (v >= 0 ? top - 6 : top + h + 12));
+        s += `<text x="${cx}" y="${labY.toFixed(1)}" font-size="10" font-weight="700"`
+          + ` fill="${st.kind === 'delta' ? fill : INK}" text-anchor="middle">`
+          + `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%</text>`;
+        s += `<text x="${cx}" y="${BASE + 20}" font-size="9.5" fill="#4B5563"`
+          + ` text-anchor="middle">${st.label}</text>`;
+        if (i < steps.length - 1) {
+          const nx = L + slot * (i + 1) + slot / 2 - BW / 2;
+          const yLink = st.kind === 'delta' ? Y(prev + v) : Y(v);
+          s += `<line x1="${(x + BW).toFixed(1)}" y1="${yLink.toFixed(1)}" x2="${nx}"`
+            + ` y2="${yLink.toFixed(1)}" stroke="#D8D7D1" stroke-width="1" stroke-dasharray="2 3"/>`;
+        }
+        prev = st.kind === 'delta' ? prev + v : v;
+      });
+
+      // 佣金口径体检：按配置费率重算一遍，比对记录值。
+      // 修复前（backtrader 把万三又除以 100）记录值会明显偏低。
+      const cfg = config || {};
+      const cRate = Number(cfg.commission) || 0.0003;
+      const minComm = Number(cfg.min_commission) || 5;
+      const sRate = Number(cfg.stamp_tax) || 0.0005;
+      const tRate = Number(cfg.transfer_fee) || 0.00001;
+      let feeFixed = 0;
+      trades.forEach((t) => {
+        const amt = Number(t.amount) || 0;
+        let c = Math.max(amt * cRate, minComm) + amt * tRate;
+        if (t.direction === 'sell') c += amt * sRate;
+        feeFixed += c;
+      });
+      const stale = feeFixed > 0 && feeAbs < feeFixed * 0.7;
+      const note = stale
+        ? `<span style="margin-left:10px;font-size:10.5px;color:#B45309;`
+          + `background:#FBF7EC;border:1px solid #EFE3C4;border-radius:99px;padding:1px 8px">`
+          + `佣金口径待重跑：记录 ${feeAbs.toFixed(0)} 元，按费率应为 ${feeFixed.toFixed(0)} 元</span>`
+        : '';
+      // 笔数用 trade_count（回合数）：trades.length 是买卖单数，和指标卡的"交易次数"对不上
+      const sub = [r.stock_name, (config && config.strategy_name) || '',
+        `${r.trade_count || trades.length} 笔`].filter(Boolean).join(' · ');
+
+      const box = document.createElement('div');
+      box.className = 'bt-chart-box';
+      box.id = 'btWaterfallBox';
+      box.innerHTML =
+        `<div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-bottom:2px">`
+        + `<h3 style="margin:0;font-size:14px">收益归因 · 钱被什么吃掉了</h3>`
+        + `<span style="font-size:11px;color:#8a8b86">${sub}</span>${note}</div>`
+        + `<div style="font-size:11px;color:#8a8b86;margin:2px 0 8px">`
+        + `净值 ${(net * 100).toFixed(2)}% = 理想价收益 − 滑点 − 交易费用。`
+        + `滑点已体现在成交价里，费用含佣金与印花税。</div>`
+        + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${s}</svg>`
+        + `<div style="font-size:10px;color:#9a9b96;letter-spacing:.05em;margin-top:2px">`
+        + `BLACK = 求和项 · GREY = 中间态 · GREEN = 被吃掉的（负向损耗）</div>`;
+
+      const eqBox = document.getElementById('btEquityChartBox');
+      if (eqBox && eqBox.parentElement) {
+        eqBox.parentElement.insertBefore(box, eqBox);
+      }
+    }
+
     _renderDrawdownChart(curve) {
       const el = document.getElementById('btDrawdownChart');
       if (!el || typeof echarts === 'undefined') return;
@@ -1233,15 +1914,41 @@
         years.forEach(y => {
           const v = (monthly[y] || [0,0,0,0,0,0,0,0,0,0,0,0])[mi] || 0;
           let bg, color;
+          // A 股惯例：涨红跌绿（对齐 --up 红 / --down 绿 项目配色变量）
           if (v === 0) { bg = '#f3f4f6'; color = '#9ca3af'; }
-          else if (v > 0) { bg = `rgba(23,107,91,${Math.min(v / 8, 0.9)})`; color = v > 4 ? '#fff' : '#176b5b'; }
-          else { bg = `rgba(231,76,60,${Math.min(Math.abs(v) / 4, 0.9)})`; color = v < -2 ? '#fff' : '#e74c3c'; }
+          else if (v > 0) { bg = `rgba(231,76,60,${Math.min(v / 8, 0.9)})`; color = v > 4 ? '#fff' : '#e74c3c'; }
+          else { bg = `rgba(23,107,91,${Math.min(Math.abs(v) / 4, 0.9)})`; color = v < -2 ? '#fff' : '#176b5b'; }
           html += `<div class="heatmap-cell" style="width:48px;height:32px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;font-family:var(--font-mono);background:${bg};color:${color};">${v > 0 ? '+' : ''}${v === 0 ? '—' : v.toFixed(1) + '%'}</div>`;
         });
         html += '</div>';
       });
       html += '</div>';
       el.innerHTML = html;
+    }
+
+    _renderYearlyTable(yearly) {
+      // P1 分年拆解：年份 | 收益 | 夏普 | 最大回撤 | 交易
+      const el = document.getElementById('btYearlyTable');
+      if (!el) return;
+      const years = Object.keys(yearly || {}).sort().reverse();
+      if (!years.length) {
+        el.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px;">无分年数据（区间不足或数据缺失）</div>';
+        return;
+      }
+      const rows = years.map(y => {
+        const d = yearly[y] || {};
+        const ret = d.ret;
+        const retCls = ret == null ? '' : (ret >= 0 ? 'profit' : 'loss');
+        const retTxt = ret == null ? '—' : (ret >= 0 ? '+' : '') + Number(ret).toFixed(2) + '%';
+        const sh = d.sharpe == null ? '—' : Number(d.sharpe).toFixed(2);
+        const mdd = d.mdd == null ? '—' : '-' + Number(d.mdd).toFixed(2) + '%';
+        const tr = (d.trades == null) ? '—' : d.trades;
+        return `<tr><td class="mono">${y}</td><td class="mono ${retCls}">${retTxt}</td>` +
+               `<td class="mono">${sh}</td><td class="mono loss">${mdd}</td><td class="mono">${tr}</td></tr>`;
+      }).join('');
+      el.innerHTML = `<table class="trades-table"><thead><tr>
+        <th>年份</th><th>收益</th><th>夏普</th><th>最大回撤</th><th>交易</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     _renderTrades(trades) {
@@ -1285,6 +1992,7 @@
 
       // 获取最终结果
       const data = await window.StockRadar.api.getBacktestRunDetail(runId);
+      this._lastEval = data.eval || null;
       const status = data.run?.status;
       if (status === 'completed') return this._normalizeResult(data);
       if (status === 'failed') throw new Error(data.run?.error_message || '回测失败');
@@ -1352,6 +2060,7 @@
         equity_curve: r.equity_curve || r.equity_curve_json || [],
         drawdown_curve: r.drawdown_curve || r.drawdown_curve_json || [],
         monthly_returns: r.monthly_returns || r.monthly_returns_json || {},
+        yearly_stats: r.yearly_stats || r.yearly_stats_json || null,
       };
     }
 
@@ -1411,7 +2120,7 @@
                 const assetLabel = { stock: '个股', etf: 'ETF', index: '指数', board: '板块' }[assetType] || '个股';
                 const assetBadge = { stock: '', etf: 'style="color:#7c3aed"', index: 'style="color:#0369a1"', board: 'style="color:#b45309"' }[assetType] || '';
                 return `<tr>
-                  <td><code style="font-family:var(--font-mono);font-size:11px">${r.run_id}</code></td>
+                  <td><code style="font-family:var(--font-mono);font-size:11px">${r.run_id}</code>${this._originBadge(r.origin)}</td>
                   <td>${r.stock_name || r.code} <span style="font-size:10px;padding:1px 5px;border-radius:4px;background:var(--border-light);margin-left:4px;" ${assetBadge}>${assetLabel}</span></td>
                   <td>${r.strategy_name || r.strategy_id}</td>
                   <td><span class="dc-badge ${statusCls}"><span class="dot"></span>${statusLabel}</span></td>
@@ -1422,6 +2131,8 @@
                   <td style="font-size:11px;color:var(--muted)">${r.created_at || ''}</td>
                   <td>
                 ${r.status === 'completed' ? `<button class="dc-btn dc-btn-sm" onclick="_btPanel.viewRun('${r.run_id}')">查看</button>` : ''}
+                ${this.strategies.some(s => s.strategy_id === r.strategy_id) ? `<button class="dc-btn dc-btn-sm" title="打开这个策略的详情：回测记录 / 评判 / 前瞻 / 落地" onclick="_btPanel.openLifecycle('${this._esc(r.strategy_id)}')">策略详情</button>` : ''}
+                ${r.origin === 'research' && r.ref_id ? `<button class="dc-btn dc-btn-sm" title="看这一次研发的每一轮想法与改动" onclick="_btPanel.openResearchRun('${this._esc(r.ref_id)}')">研发过程</button>` : ''}
                 ${r.status === 'failed' ? `<button class="dc-btn dc-btn-sm" style="color:#dc2626;border-color:#dc2626;" onclick="_btPanel._deleteFailedItem('run','${r.run_id}')">删除</button>` : ''}
               </td>
                 </tr>`;
@@ -1561,6 +2272,7 @@
           const config = JSON.parse(data.run?.config_json || '{}');
           const result = this._normalizeResult(data);
           this.currentRunId = runId;
+          this._lastEval = data.eval || null;
           this._showResult(result, config);
         }
       } catch (e) { alert('加载失败: ' + (e.message || e)); }
@@ -1757,6 +2469,7 @@
         slippage: parseFloat(document.getElementById('btSlippage')?.value) || 0.001,
         adjust_type: document.getElementById('btAdjust')?.value || 'qfq',
         t_plus_1: document.getElementById('btTPlus1')?.checked ?? true,
+        price_limit_mode: document.getElementById('btLimitMove')?.checked === false ? 'off' : 'enforce',
         lot_size: assetType === 'board' ? 1 : (document.getElementById('btLotSize100')?.checked ? 100 : 1),
         stop_loss: parseFloat(document.getElementById('btStopLoss')?.value) || 0,
         take_profit: parseFloat(document.getElementById('btTakeProfit')?.value) || 0,
@@ -1866,7 +2579,7 @@
           <div class="hero-metrics">
             <div class="hero-metric"><div class="val">${stratName} × ${best.code_name || best.code}</div><div class="lbl">策略 × 标的</div></div>
             <div class="hero-metric"><div class="val" style="color:#ffd700">${best.total_return >= 0 ? '+' : ''}${((best.total_return||0)*100).toFixed(2)}%</div><div class="lbl">总收益</div></div>
-            <div class="hero-metric"><div class="val">${(best.sharpe_ratio||0).toFixed(2)}</div><div class="lbl">夏普比率</div></div>
+            <div class="hero-metric"><div class="val">${best.sharpe_ratio != null ? best.sharpe_ratio.toFixed(2) : '—'}</div><div class="lbl">夏普比率</div></div>
             <div class="hero-metric"><div class="val">${((best.max_drawdown||0)*100).toFixed(2)}%</div><div class="lbl">最大回撤</div></div>
           </div>
         </div>`;
@@ -2111,6 +2824,7 @@
         const config = JSON.parse(data.run?.config_json || '{}');
         const result = this._normalizeResult(data);
         this.currentRunId = runId;
+        this._lastEval = data.eval || null;
         this._showResult(result, config);
       } catch (e) { alert('加载失败: ' + (e.message || e)); }
     }

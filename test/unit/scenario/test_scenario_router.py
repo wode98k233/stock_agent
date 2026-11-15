@@ -14,6 +14,11 @@
 import os
 import sys
 
+import pytest
+
+# 个股名称表在库里（kind='stock'，数据源 data/symbol_aliases.json）：用临时库，不读本机真库
+pytestmark = pytest.mark.usefixtures("symbol_alias_db")
+
 # 确保项目根目录在 sys.path 中
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _project_root not in sys.path:

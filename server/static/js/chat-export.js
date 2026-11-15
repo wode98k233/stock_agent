@@ -19,6 +19,10 @@ window.StockRadar.chatExport = (() => {
   // canvas 单边上限保护（Chrome 单边上限 32767，留内存余量）
   const MAX_CANVAS_SIDE = 8192;
 
+  // 本地 vendor 优先：jsdelivr 在部分网络（含本机）不可达 —— 打包导出会静默失败。
+  // 离线包缺失时才回退 CDN（部署在无外网的机器上时，vendor 里必须有这个文件，见
+  // server/static/README.md「离线资源清单」）。
+  const JSZIP_LOCAL = "/static/vendor/jszip.min.js";
   const JSZIP_CDN = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
 
   function downloadBlob(blob, filename) {
@@ -79,8 +83,13 @@ window.StockRadar.chatExport = (() => {
 
   async function ensureJSZip() {
     if (window.JSZip) return window.JSZip;
-    await loadScriptOnce(JSZIP_CDN, "JSZip");
-    if (!window.JSZip) throw new Error("JSZip 未加载");
+    try {
+      await loadScriptOnce(JSZIP_LOCAL, "JSZip");
+    } catch (e) {
+      /* 本地 vendor 缺失（离线包没打全）时才回退 CDN */
+    }
+    if (!window.JSZip) await loadScriptOnce(JSZIP_CDN, "JSZip");
+    if (!window.JSZip) throw new Error("JSZip 未加载（离线包缺少 /static/vendor/jszip.min.js，见 server/static/README.md）");
     return window.JSZip;
   }
 
@@ -129,6 +138,35 @@ window.StockRadar.chatExport = (() => {
         cacheBust: true,
         filter: defaultFilter,
       });
+    } finally {
+      document.head.removeChild(style);
+    }
+  }
+
+  /* ── 通用元素截图为 PNG（研究台账报告等自建离屏容器复用） ──
+     与 bubbleToPngBlob 的差别：调用方自己控制像素比与尺寸（报告容器宽 1240px、
+     高由内容决定），也不做 status-bubble 过滤（离屏容器里没有这些节点）。
+     ⚠️ 目标元素必须由调用方「可见地」放在文档流里（fixed 定位在 (0,0) 亦可），
+     不能用负坐标离屏——html-to-image 通过 <svg><foreignObject> 渲染克隆树，
+     负坐标内容会落到视口外被整体裁剪成空白图（见 renderGroupToBlob 同款注释）。 */
+  async function elementToPngBlob(el, opts = {}) {
+    if (!el) throw new Error("元素不存在");
+    await ensureHtmlToImage();
+    const style = applyExportGuardStyle();
+    try {
+      const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+      const width = opts.width || (rect && rect.width) || el.scrollWidth || el.offsetWidth;
+      const height = opts.height || el.scrollHeight || (rect && rect.height) || el.offsetHeight;
+      const blob = await htmlToImage.toBlob(el, {
+        backgroundColor: opts.backgroundColor || "#ffffff",
+        pixelRatio: opts.pixelRatio || Math.min(window.devicePixelRatio || 1, 2),
+        cacheBust: true,
+        width: width ? Math.ceil(width) : undefined,
+        height: height ? Math.ceil(height) : undefined,
+        filter: opts.filter,
+      });
+      if (!blob) throw new Error("图片生成失败");
+      return blob;
     } finally {
       document.head.removeChild(style);
     }
@@ -377,6 +415,7 @@ window.StockRadar.chatExport = (() => {
   return {
     downloadBlob,
     bubbleToPngBlob,
+    elementToPngBlob,
     copyBubbleAsImage,
     exportBubbleAsImage,
     exportBubbleSliced,
@@ -384,5 +423,6 @@ window.StockRadar.chatExport = (() => {
     collectBlocks,
     sliceBlocks,
     computeRatio,
+    ensureHtmlToImage,
   };
 })();

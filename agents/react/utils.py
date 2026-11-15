@@ -14,9 +14,10 @@ import time
 from collections import defaultdict
 from typing import Set, Callable, Awaitable
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from utils.llm_factory import get_compress_llm, ainvoke_with_retry
+from utils.memory import strip_history_markers
 
 # 工具输出压缩的重试次数（不含首次调用）。
 #
@@ -26,6 +27,13 @@ from utils.llm_factory import get_compress_llm, ainvoke_with_retry
 # 同批次其余压缩全部阻塞在首条上——一次 429 就能把整批工具调用拖住 3 分钟。
 # 3 次退避期望 ~3.5s、最坏 7s，足以吃掉绝大多数 rpm 抖动，又不会拖垮批次。
 _TOOL_COMPRESS_MAX_RETRIES = 3
+
+# 不做 LLM 二次压缩的工具（PRD-A9 §2.3.3）。
+# activate_skill 的返回值就是 usage_guide 原文，再压缩会把口径截成半句话。
+# web_fetch：它存在的理由就是**原文**（摘要已经由 web_search 的 summary 提供）——
+#   压一遍等于把这次抓取白花（还已经付过 ¥0.005 的按次费）。体积另有自己的
+#   `max_chars`（默认 8000）+ 硬截断兜底，不会失控。
+_COMPRESS_EXEMPT_TOOLS = frozenset({"activate_skill", "web_fetch"})
 
 
 class PerToolRateLimiter:
@@ -377,6 +385,10 @@ async def _compress_tool_output(tool_name: str, content: str, logger, user_goal:
     立刻吞掉并回落原文，导致 provider 限流时压缩整批失效）。重试耗尽仍失败则
     静默回落原文——压缩是可选优化，不该让工具执行失败。
     """
+    # activate_skill 的输出就是 usage_guide 本身，再走一遍 LLM 压缩会直接损坏口径
+    # （"回落策略"、"市场级 vs 个股级"这类半句话被截掉，模型就会用错工具）。
+    if tool_name in _COMPRESS_EXEMPT_TOOLS:
+        return content
     try:
         llm = get_compress_llm()
         user_parts = []
@@ -426,6 +438,16 @@ def clean_history_messages(history: list, user_input: str) -> list:
     seen_current_user = False
 
     for item in history:
+        # 图表 UUID / 仪表盘 JSON 只服务前端渲染；进 prompt 前统一剥掉（与记忆重放同口径）
+        if isinstance(item, BaseMessage) and isinstance(item.content, str):
+            stripped = strip_history_markers(item.content)
+            if stripped != item.content:
+                item = item.model_copy(update={"content": stripped})
+        elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], str):
+            stripped = strip_history_markers(item[1])
+            if stripped != item[1]:
+                item = (item[0], stripped)
+
         if isinstance(item, AIMessage) and not item.content and not (item.tool_calls or []):
             continue
 

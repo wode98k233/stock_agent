@@ -22,7 +22,17 @@
   --brand-bg: #e8f5e9;
   --brand-bg-light: #f0faf2;
   --brand-glow: rgba(23, 107, 91, 0.12);
+  --strategy-accent: #6d4bc4; /* 策略会话主色（与品牌绿区分，见设计文档 §5.2.1） */
+  --strategy-accent-light: #f3ecfd;
+  --strategy-accent-border: #c9aef2;
+  --chart-is: #7fb3a8; /* 策略研究净值曲线：样本内浅色段（样本外用 --brand） */
   --accent: #2f6f9f;
+  /* 上下文洞察（总览大屏 · 会话上下文档案）两段环色：色相刻意拉开（靛 / 青），
+     小尺寸迷你环也要能一眼分辨。来源 docs/prototypes/2026-10-17-context-insight.html
+     的 section#skinB（原型 skinB 的 --c7 / --c8）。大环 ovCompositionRing 与会话卡
+     迷你环共用同一组色、同一语义（输出 = 思考 + 回答，见 context_stats.py 铁律 2）。 */
+  --insight-think: #4f46e5;   /* 上下文洞察：思考段（原型 skinB --c7 靛） */
+  --insight-answer: #0891b2;  /* 上下文洞察：回答段（原型 skinB --c8 青） */
   --warn: #9a6700;
   --warning: #f59e0b;
   --warning-bg: #fffbeb;

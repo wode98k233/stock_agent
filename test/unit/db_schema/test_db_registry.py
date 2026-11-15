@@ -1,4 +1,4 @@
-"""registry 库注册表测试：16 库登记齐全、表数正确、迁移归集有效。"""
+"""registry 库注册表测试：17 库登记齐全、表数正确、迁移归集有效。"""
 import sqlite3
 
 from utils.db_schema.registry import ALL_DBS, get_db_def, list_dbs
@@ -12,15 +12,16 @@ def test_all_registered():
         "market_cache", "akshare_cache", "baostock_cache",
         "agent_trace", "signal_eval", "monitor_alerts",
         "stock_memory", "data_monitor", "eval", "shortline", "thesis",
-        "crowding",
+        "crowding", "deep_report",
     }
 
 
 def test_list_dbs():
     out = list_dbs()
-    assert len(out) == 16
+    assert len(out) == 17
     assert any(k == "agent_trace" for k, _, _ in out)
     assert any(k == "crowding" for k, _, _ in out)
+    assert any(k == "deep_report" for k, _, _ in out)
 
 
 def test_get_db_def():
@@ -29,6 +30,7 @@ def test_get_db_def():
     assert {t.name for t in d.tables} == {
         "dialog", "web_dialogs", "web_messages", "watchlist",
         "portfolio_trade", "portfolio_position", "portfolio_account",
+        "portfolio_snapshot", "portfolio_snapshot_position",
         "group_messages", "chart_fragments",
     }
     # 迁移归集：portfolio_position / portfolio_account 的补列逻辑进了特殊迁移

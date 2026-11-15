@@ -508,7 +508,10 @@ def test_build_prompt_req_mentions_raw_material():
 
     template = evaluate(load_template("theme_trading"), {})
     messages = _build_prompt(template, {}, "9月市场总结", raw_result=_rich_raw())
-    assert "原始素材" in messages[1][1]
+    # PRD-A9 §3.1：system 三条调用共享且恒定；「核心要求第 1 条」在 system 里
+    assert "原始素材" in messages[0][1]
+    # 原始素材本体作为独立 user 消息下传
+    assert any("原始素材" in c for r, c in messages if r == "user")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -557,11 +560,99 @@ def test_quick_template_prompt_requests_brevity():
 
     t = evaluate(load_template("quick_lookup"), {})
     messages = _build_prompt(t, {}, "给我获取下今世缘最新的股价，只需要这个就行了", raw_result="")
+    # PRD-A9 §3.1：篇幅口径已从 system 下沉到 user[0]（system 必须模板恒定）
+    all_text = " ".join(c for _, c in messages)
     sys_all = " ".join(c for r, c in messages if r == "system")
 
-    assert "简洁优先" in sys_all
-    assert "禁止补充用户没要的板块" in sys_all
-    assert "长文与版式要求" not in sys_all      # 长文要求不得出现
+    assert "简洁优先" in all_text
+    assert "禁止补充用户没要的板块" in all_text
+    assert "长文与版式要求" not in all_text    # 长文要求不得出现（无论 system 还是 user）
+
+
+# ══════════════════════════════════════════════════════════════
+# 扩写 fork 的 tools 绑定（2026-10-17 缓存归因实测）
+# 实测（同一 run 逐调用比对 trace）：同一个消息前缀，
+#   report-fast   绑 52 个工具 / 12,813 字符 → cached 31,872（93%）
+#   report-expand 绑 0 个工具              → cached 2,048（7%，provider 最小块）
+# tools 数组是前缀的**位置 0**，不绑 = 前缀错位归零。而
+# `build_conversation_messages` 只返回消息列表，tools 必须由调用方绑定
+# （`agents/shared/llm_fork.py` 模块 docstring 约束 2）。
+# ══════════════════════════════════════════════════════════════
+
+def _expand_args():
+    """扩写用例公共入参：普通模板（min_report_tokens > 0）+ 远低于门槛的短报告。"""
+    from agents.analysis.template_store import evaluate, load_template
+
+    template = evaluate(load_template("theme_trading"), {})
+    return template, "短报告，远低于最低篇幅门槛。", "宁德时代最近的走势怎么看"
+
+
+class _FakeReportLLM:
+    """记录 bind_tools 收到的数组，并返回绑定后的自身（与 LangChain 语义一致）。"""
+
+    def __init__(self):
+        self.bound_with = None
+        self.bind_calls = 0
+
+    def bind_tools(self, tools):
+        self.bind_calls += 1
+        self.bound_with = tools
+        return self
+
+
+def _capture_invoke(seen):
+    def _fake(target, messages, logger, **kw):
+        seen["llm"] = target
+        seen["messages"] = list(messages)
+        seen["label"] = kw.get("label")
+        seen["fork_kind"] = (kw.get("metadata") or {}).get("fork_kind")
+        from types import SimpleNamespace
+        return SimpleNamespace(content="扩写后的长报告")
+    return _fake
+
+
+def test_expand_fork_binds_the_same_conversation_tools(monkeypatch):
+    """⚠️ 走 fork 分支时，发给 LLM 的实例必须绑上与 agent/report-fast 同一份 tools。
+
+    少了这一步，`tracked_invoke` 发出去的 payload 位置 0 没有 tools 数组，
+    整条前缀与 agent 已热前缀错位 → 缓存只剩 provider 最小块（实测 7% vs 93%）。
+    """
+    from agents.analysis import report_builder as rb
+
+    template, short, question = _expand_args()
+    convo = [("system", "SYS"), ("human", "Q"), ("tool", "R")]
+    tools = [{"type": "function", "function": {"name": "iwc_query"}}]
+    llm, seen = _FakeReportLLM(), {}
+    monkeypatch.setattr("utils.llm_factory.tracked_invoke", _capture_invoke(seen))
+
+    out = rb._expand_report_if_short(short, template, question, llm, MagicMock(),
+                                     conversation=convo, conversation_tools=tools)
+
+    assert out == "扩写后的长报告"
+    assert seen["label"] == "report-expand"
+    assert seen["fork_kind"] == "llm_fork"                 # 确实是 fork 分支，不是兜底
+    assert seen["llm"] is llm                              # 传下去的是绑定后的实例
+    assert llm.bind_calls == 1 and llm.bound_with is tools  # 绑的是同一份数组（非拷贝）
+    assert seen["messages"][:-1] == convo                   # 前缀逐条未被改写
+
+
+def test_expand_nonfork_path_binds_nothing(monkeypatch):
+    """对照组：兜底路径（无对话 / 无工具）不得绑定 —— 那条路没有前缀可对齐。
+
+    它发的是新拼的 [system, user] 两条消息，多带 8k tools 只会白付输入成本。
+    """
+    from agents.analysis import report_builder as rb
+
+    template, short, question = _expand_args()
+    llm, seen = _FakeReportLLM(), {}
+    monkeypatch.setattr("utils.llm_factory.tracked_invoke", _capture_invoke(seen))
+
+    out = rb._expand_report_if_short(short, template, question, llm, MagicMock())
+
+    assert out == "扩写后的长报告"
+    assert seen["fork_kind"] == "standalone"    # _nonfork_meta("no_conversation")
+    assert llm.bind_calls == 0 and llm.bound_with is None
+    assert [m[0] for m in seen["messages"]] == ["system", "user"]
 
 
 def test_normal_template_keeps_long_form_requirement():
@@ -571,6 +662,7 @@ def test_normal_template_keeps_long_form_requirement():
 
     t = evaluate(load_template("sector_timing"), {})
     messages = _build_prompt(t, {}, "板块还能追吗", raw_result="")
-    sys_all = " ".join(c for r, c in messages if r == "system")
-    assert "长文与版式要求" in sys_all
-    assert "全文目标" in sys_all
+    # PRD-A9 §3.1：篇幅口径已从 system 下沉到 user[0]
+    all_text = " ".join(c for _, c in messages)
+    assert "长文与版式要求" in all_text
+    assert "全文目标" in all_text

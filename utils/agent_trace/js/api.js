@@ -21,6 +21,19 @@ async function loadRunDetailAPI(runId) {
   } catch(e) { console.error('API detail failed:', e); return null; }
 }
 
+/* 单 run 上下文快照（口径见 utils/agent_trace/context_stats.py 顶部）。
+   接口异常 / run 不存在都会返回 null —— 前端只区分「有快照」与「不可用」两种情况。 */
+async function loadRunContext(runId) {
+  try {
+    const res = await fetch(`${S.apiBase}/api/runs/${runId}/context`);
+    const data = await res.json();
+    return data && data.error ? null : data;
+  } catch (e) {
+    console.error('context load failed:', e);
+    return null;
+  }
+}
+
 function loadFromJSON(data) {
   S.runs = data.runs || [data.run];
   render();

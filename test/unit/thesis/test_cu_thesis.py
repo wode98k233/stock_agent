@@ -138,7 +138,8 @@ class TestCuDefinition:
         for k in st["pos_keys"]:
             table = defn["thresholds"][by_key[k]["thresholds_key"]]
             real_max += max(r[2] for r in table)
-        assert st["pos_full"] == real_max == 8
+        # v1.1：位置轴由 4 项改为 3 项（删掉与 rank 相关 0.85 的 ma），满分 8 → 6
+        assert st["pos_full"] == real_max == 6
 
     def test_position_keys_are_not_in_the_drive_axis(self, defn):
         """两条轴必须正交：位置因子不得出现在 drive_keys 里。"""
@@ -546,17 +547,18 @@ class TestMomentumRank:
 
 class TestPositionPolarityContract:
     def test_cu_score_signs_are_internally_consistent(self):
-        """cu 的四个位置动量因子中，⑤⑥⑦ 低/便宜给正分、⑧ 上升给正分。
+        """位置轴三个因子：⑤ 低位 +2、⑥ 低动量 +2、⑦ 铜金比上升 +2。
 
         该断言的意义不是「描述事实」，而是**钉住约定**：
         任何一次「把阈值表换成猪周期的」都会在这里立刻红。
+        v1.1 删掉了 vs_ma_pct（与 cu_rank_pct 相关 0.85），故此处只剩三项。
         """
         d = json.loads(CU_DEF.read_text(encoding="utf-8"))
         th = d["thresholds"]
         assert th["cu_rank_pct"][0][2] == 2        # 低位 +2
-        assert th["vs_ma_pct"][0][2] == 2          # 低于均线 +2
         assert th["mom_rank_pct"][0][2] == 2       # 低动量 +2
         assert th["cuau_chg_pct"][-1][2] == 2      # 铜金比上升 +2（唯一顺周期）
+        assert "vs_ma_pct" not in th
 
 
 # ---------------------------------------------------------------------------
@@ -564,7 +566,7 @@ class TestPositionPolarityContract:
 # ---------------------------------------------------------------------------
 
 def _cu_stub_series():
-    """构造一份能跑通全部 8 因子的合成序列（含 1400 日铜价以满足 250 期要求）。"""
+    """构造一份能跑通全部 7 因子的合成序列（含 1400 日铜价以满足 250 期要求）。"""
     n = 1400
     base = date(2026, 9, 24)
     cu_rows, rb_rows, au_rows = [], [], []
@@ -594,8 +596,9 @@ class TestCuFullDefinitionOffline:
         # 走真实定义（data/thesis/cu_regime.json）+ 合成数据，完全离线
         return ThesisEngine.compute(StubEngine(_cu_stub_series()), "cu_regime")
 
-    def test_all_eight_factors_valid(self, result):
-        assert result["valid_count"] == result["factor_count"] == 8
+    def test_all_seven_factors_valid(self, result):
+        """v1.1 起 7 因子（删掉与 rank 重复的 ma）。"""
+        assert result["valid_count"] == result["factor_count"] == 7
         assert result["warnings"] == [], result["warnings"]
 
     def test_total_is_the_sum_of_factor_scores(self, result):
@@ -604,9 +607,9 @@ class TestCuFullDefinitionOffline:
     def test_stage_block_present_and_consistent(self, result):
         st = result["stages"]
         assert st is not None and st["stage"]
-        assert st["drive_full"] == 8 and st["pos_full"] == 8
+        assert st["drive_full"] == 8 and st["pos_full"] == 6
         assert st["drive_valid_count"] == st["drive_factor_count"] == 4
-        assert st["pos_valid_count"] == st["pos_factor_count"] == 4
+        assert st["pos_valid_count"] == st["pos_factor_count"] == 3
         assert st["complete"] is True
         # 驱动力只累加 4 个驱动力因子
         drive_sum = sum(f["score"] for f in result["factors"]
@@ -616,7 +619,8 @@ class TestCuFullDefinitionOffline:
         pos_sum = sum(f["score"] for f in result["factors"]
                       if f["key"] in st["pos_keys"])
         assert st["pos_total"] == pos_sum == st["pos_score"]
-        assert st["pos_keys"] == ["rank", "ma", "mom", "cuau"]
+        # v1.1：ma 与 rank 得分相关 0.85（同一件事的两种表达），已删除
+        assert st["pos_keys"] == ["rank", "mom", "cuau"]
 
     def test_expected_stage_from_the_synthetic_data(self, result):
         """只钉「阶段名与两条轴的档位自洽」，不钉具体数值。"""
@@ -641,7 +645,7 @@ class TestCuFullDefinitionOffline:
             assert rule["current"] is not None, rule
         # 关键原始读数都进了 metrics
         for k in ("dxy_chg_bp", "us10_chg_bp", "cn10_chg_bp", "rb_chg_pct",
-                  "cu_rank_pct", "ma_gap_pct", "mom_rank_pct", "cuau_chg_pct",
+                  "cu_rank_pct", "mom_rank_pct", "cuau_chg_pct",
                   "rank_ext", "cuau"):
             assert k in result["metric_values"], k
 

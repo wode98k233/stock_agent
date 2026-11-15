@@ -122,8 +122,21 @@ class RequestContext:
             "llm_tokens_out": 0,
             "llm_tokens_reasoning": 0,
             "llm_cached_tokens": 0,
+            "llm_cache_read": 0,
+            "llm_cache_creation": 0,
             "llm_cache_by_label": {},
             "llm_by_model": {},
+            # 按**供应商**（base_url 反查出来的 provider）拆分 token 与成本：
+            # 同一模型可能由不同供应商提供（官方 / 中转 / 内网免费源），价格与可用性都不同，
+            # 只看「按模型」会把它们混成一行（用户 2026-10-14 要求分开统计）
+            "llm_by_provider": {},
+            # 成本（元）：按模型 / 供应商拆分 + 缓存省下的钱（设计文档 §8①）
+            "llm_cost_total": 0.0,
+            "llm_cost_by_model": {},
+            "llm_cost_by_provider": {},
+            "llm_cost_cached_saved": 0.0,
+            "llm_cost_unpriced_calls": 0,
+            "llm_cost_free_calls": 0,
             "tool_calls": 0,
             "steps_total": 0,
             "steps_success": 0,
@@ -143,25 +156,67 @@ class RequestContext:
         return time.time() - self.start_time
 
     def record_llm(self, tokens_in: int, tokens_out: int, cached_tokens: int = 0,
-                   reasoning_tokens: int = 0, label: str = "", model: str = ""):
+                   reasoning_tokens: int = 0, label: str = "", model: str = "",
+                   provider: str = "", cost: dict | None = None,
+                   cache_read: int = 0, cache_creation: int = 0):
         self.metrics["llm_calls"] += 1
         self.metrics["llm_tokens_in"] += tokens_in
         self.metrics["llm_tokens_out"] += tokens_out
         self.metrics["llm_tokens_reasoning"] += reasoning_tokens
         self.metrics["llm_cached_tokens"] += cached_tokens
+        # prompt 缓存读写分列（缓存命中与未命中的成本口径不同，需分开观测）
+        self.metrics["llm_cache_read"] += cache_read
+        self.metrics["llm_cache_creation"] += cache_creation
         bucket = self.metrics["llm_cache_by_label"].setdefault(
-            label or "unknown", {"in": 0, "cached": 0})
+            label or "unknown", {"in": 0, "cached": 0, "cache_read": 0, "cache_creation": 0})
         bucket["in"] += tokens_in
         bucket["cached"] += cached_tokens
+        bucket["cache_read"] += cache_read
+        bucket["cache_creation"] += cache_creation
         # 按上游模型聚合（基础 LLM vs 压缩/报告等命名模型），供最终汇总区分展示
         if model:
             mbucket = self.metrics["llm_by_model"].setdefault(
-                model, {"calls": 0, "in": 0, "out": 0, "cached": 0, "reasoning": 0})
+                model, {"calls": 0, "in": 0, "out": 0, "cached": 0, "reasoning": 0,
+                        "cache_read": 0, "cache_creation": 0})
             mbucket["calls"] += 1
             mbucket["in"] += tokens_in
             mbucket["out"] += tokens_out
             mbucket["cached"] += cached_tokens
             mbucket["reasoning"] += reasoning_tokens
+            mbucket["cache_read"] += cache_read
+            mbucket["cache_creation"] += cache_creation
+        # 供应商桶：token 五件套 + 成本（成本在下面与 llm_by_model 一起累加）
+        prov_key = str(provider or (cost or {}).get('provider') or 'unknown')
+        pbucket = self.metrics["llm_by_provider"].setdefault(
+            prov_key, {"calls": 0, "in": 0, "out": 0, "cached": 0, "reasoning": 0, "cost": 0.0})
+        pbucket["calls"] += 1
+        pbucket["in"] += tokens_in
+        pbucket["out"] += tokens_out
+        pbucket["cached"] += cached_tokens
+        pbucket["reasoning"] += reasoning_tokens
+        # 成本聚合：total 为 None = 未计价（价目里没有这个供应商/模型），
+        # 单独计数而不是按 0 记 —— 「未计价」和「免费」是两回事（§10）。
+        if isinstance(cost, dict):
+            total = cost.get("total")
+            billing = str(cost.get("billing") or "")
+            if total is None:
+                self.metrics["llm_cost_unpriced_calls"] += 1
+            else:
+                self.metrics["llm_cost_total"] += float(total)
+                if billing == "free":
+                    self.metrics["llm_cost_free_calls"] += 1
+                model_key = str(cost.get("model") or model or "unknown")
+                cmodel = self.metrics["llm_cost_by_model"].setdefault(
+                    model_key, {"cost": 0.0, "calls": 0})
+                cmodel["cost"] += float(total)
+                cmodel["calls"] += 1
+                prov_key = str(cost.get("provider") or provider or "unknown")
+                cprov = self.metrics["llm_cost_by_provider"].setdefault(
+                    prov_key, {"cost": 0.0, "calls": 0})
+                cprov["cost"] += float(total)
+                cprov["calls"] += 1
+                pbucket["cost"] += float(total)
+            self.metrics["llm_cost_cached_saved"] += float(cost.get("cached_saved") or 0.0)
 
     def record_tool(self):
         self.metrics["tool_calls"] += 1
@@ -183,8 +238,36 @@ def _fmt_token_count(n: int) -> str:
     return str(n)
 
 
+def with_trace_node(metadata: Optional[dict], node: str) -> dict:
+    """复制 metadata 并补归因字段，使 trace 能按用途归集（不修改调用方字典）。
+
+    **两个字段，两个口径**（PRD-A11 FR-7 / PRD-A10 §2.5.4）：
+
+    - ``purpose``：**细分用途**（``report-fast`` / ``report-select`` / ``dashboard`` /
+      ``react-context-summary`` / ``agent`` …），由调用方显式声明。
+    - ``node``：**图节点名**（LangGraph 口径，如 ``report_enhance`` / ``template_report``），
+      保持既有看板兼容。
+
+    为什么必须拆开：LangGraph 注入的 ``config.metadata`` 里**已经**有 ``node``=图节点名，
+    而本函数过去用 ``merged.setdefault("node", node)`` —— 于是 ``report_builder`` 想标的
+    ``report-fast`` / ``report-select`` **被静默丢弃**，trace 里 ``node=report_enhance``
+    混了三类完全不同的调用（A10 §2.5.4 实测）。改成两个字段后，
+    ``node`` 给看板看、``purpose`` 给归因用，互不覆盖。
+
+    无 LangGraph 场景（绝大多数副调用）下 ``purpose == node``，行为与改动前一致。
+    """
+    merged = dict(metadata or {})
+    merged["purpose"] = merged.get("purpose") or node
+    merged.setdefault("node", node)
+    return merged
+
+
 def _format_cache_by_label(by_label: dict, top_n: int = 6) -> str:
-    """把 {label: {in, cached}} 压成一行缓存明细（按输入量降序，最多 top_n 项）。"""
+    """把 {label: {in, cached, cache_read, cache_creation}} 压成一行缓存明细。
+
+    按输入量降序，最多 top_n 项。命中百分比用 cache_read（provider 口径最准），
+    缺失时回退到 cached。cache_creation 非 0 时追加 r/w 标注，便于观察缓存写入成本。
+    """
     items = [(k, v) for k, v in (by_label or {}).items()
              if isinstance(v, dict) and v.get("in")]
     if not items:
@@ -193,10 +276,14 @@ def _format_cache_by_label(by_label: dict, top_n: int = 6) -> str:
     parts = []
     for name, v in items[:top_n]:
         tin = v.get("in", 0)
-        hit_pct = v.get("cached", 0) / tin * 100 if tin else 0
+        hit_tok = v.get("cache_read") or v.get("cached", 0)
+        hit_pct = hit_tok / tin * 100 if tin else 0
+        rw = ""
+        if v.get("cache_creation"):
+            rw = f" w{_fmt_token_count(v['cache_creation'])}"
         parts.append(
             f"{name} {hit_pct:.0f}% "
-            f"({_fmt_token_count(v.get('cached', 0))}/{_fmt_token_count(tin)})"
+            f"({_fmt_token_count(hit_tok)}/{_fmt_token_count(tin)}{rw})"
         )
     if len(items) > top_n:
         parts.append(f"…另{len(items) - top_n}项")
@@ -218,6 +305,62 @@ def _format_by_model(by_model: dict, top_n: int = 5) -> str:
         )
     if len(items) > top_n:
         parts.append(f"…另{len(items) - top_n}个模型")
+    return " · ".join(parts)
+
+
+def _format_cost(cost: dict | None) -> str:
+    """单次调用的成本展示：¥0.0234(峰) / 免费 / 未计价（空串 = 没开成本统计）。"""
+    if not isinstance(cost, dict):
+        return ""
+    billing = str(cost.get("billing") or "")
+    total = cost.get("total")
+    if billing == "free":
+        return "免费"
+    if total is None:
+        return "未计价"
+    tier = "峰" if str(cost.get("tier")) == "peak" else "谷"
+    try:
+        return f"¥{float(total):.4f}({tier})"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _format_cost_by(items: dict, top_n: int = 5) -> str:
+    """{key: {cost, calls}} → 「deepseek ¥1.2345/12次 · …」（按金额降序）。"""
+    rows = [(k, v) for k, v in (items or {}).items() if isinstance(v, dict)]
+    if not rows:
+        return ""
+    rows.sort(key=lambda kv: kv[1].get("cost", 0), reverse=True)
+    parts = [f"{k} ¥{float(v.get('cost', 0)):.4f}/{v.get('calls', 0)}次" for k, v in rows[:top_n]]
+    if len(rows) > top_n:
+        parts.append(f"…另{len(rows) - top_n}项")
+    return " · ".join(parts)
+
+
+def _format_by_provider(by_provider: dict, top_n: int = 5) -> str:
+    """把 {provider: {calls,in,out,cached,reasoning,cost}} 压成一行供应商明细。
+
+    每个供应商都给全五件套（输入+输出 / 缓存命中(率) / 思考 / 成本）——
+    同一模型不同供应商的价格与缓存行为可能完全不同，混在一起看会得出错误结论。
+    """
+    rows = [(k, v) for k, v in (by_provider or {}).items() if isinstance(v, dict)]
+    if not rows:
+        return ""
+    rows.sort(key=lambda kv: kv[1].get("in", 0), reverse=True)
+    parts = []
+    for name, v in rows[:top_n]:
+        tin = v.get("in", 0) or 0
+        cached = v.get("cached", 0) or 0
+        hit = (' 缓存' + _fmt_token_count(cached)
+               + '(' + str(round(cached / tin * 100)) + '%)') if cached and tin else ""
+        reasoning = (' 思考' + _fmt_token_count(v.get("reasoning", 0))) if v.get("reasoning") else ""
+        cost = v.get("cost", 0.0) or 0.0
+        cost_text = (' ¥' + format(cost, '.4f')) if cost else ""
+        parts.append(name + ' ' + str(v.get("calls", 0)) + '次 '
+                     + _fmt_token_count(tin) + '+' + _fmt_token_count(v.get("out", 0))
+                     + hit + reasoning + cost_text)
+    if len(rows) > top_n:
+        parts.append('…另' + str(len(rows) - top_n) + '个供应商')
     return " · ".join(parts)
 
 
@@ -323,12 +466,19 @@ class RadarLogger:
             self._log("debug", "T", f"← {tool_name} 完整返回", result_full=result)
 
     def llm_call(self, label: str, duration: float, tokens_in: int, tokens_out: int,
-                 cached_tokens: int = 0, cache_hit_ratio: float = 0.0, **kv):
+                 cached_tokens: int = 0, cache_hit_ratio: float = 0.0, cost: dict | None = None,
+                 cache_read: int = 0, cache_creation: int = 0, **kv):
         total = (tokens_in or 0) + (tokens_out or 0)
         cache_part = f" cached={cached_tokens} hit={cache_hit_ratio:.1%}" if cached_tokens else ""
+        # 缓存读写分列：read 是按折扣价计费的输入，creation 是按写入溢价计费的输入。
+        # 二者都为 0 通常意味着该 provider 不单独回报这两个字段（DeepSeek 只给 hit/miss）。
+        read_part = f" cache_r={cache_read}" if cache_read else ""
+        create_part = f" cache_w={cache_creation}" if cache_creation else ""
+        cost_part = _format_cost(cost)
         self._log("info", "L", f"LLM 调用 {label}",
                   duration=f"{duration:.1f}s",
-                  tokens=f"{tokens_in}+{tokens_out}={total}{cache_part}",
+                  tokens=f"{tokens_in}+{tokens_out}={total}{cache_part}{read_part}{create_part}",
+                  **({"成本": cost_part} if cost_part else {}),
                   **kv)
 
     def plan(self, steps: list, constraints: list = None):
@@ -375,16 +525,38 @@ class RadarLogger:
         trace_cached = trace_totals.get("cached_tokens", 0)
         trace_hit = trace_totals.get("cache_hit_ratio", 0)
         if trace_cached:
+            rw_parts = []
+            tr_read = trace_totals.get("cache_read_input_tokens", 0)
+            tr_write = trace_totals.get("cache_creation_input_tokens", 0)
+            if tr_read:
+                rw_parts.append(f"读={tr_read}")
+            if tr_write:
+                rw_parts.append(f"写={tr_write}")
             self._log("info", "R", "缓存统计",
                       缓存Token=f"{trace_cached}",
                       命中率=f"{trace_hit:.1%}",
-                      输入Token=f"{trace_totals.get('input_tokens', 0)}")
+                      输入Token=f"{trace_totals.get('input_tokens', 0)}",
+                      读写=" · ".join(rw_parts) if rw_parts else "未单独回报")
         cache_by_label = _format_cache_by_label(m.get("llm_cache_by_label") or {})
         if cache_by_label:
             self._log("info", "R", "缓存明细", 按调用=cache_by_label)
         by_model = _format_by_model(m.get("llm_by_model") or {})
         if by_model:
             self._log("info", "R", "模型明细", 按模型=by_model)
+        # 供应商明细：同一模型可能由不同供应商提供（官方/中转/内网免费源），价格与缓存行为不同，
+        # 只按模型看会把它们混成一行（用户 2026-10-14 要求）
+        by_provider_line = _format_by_provider(m.get("llm_by_provider") or {})
+        if by_provider_line:
+            self._log("info", "R", "供应商明细", 按供应商=by_provider_line)
+        cost_line = m.get("llm_cost_total", 0.0) or 0.0
+        unpriced = m.get("llm_cost_unpriced_calls", 0) or 0
+        if cost_line or unpriced:
+            self._log("info", "R", "成本",
+                      合计=f"¥{cost_line:.4f}",
+                      按模型=_format_cost_by(m.get("llm_cost_by_model") or {}) or "-",
+                      按供应商=_format_cost_by(m.get("llm_cost_by_provider") or {}) or "-",
+                      缓存省=f"¥{float(m.get('llm_cost_cached_saved') or 0):.4f}",
+                      **({"未计价": f"{unpriced}次(价目里没有该供应商/模型)"} if unpriced else {}))
         budget_snap = snap.get("budget")
         if budget_snap:
             self._log("info", "R", "预算使用",
@@ -430,6 +602,20 @@ class RadarLogger:
         by_model = _format_by_model(m.get("llm_by_model") or {})
         if by_model:
             self._log("info", "R", "模型明细", 按模型=by_model)
+        # 供应商明细：同一模型可能由不同供应商提供（官方/中转/内网免费源），价格与缓存行为不同，
+        # 只按模型看会把它们混成一行（用户 2026-10-14 要求）
+        by_provider_line = _format_by_provider(m.get("llm_by_provider") or {})
+        if by_provider_line:
+            self._log("info", "R", "供应商明细", 按供应商=by_provider_line)
+        cost_line = m.get("llm_cost_total", 0.0) or 0.0
+        unpriced = m.get("llm_cost_unpriced_calls", 0) or 0
+        if cost_line or unpriced:
+            self._log("info", "R", "成本",
+                      合计=f"¥{cost_line:.4f}",
+                      按模型=_format_cost_by(m.get("llm_cost_by_model") or {}) or "-",
+                      按供应商=_format_cost_by(m.get("llm_cost_by_provider") or {}) or "-",
+                      缓存省=f"¥{float(m.get('llm_cost_cached_saved') or 0):.4f}",
+                      **({"未计价": f"{unpriced}次(价目里没有该供应商/模型)"} if unpriced else {}))
         self._log("info", "R", "═" * 50)
 
 
@@ -553,6 +739,62 @@ class _SystemFileFormatter(logging.Formatter):
 _ROOT_HANDLER_MARKER = "_radar_shared_root_handler"
 
 
+class _WinSafeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """Windows 多进程安全的 TimedRotatingFileHandler。
+
+    背景：install_root_handler 在 **import 期** 被每个进程执行（web / trace / CLI /
+    任意 import utils.logger 的脚本），它们都会常驻打开同一个 radar-system.log。
+    标准库轮转靠 os.rename 改名，而 Windows 上只要任一其他进程还握着该文件句柄，
+    rename 必抛 PermissionError(WinError 32)。
+
+    更糟的失败模式：标准库 doRollover 在 rotate() 抛异常时 rolloverAt 不会推进，
+    之后**每条日志**都会重新触发轮转并再次失败 —— 表现为 stderr 无限刷
+    "--- Logging error ---"，同时系统日志停写，直到进程重启。
+
+    修复策略（rotate 阶段逐级降级）：
+      1. rename 成功 → 正常路径；
+      2. rename 失败（文件被占）→ copytruncate 降级：把当前内容拷贝到备份名，
+         再截断当前文件继续写。其余进程以 O_APPEND（'a' 模式）打开，截断后
+         仍追加到新 EOF，不受影响；仅拷贝→截断之间极小窗口内的写入会丢失；
+      3. 连拷贝都失败（极端 IO 竞争）→ 放弃本次轮转，当前文件继续写，
+         rolloverAt 由 doRollover 照常推进，下个周期自然重试。
+
+    另外 doRollover 删除超量备份的循环不容错（os.remove 直接抛），任一备份文件
+    被日志查看页等读者握住也会让整次轮转报废 → 把删除挪进 getFilesToDelete
+    并吞掉单文件失败。
+    """
+
+    def rotate(self, source, dest):
+        try:
+            os.rename(source, dest)
+            return
+        except OSError:
+            pass
+        try:
+            self._rotate_by_copytruncate(source, dest)
+        except OSError:
+            # 放弃本次轮转：日志继续写当前文件，下个周期再试（rolloverAt 已推进）
+            pass
+
+    def _rotate_by_copytruncate(self, source, dest):
+        import shutil
+        with open(source, "rb") as sf, open(dest, "wb") as df:
+            shutil.copyfileobj(sf, df)
+        # 此刻自身流已由 doRollover 关闭；其余进程均为 'a' 追加模式，截断后自动接新 EOF
+        with open(source, "r+b") as f:
+            f.truncate(0)
+
+    def getFilesToDelete(self):
+        # 先在此处尽力删除（单文件失败只吞掉该文件），再返回空列表，
+        # 让 doRollover 的不容错删除循环空转，避免它因个别文件被占而整次抛异常。
+        for path in super().getFilesToDelete():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return []
+
+
 def clean_old_logs(log_dir: str = None, retention_days: int = 30):
     """清理超过 retention_days 天的旧日志目录和文件。
 
@@ -623,13 +865,25 @@ def install_root_handler(max_bytes: int = None, backup_count: int = None) -> Opt
         backup_count = _LOG_BACKUP_COUNT
     log_dir = get_logs_dir()
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "radar-system.log")
-    fh = logging.handlers.TimedRotatingFileHandler(
-        log_file,
-        encoding="utf-8",
-        when=_LOG_ROTATION_WHEN,
-        backupCount=backup_count,
-    )
+    # 并行测试（pytest-xdist）下多个 worker 会**同时**打开同一个文件 → Windows 直接
+    # PermissionError，而本函数跑在 utils.logger **import 期**，会把 worker 当场打死，
+    # 表现为 "Different tests were collected between gw*"。故允许用 `LOG_FILE_SUFFIX`
+    # 给每个 worker 一份独立文件（由 test/conftest.py 注入 PYTEST_XDIST_WORKER）。
+    suffix = os.getenv("LOG_FILE_SUFFIX", "")
+    log_file = os.path.join(log_dir, f"radar-system{suffix}.log")
+    try:
+        fh = _WinSafeTimedRotatingFileHandler(
+            log_file,
+            encoding="utf-8",
+            when=_LOG_ROTATION_WHEN,
+            backupCount=backup_count,
+        )
+    except OSError as e:
+        # 文件被占用/无权限：退回"无文件 handler"（只在 stderr 提示），
+        # 绝不能因为日志把主流程/测试进程打死。不置 marker → 下次调用会重试。
+        import sys as _sys
+        print(f"[logger] 系统日志文件不可用（{log_file}）：{e}", file=_sys.stderr)
+        return None
     fh.setFormatter(_SystemFileFormatter())
     fh.addFilter(_make_filter())
     root.addHandler(fh)

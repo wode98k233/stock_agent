@@ -142,11 +142,17 @@ class TestCapabilityReorderApplied:
 
 
 class TestMinKlineRows:
-    """`_min_kline_rows` 的边界（校验门槛本身也是契约）。"""
+    """`_min_kline_rows` 的边界（校验门槛本身也是契约）。
 
-    @pytest.mark.parametrize("days,expected", [(1, 1), (5, 1), (20, 5), (40, 10), (60, 15)])
+    2026-10：固定 20 根上限会放过「24 根月线」（000300 事故），改为按区间比例。
+    """
+
+    @pytest.mark.parametrize("days,expected", [
+        (1, 1), (5, 1), (20, 20), (40, 20), (60, 20), (365, 73), (500, 100),
+    ])
     def test_thresholds(self, days, expected):
         assert mdb._min_kline_rows(days) == expected
 
-    def test_large_days_capped_at_20(self):
-        assert mdb._min_kline_rows(500) == 20
+    def test_year_window_rejects_monthly_bars(self):
+        """一年窗口的下限必须远高于 20（24 根月线必须被挡住）。"""
+        assert mdb._min_kline_rows(365) >= 73 > 24

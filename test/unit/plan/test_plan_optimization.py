@@ -294,6 +294,13 @@ def test_executor_success():
 
 def test_executor_uses_plan_step_skill_first():
     """E1b: executor 优先使用 plan step 指定的 skill 的工具，不再合并 selected_skills。"""
+    # 本用例验的是「按技能挑子集」契约（E1b/E1c）—— **只在 strict 档成立**。
+    # full 档下 tools 数组必须全量常驻（PRD-A11：位置 0 稳定才能共享前缀），
+    # 那条路径由 test_full_surface_bypasses_skill_subset 覆盖。
+    from config import Config as _C
+    _old_surface = _C.TOOL_SURFACE_MODE
+    _C.TOOL_SURFACE_MODE = "strict"
+
     from agents.plan.node.executor import execute_step
 
     ctx = _make_mock_ctx()
@@ -331,11 +338,19 @@ def test_executor_uses_plan_step_skill_first():
     called_skills = [call.args[0] for call in ctx.skill_registry.get_tools.call_args_list]
     assert called_skills == ["test_skill"]
     assert captured_tool_names == ["test_skill_tool"]
+    _C.TOOL_SURFACE_MODE = _old_surface
     assert result["step_results"][0]["status"] == "success"
 
 
 def test_executor_uses_all_step_skills():
     """E1d: step 声明多技能时，executor 装载全部技能的工具并逐个注入 L1 用法。"""
+    # 本用例验的是「按技能挑子集」契约（E1b/E1c）—— **只在 strict 档成立**。
+    # full 档下 tools 数组必须全量常驻（PRD-A11：位置 0 稳定才能共享前缀），
+    # 那条路径由 test_full_surface_bypasses_skill_subset 覆盖。
+    from config import Config as _C
+    _old_surface = _C.TOOL_SURFACE_MODE
+    _C.TOOL_SURFACE_MODE = "strict"
+
     from agents.plan.node.executor import execute_step
 
     ctx = _make_mock_ctx()
@@ -377,6 +392,7 @@ def test_executor_uses_all_step_skills():
     assert called_skills == ["skill_a", "skill_b"]
     assert captured_tool_names == ["skill_a_tool", "skill_b_tool"]
     assert detail_skills == ["skill_a", "skill_b"]
+    _C.TOOL_SURFACE_MODE = _old_surface
     assert result["step_results"][0]["status"] == "success"
 
 
@@ -397,6 +413,13 @@ def test_extract_step_info_returns_all_skills():
 
 def test_executor_fallback_to_selected_skills_when_plan_skill_empty():
     """E1b-fallback: 当 plan step 的 skill 无工具时，才加载 selected_skills 的工具。"""
+    # 本用例验的是「按技能挑子集」契约（E1b/E1c）—— **只在 strict 档成立**。
+    # full 档下 tools 数组必须全量常驻（PRD-A11：位置 0 稳定才能共享前缀），
+    # 那条路径由 test_full_surface_bypasses_skill_subset 覆盖。
+    from config import Config as _C
+    _old_surface = _C.TOOL_SURFACE_MODE
+    _C.TOOL_SURFACE_MODE = "strict"
+
     from agents.plan.node.executor import execute_step
 
     ctx = _make_mock_ctx()
@@ -436,11 +459,19 @@ def test_executor_fallback_to_selected_skills_when_plan_skill_empty():
     called_skills = [call.args[0] for call in ctx.skill_registry.get_tools.call_args_list]
     assert called_skills == ["empty_skill", "mx_data", "mx_search"]
     assert captured_tool_names == ["mx_data_tool", "mx_search_tool"]
+    _C.TOOL_SURFACE_MODE = _old_surface
     assert result["step_results"][0]["status"] == "success"
 
 
 def test_unified_executor_uses_plan_step_skill_first():
     """E1c: UnifiedPlan 优先使用 plan step 指定的 skill 的工具。"""
+    # 本用例验的是「按技能挑子集」契约（E1b/E1c）—— **只在 strict 档成立**。
+    # full 档下 tools 数组必须全量常驻（PRD-A11：位置 0 稳定才能共享前缀），
+    # 那条路径由 test_full_surface_bypasses_skill_subset 覆盖。
+    from config import Config as _C
+    _old_surface = _C.TOOL_SURFACE_MODE
+    _C.TOOL_SURFACE_MODE = "strict"
+
     from agents.plan.node.unified_executor import unified_execute_step
 
     ctx = _make_mock_ctx()
@@ -471,6 +502,7 @@ def test_unified_executor_uses_plan_step_skill_first():
     called_skills = [call.args[0] for call in ctx.skill_registry.get_tools.call_args_list]
     assert called_skills == ["test_skill"]
     assert captured_tool_names == ["test_skill_tool"]
+    _C.TOOL_SURFACE_MODE = _old_surface
     assert result["response"].startswith("统一执行成功")
 
 
@@ -486,6 +518,7 @@ def test_unified_executor_injects_skill_detail():
 
     async def fake_run_react_subgraph(**kwargs):
         captured["msgs"] = kwargs["context_messages"]
+        captured["tail"] = kwargs.get("tail_system", "")   # 技能详情现在走尾部
         return {
             "tool_results": [],
             "final_result": "统一执行成功，技能用法详情已经注入，返回足够长的结果用于通过长度检查。",
@@ -498,9 +531,14 @@ def test_unified_executor_injects_skill_detail():
 
     m.assert_called_once()
     assert m.call_args.args[1] == "test_skill"
-    sys_msgs = [c for c in captured["msgs"] if c[0] == "system" and "可用工具详情" in c[1]]
-    assert sys_msgs, "应注入技能用法详情 system 消息"
-    assert "周K用本地工具" in sys_msgs[0][1]
+    # PRD-A11 FR-10/11：技能详情移到**尾部**（tail_system），不再插在 history 与 user 之间。
+    # 插在中间会让内层 agent 的 payload 从 [REACT][history] 之后立刻与主链分叉，
+    # 实测 agent#1 只命中 tools+cache_prefix（37%）。
+    assert "可用工具详情" in captured["tail"], "应注入技能用法详情（位置在尾部）"
+    assert not [c for c in captured["msgs"] if c[0] == "system" and "可用工具详情" in c[1]], \
+        "技能详情不应再插在 context_messages 中间"
+
+    assert "周K用本地工具" in captured["tail"]
 
 
 def test_executor_partial_completion():
@@ -738,3 +776,77 @@ if __name__ == "__main__":
     print(f"Total: {passed} passed, {failed} failed out of {len(tests)}")
     print(f"{'='*60}")
     sys.exit(1 if failed > 0 else 0)
+
+
+def test_full_surface_bypasses_skill_subset():
+    """full 档：``merge_tools_for_skills`` 必须返回**全量**工具（PRD-A11）。
+
+    原因：full 档的全部意义是「tools 数组（payload 位置 0）跨轮/跨 run 逐字节稳定」，
+    provider 前缀缓存才能命中。按技能挑子集会让工具面随问题变化 —— 实测
+    unified_plan 内层 agent 首调只命中 512 tok（≈仅 cache_prefix），
+    而 react_stock 全量装载命中 4,096 tok（含 tools 前段）。
+    """
+    from agents.shared.tool_utils import merge_tools_for_skills
+    from config import Config
+
+    class _Reg:
+        def get_tools(self, name):
+            return [SimpleNamespace(name=f"{name}_tool")]
+
+        def get_all_tools(self):
+            return [SimpleNamespace(name=f"all_{i}") for i in range(5)]
+
+    old = Config.TOOL_SURFACE_MODE
+    try:
+        Config.TOOL_SURFACE_MODE = "full"
+        got = merge_tools_for_skills(_Reg(), ["mx_data"], for_binding=True)
+        assert [t.name for t in got] == [f"all_{i}" for i in range(5)], \
+            "full 档必须全量，否则位置 0 不稳定、前缀缓存不命中"
+    finally:
+        Config.TOOL_SURFACE_MODE = old
+
+
+def test_strict_surface_keeps_subset():
+    """strict 档：子集契约不变（回归锁）。"""
+    from agents.shared.tool_utils import merge_tools_for_skills
+    from config import Config
+
+    class _Reg:
+        def get_tools(self, name):
+            return [SimpleNamespace(name=f"{name}_tool")]
+
+        def get_all_tools(self):
+            return [SimpleNamespace(name=f"all_{i}") for i in range(5)]
+
+    old = Config.TOOL_SURFACE_MODE
+    try:
+        Config.TOOL_SURFACE_MODE = "strict"
+        got = merge_tools_for_skills(_Reg(), ["mx_data"], for_binding=True)
+        assert [t.name for t in got] == ["mx_data_tool"]
+    finally:
+        Config.TOOL_SURFACE_MODE = old
+
+
+def test_non_binding_callers_are_unaffected():
+    """``for_binding=False``（默认，如 activate_skills 的记账用途）行为完全不变。
+
+    ⚠️ 这条是踩坑记录：第一版改动没区分用途，让 activate_skills 也拿全量，
+    结果 state 里的 all_tool_names 恒等于全部工具，16 个用例当场挂掉。
+    """
+    from agents.shared.tool_utils import merge_tools_for_skills
+    from config import Config
+
+    class _Reg:
+        def get_tools(self, name):
+            return [SimpleNamespace(name=f"{name}_tool")]
+
+        def get_all_tools(self):
+            return [SimpleNamespace(name=f"all_{i}") for i in range(5)]
+
+    old = Config.TOOL_SURFACE_MODE
+    try:
+        Config.TOOL_SURFACE_MODE = "full"
+        got = merge_tools_for_skills(_Reg(), ["mx_data"])     # 不传 for_binding
+        assert [t.name for t in got] == ["mx_data_tool"]
+    finally:
+        Config.TOOL_SURFACE_MODE = old

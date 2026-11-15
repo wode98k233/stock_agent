@@ -31,7 +31,7 @@ def _setup(monkeypatch, run_scan, dates=DATES):
         return pd.DataFrame({"trade_date": dates})
 
     monkeypatch.setattr(ss, "_load_stock_daily", fake_load)
-    monkeypatch.setattr(ss, "_apply_adjustment", lambda df, code, adj: df)
+    # 注：_apply_adjustment 已于 P0 §11.8.3 停用（运行时复权直通），无需打桩
     monkeypatch.setattr(ss, "get_strategy_class", lambda sid: sid)
     monkeypatch.setattr("backtest.strategies.get_all_strategies",
                         lambda: {"s1": object, "s2": object})

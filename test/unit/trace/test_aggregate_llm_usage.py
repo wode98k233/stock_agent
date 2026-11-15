@@ -33,7 +33,8 @@ def _make_month(month_dir, ym: str) -> sqlite3.Connection:
 
 def _seed_llm_step(conn, run_id: str, created_at: str, *, agent: str = "unified_plan",
                    model: str = "deepseek-v4-flash", inp: int = 100, out: int = 20,
-                   cached: int = 0, reasoning: int = 0, cache_hit: bool = False):
+                   cached: int = 0, reasoning: int = 0, cache_hit: bool = False,
+                   cost: dict | None = None):
     conn.execute(
         "INSERT INTO runs(id,agent_name,input,output,status,created_at) "
         "VALUES(?,?,?,?,?,?)",
@@ -48,6 +49,8 @@ def _seed_llm_step(conn, run_id: str, created_at: str, *, agent: str = "unified_
     }
     if cache_hit:
         extra["cache_hit"] = True
+    if cost is not None:
+        extra["cost"] = cost
     conn.execute(
         "INSERT INTO steps(run_id,event_run_id,step_type,step_name,status,started_at,extra) "
         "VALUES(?,?,?,?,'success',?,?)",
@@ -152,3 +155,85 @@ def test_aggregate_ignores_bad_extra_json(trace_env):
     conn.commit()
     r = store.aggregate_llm_usage(days=7)
     assert r["llm_calls"] == 0  # 坏 JSON 静默跳过，不抛异常
+
+# --------------------------------------------------------------------------
+# 成本维度（成本 / 计价 §8③）：只 SUM 记录时算好的 cost，不按现价重算
+# --------------------------------------------------------------------------
+
+def test_cost_dims_sum_persisted_cost(trace_env):
+    conn = _make_month(trace_env['month_dir'], _today().replace('-', '')[:6])
+    day = _today()
+    _seed_llm_step(conn, 'r1', day + ' 10:00:00', inp=1_000_000, out=0, cost={
+        'total': 1.5, 'cached_saved': 0.25, 'billing': 'paid',
+        'provider': 'deepseek', 'model': 'deepseek-v4.1-flash', 'tier': 'peak'})
+    _seed_llm_step(conn, 'r2', day + ' 11:00:00', inp=1_000_000, out=0, cost={
+        'total': 0.5, 'cached_saved': 0.0, 'billing': 'paid',
+        'provider': 'opencode-zen', 'model': 'deepseek-v4.1-flash', 'tier': 'off_peak'})
+    r = store.aggregate_llm_usage(days=7)
+    assert r['cost_total'] == pytest.approx(2.0)
+    assert r['cost_cached_saved'] == pytest.approx(0.25)
+    assert r['cost_by_provider'] == [('deepseek', 1.5), ('opencode-zen', 0.5)]
+    assert r['cost_by_model'] == [('deepseek-v4.1-flash', 2.0)]
+    assert r['cost_daily'][-1] == pytest.approx(2.0)
+    assert r['avg_cost_per_call'] == pytest.approx(1.0)
+
+
+def test_unpriced_and_free_are_counted_not_summed(trace_env):
+    """未计价记 null（不能当 0 元计入金额），免费按 0 元但单独计数"""
+    conn = _make_month(trace_env['month_dir'], _today().replace('-', '')[:6])
+    day = _today()
+    _seed_llm_step(conn, 'r1', day + ' 10:00:00', cost={
+        'total': None, 'billing': 'unknown', 'provider': 'nowhere', 'model': 'gpt-4o'})
+    _seed_llm_step(conn, 'r2', day + ' 11:00:00', cost={
+        'total': 0.0, 'billing': 'free', 'provider': 'local-relay', 'model': 'x'})
+    _seed_llm_step(conn, 'r3', day + ' 12:00:00', cost={
+        'total': 1.0, 'billing': 'paid', 'provider': 'deepseek', 'model': 'deepseek-v4.1-flash'})
+    r = store.aggregate_llm_usage(days=7)
+    assert r['cost_total'] == pytest.approx(1.0), '未计价不能按 0 计入、免费也不加钱'
+    assert r['cost_unpriced_calls'] == 1 and r['cost_free_calls'] == 1
+    # 三条都**记录过** cost，只是计价三态不同 -> 「从未记录」计数必须是 0
+    assert r['cost_missing_calls'] == 0
+    assert r['cost_by_provider'] == [('deepseek', 1.0), ('local-relay', 0.0)]
+
+
+def test_steps_without_cost_are_ignored(trace_env):
+    """上线前的老 step（只有 token、没有 cost）不参与金额，也不报错"""
+    conn = _make_month(trace_env['month_dir'], _today().replace('-', '')[:6])
+    _seed_llm_step(conn, 'r1', _today() + ' 10:00:00', inp=500, out=100)
+    r = store.aggregate_llm_usage(days=7)
+    assert r['llm_calls'] == 1 and r['cost_total'] == 0.0
+    assert r['cost_unpriced_calls'] == 0
+    # 「从未记录」也单独计数：不能和「未计价 / 免费」混成一档
+    assert r['cost_missing_calls'] == 1
+
+
+def test_cost_missing_calls_counts_never_recorded(trace_env):
+    """extra 里根本没有 cost 字段 -> cost_missing_calls += 1（成本三态之三：从未记录）。
+
+    ⚠️ 为什么必须单独计数：cost_total 只 SUM **已计价**调用，未计价也只加计数 —— 于是
+    「从未记录」在 store 两侧都不留痕，下游拿 llm_calls - cost_unpriced_calls 一算就会把它
+    当成「已计价」而报 0 元 = 「免费」（context_stats.build_context_insight 的 cost 三态
+    正是靠这个计数器区分；同文件 build_run_context 用 cost_seen 给的是 None，两个入口
+    必须同结论）。
+    可达路径：COST_TRACKING_ENABLED=false 期间落下的行（config.py 里的受支持配置）、
+    以及未回填的历史行（scripts/ops/backfill_costs.py 的存在即证明有这类行）。
+    变异验证：删掉 store 里的 cost_missing_calls += 1 -> 本用例红（键在、值恒 0）。
+    """
+    conn = _make_month(trace_env['month_dir'], _today().replace('-', '')[:6])
+    day = _today()
+    _seed_llm_step(conn, 'r1', day + ' 10:00:00')                                  # 从未记录
+    _seed_llm_step(conn, 'r2', day + ' 11:00:00',
+                   cost={'total': None, 'billing': 'unknown', 'provider': 'nowhere'})  # 未计价
+    _seed_llm_step(conn, 'r3', day + ' 12:00:00',
+                   cost={'total': 0.0, 'billing': 'free', 'provider': 'local-relay'})   # 免费
+    _seed_llm_step(conn, 'r4', day + ' 13:00:00',
+                   cost={'total': 1.0, 'billing': 'paid', 'provider': 'deepseek'})      # 已计价
+    r = store.aggregate_llm_usage(days=7)
+    assert r['llm_calls'] == 4
+    assert r['cost_missing_calls'] == 1     # 只有 r1
+    assert r['cost_unpriced_calls'] == 1    # 只有 r2
+    assert r['cost_free_calls'] == 1        # 只有 r3
+    assert r['cost_total'] == pytest.approx(1.0)   # 只有 r4 入账
+    # 三态计数不得互相吞并：合计恒 <= llm_calls（r4 属于「已计价但不免费」）
+    assert (r['cost_missing_calls'] + r['cost_unpriced_calls']
+            + r['cost_free_calls']) <= r['llm_calls']

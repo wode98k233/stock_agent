@@ -3,14 +3,50 @@
 支持开关控制：新闻情感分析等不需要记忆的场景可关闭
 超过阈值自动压缩
 """
+import re
+
 from config import Config
 from utils.logger import RadarLogger
 from langchain_core.messages import BaseMessage
 
-try:
-    from langchain_classic.memory import ConversationSummaryBufferMemory
-except ModuleNotFoundError:
-    ConversationSummaryBufferMemory = None
+# 只给前端渲染、对模型无意义的标记：
+#   ① 图表 UUID 标记（report_builder 拼在报告尾部）
+#   ② 仪表盘 JSON 块（dashboard_node 在 web 模式追加在报告末尾）
+_HISTORY_MARKER_RES = (
+    re.compile(r"@@DASHBOARD_START@@.*?@@DASHBOARD_END@@", re.S),
+    re.compile(r"\s*@@CHART:[0-9a-zA-Z_-]+@@\s*"),
+)
+
+
+def strip_history_markers(text: str) -> str:
+    """剥离图表/仪表盘标记，保留报告正文（用于写入记忆与进 prompt 的历史）。"""
+    if not text or "@@" not in text:
+        return text
+    out = text
+    for pattern in _HISTORY_MARKER_RES:
+        out = pattern.sub(" ", out)
+    return out.strip()
+
+
+def _load_summary_memory_cls():
+    """惰性加载 ``ConversationSummaryBufferMemory``（拿不到返回 None）。
+
+    ⚠️ **必须在函数里导入，不能放模块级**（2026-10-16 实测）：
+    ``langchain_classic.memory`` 的包 __init__ 会 eager 导入 ``combined`` / ``vectorstore``，
+    进而拉进 ``sentence_transformers`` + ``transformers`` + ``torch``，
+    **单次导入 16 秒**（`import langchain_classic.base_memory` 只要 1.05s，说明重的就是这个包）。
+
+    而本模块被大量模块 import（多数只想拿 ``MemoryManager`` 这个名字），
+    实测 475 个单测文件里**只有 1 个真正创建 MemoryManager** —— 模块级导入等于
+    让每个进程白付 16 秒，直接拖垮 xdist 的并行度（更多 worker = 更多次白付）。
+
+    改惰性后：不创建 MemoryManager 的进程只花一次函数调用；创建的那 1 个照常付费。
+    """
+    try:
+        from langchain_classic.memory import ConversationSummaryBufferMemory
+        return ConversationSummaryBufferMemory
+    except ModuleNotFoundError:
+        return None
 
 
 def iter_history_messages(history):
@@ -48,13 +84,14 @@ class MemoryManager:
         self.enabled = Config.MEMORY_ENABLED
         self._memory = None
 
-        if self.enabled and ConversationSummaryBufferMemory is None:
+        _summary_cls = _load_summary_memory_cls() if self.enabled else None
+        if self.enabled and _summary_cls is None:
             self.enabled = False
             self.logger.warning("M", "langchain_classic 未安装，记忆功能已自动关闭")
         elif self.enabled:
             from utils.llm_factory import get_llm
 
-            self._memory = ConversationSummaryBufferMemory(
+            self._memory = _summary_cls(
                 llm=get_llm(),
                 max_token_limit=Config.MEMORY_MAX_TOKENS,
                 return_messages=True,

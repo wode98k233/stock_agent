@@ -62,7 +62,8 @@ def stub_market_db(monkeypatch):
 
 async def _build_with(template, monkeypatch):
     async def fake_evidence(items, user_input, raw_result, budget, log, metadata,
-                            run_config=None):
+                            run_config=None, template=None, *, conversation=None,
+                            conversation_tools=None):
         return _EVIDENCE
 
     monkeypatch.setattr(report_builder, "_build_drilldown_evidence", fake_evidence)

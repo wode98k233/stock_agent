@@ -146,6 +146,20 @@ def test_overview_normal_aggregation(dbs):
     assert data["cache_hit_rate"] is None  # A8 未上线
 
 
+def test_overview_win_rate_uses_fixed_5d(dbs):
+    """signal_overview 提供固定 5 日口径：value/n 取 5 日 ok 桶，wilson 原样透传。"""
+    quality, _base = dbs
+    data = qs.build_overview(
+        quality, now=NOW,
+        signal_overview={"buy_winrate_5d": 0.6, "buy_ci_5d": [0.4, 0.8], "buy_n_5d": 10},
+    )
+    wr = data["win_rate_after_cost"]
+    assert wr["value"] == 0.6
+    assert wr["n"] == 10            # 分母 = 5 日可评估样本数，而非全部 buy 池
+    assert wr["wilson"] == [0.4, 0.8]
+    assert "固定 5 日" in wr["coverage"]
+
+
 def test_overview_missing_db_degrades(dbs):
     """signal 库连接为 None：北极星/趋势置空，不抛错（AC-2）。"""
     quality, base = dbs

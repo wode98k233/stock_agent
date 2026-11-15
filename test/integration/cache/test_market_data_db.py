@@ -36,19 +36,16 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def _init_and_cleanup():
-    """确保表结构已初始化，测试后清理测试数据"""
+def _isolate_market_db(tmp_path, monkeypatch):
+    """隔离到临时库（2026-10-15 治理，P0 §11.6.2 处置精神）：测试绝不写生产 market_data.db。
+
+    原实现直接在真库上写 TEST* 假数据、测试后按 code 清理——异常中断即残留
+    （16 行 fixture 污染事故即此类模式）。整库隔离后连「清理」都不再需要。
+    """
+    test_db = str(tmp_path / 'market_data.db')
+    monkeypatch.setattr('config.Config.get_market_data_db_path', lambda: test_db)
     init_market_data_tables()
     yield
-    # 清理测试用数据
-    from utils.cache.market_data_db import get_market_data_db
-    with get_market_data_db() as conn:
-        for code in ["TEST001", "TEST002", "TEST003", "TEST004", "TEST005", "TEST006",
-                      "INFO001", "INFO002"]:
-            conn.execute("DELETE FROM stock_daily WHERE code = ?", (code,))
-            conn.execute("DELETE FROM stock_info WHERE code = ?", (code,))
-        conn.execute("DELETE FROM index_daily WHERE code = '000300' AND source = 'test'")
-        conn.execute("DELETE FROM index_info WHERE source = 'test'")
 
 
 # ── stock_daily CRUD ────────────────────────────────────────

@@ -17,9 +17,12 @@ async def classifier_node(state: PdorState, ctx: AgentContext, run_config=None) 
     result = await classifier(state["input"], run_config=run_config)
     if not result["is_stock_related"]:
         return {"response": result["response"]}
+    updates = {}
     if result.get("clarified_input"):
-        return {"input": result["clarified_input"]}
-    return {}
+        updates["input"] = result["clarified_input"]
+    if result.get("task_spec"):
+        updates["task_spec"] = result["task_spec"]
+    return updates
 
 
 # ── Planner ─────────────────────────────────────────────
@@ -86,14 +89,52 @@ async def planner_node(state: PdorState, ctx: AgentContext, run_config=None) -> 
         max_steps=Config.PLAN_MAX_STEPS,
     )
 
+    # ── 前缀对齐（PRD-A11 同族口径）：共享块进 messages[0]，规划指令留在 human ──
+    # 与 agents/common.py::classify_input、agents/shared/clarify.py 同形：同一 run 内三者收到的
+    # 「共享块」逐字节相同（2026-10-18 起是**精简块**：get_lean_input 去掉 [相关记忆片段]，
+    # 三处同取精简块 → 族内共享照旧；与 agent 主链 state["input"] 的同一性没了，取舍见
+    # agents/base.py::register_lean_input 上方注释）。
+    # 本调用无 tools → provider 的前缀缓存从 payload 第 0 字节（即 messages[0]）起连续比对，
+    # 共享块排第 0 条才能命中 classify 写热的前缀；改前规划指令压第 0 条、共享块被挡在 system
+    # 之后 → 与 classify 之间恒 0 字符共享（实测 0 → 4227 字符，探针
+    # scripts/devtools/probe_shared_block_prefix.py pdor 锁死）。
+    # **只搬位置不复制**：消息条数不变；文本除记忆段外一字未改。
+    # 装配刻意用元组字面量（不套 ChatPromptTemplate）：本调用不经过任何模板解析，共享块里的
+    # 画像/JSON 花括号本来就安全；反过来把已 .format() 的指令塞进模板会二次解析报错
+    # （实测 ValueError: Invalid format specifier），那是引入模板才有的新问题。
+    # 精简输入：规划只需要 [背景信息]/[用户问题]/[市场状态]/## 用户画像 + 技能目录 + 模板指引，
+    # [相关记忆片段]（实测 ≈2,929 token）对本调用无贡献，且它含用户问题、跨 run 前缀恒不命中
+    # → 白带的每一分钱都是全额。未登记时 get_lean_input 原样返回（单测/未走 enrich 路径行为不变）。
+    from agents.base import get_lean_input
     messages = [
-        ("system", prompt),
+        ("system", get_lean_input(state["input"])),
     ]
     if completed_summary:
         messages.append(("system", completed_summary))
-    messages.append(("user", state["input"]))
+    messages.append(("user", prompt))
 
-    result = llm_json_with_retry(llm, messages, logger, label="pdor-planner", run_config=run_config)
+    # skip_cache_prefix=True 与 classify 保持一致：utils/cache_prefix.py 的 A 股知识前缀是在
+    # invoke 期插到 messages[0] 的（CACHE_PREFIX_ENABLED=true 时 539 字符），而 classify 显式
+    # 跳过它 → 本调用若不跳过，两者仍在第 0 位分叉、上面的对齐收益归零。显式跳过让开关开/关
+    # 都保持 messages[0] 逐字节对齐；前缀真开启时还省掉本调用白带的 ~337 token。
+    #
+    # 语义缓存键防护（与上面的前缀对齐同因）：改后本调用**最后一条 human 是固定规划指令**，
+    # 而网关语义缓存（utils/llm/gateway.py::_last_user_text）取最后一条 human 当键的 query
+    # → 键里丢掉真实问题维度，同 scenario / inject_hash 下不同问题可能撞同一个键、把上一个
+    # 问题的计划 JSON 回放给新问题。改前 query 含逐分钟的 [背景信息] 时间、实际恒 miss，
+    # 所以这里显式关闭该调用的语义缓存**零损失**（前缀缓存不受影响，两者互不相干）。
+    # 透传链已核对：metadata → utils/llm_factory.py::_build_llm_config 的 config["metadata"]
+    # → utils/llm/gateway.py::_sr_context → cache_policy.build_key 判 sr_cacheable。
+    # ⚠️ 仅走网关（gateway.chat）的模型消费该键；本调用今天用 get_llm()，标记是给迁移后兜底。
+    # 合并 run_config 里已有的 metadata（graph config 可能带 node 等键），不整体覆盖。
+    call_metadata = {**((run_config or {}).get("metadata") or {}), "sr_cacheable": False}
+    result = llm_json_with_retry(
+        llm, messages, logger,
+        label="pdor-planner",
+        metadata=call_metadata,
+        run_config=run_config,
+        skip_cache_prefix=True,
+    )
 
     if not result or "steps" not in result:
         return {"response": "无法生成执行计划，请尝试更具体的描述。"}

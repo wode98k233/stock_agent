@@ -17,6 +17,8 @@ pandas>=2.2.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
+# HTTP 客户端：36 处顶层 import 直接依赖（此前仅靠 akshare/tushare 传递，属隐性依赖）
+requests>=2.31.0
 pyinstaller>=6.0.0
 pytest>=7.0.0
 pytest-asyncio>=0.18.0

@@ -197,3 +197,28 @@ temp/
 docs/logging-audit-2026-07-12.md
 output/
 data_monitor_config.json
+
+# ── 2026-11-15 v2.2 补齐：对齐开发仓 .gitignore（此前落后 24 行）─────────────
+# 缺这些规则的后果：在公开仓跑一次就会产生一堆未忽略的个人/运行产物，
+# 有误提交风险（例如 db/ 本地库、用户价格偏好、历史语料导出）。
+db/
+data/backups/
+data/capability_proposals/
+data/strategy_intent_checks/
+# 运行时价目（个人价格偏好/供应商配置，公开仓只发 default）
+data/pricing/pricing_catalog.json
+data/pricing/pricing_catalog.json.bak
+.thesis_review/
+# 工具压缩语料（由 agent_trace.db 本地导出，含历史数据）
+test/fixtures/tool_corpus/
+docs/diag/
+docs/spikes/
+docs/archive/*.patch
+docs/prototypes/agent-unified-flow-tree.html
+.tmp_*
+.pytest_tmp*/
+.qa_tmp*/
+
+# 第三方前端库（marked/mermaid/highlight/html-to-image，合计 3.5MB）不入库：
+# 首次运行用 `python scripts/ops/fetch_static_libs.py` 按锁定版本 + sha256 拉取
+server/static/lib/

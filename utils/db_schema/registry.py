@@ -64,6 +64,9 @@ ALL_DBS: dict[str, DbDef] = {
     "shortline": DbDef("shortline", app_paths.get_shortline_db_path, tables.shortline.TABLES),
     "thesis": DbDef("thesis", app_paths.get_thesis_db_path, tables.thesis.TABLES),
     "crowding": DbDef("crowding", app_paths.get_crowding_db_path, tables.crowding.TABLES),
+    "deep_report": DbDef("deep_report", app_paths.get_deep_report_db_path,
+                         tables.deep_report.TABLES,
+                         special_migrations=_with_migrate(tables.deep_report.TABLES)[1]),
 }
 
 

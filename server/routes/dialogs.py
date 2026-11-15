@@ -1,4 +1,5 @@
 """对话管理路由：/api/dialogs..."""
+import json
 import os
 
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -20,8 +21,12 @@ async def list_dialogs(request: Request):
 async def create_dialog(request: Request, payload: CreateDialogRequest):
     web = get_web_state(request)
     mode = payload.mode or "react_stock"
+    origin = (payload.origin or "user").strip() or "user"
+    if origin not in {"user", "replay"}:
+        raise HTTPException(status_code=400, detail="origin must be 'user' or 'replay'")
     ensure_mode(mode, HTTPException)
-    dialog = web.storage.create_dialog(title=payload.title or "新对话", mode=mode)
+    dialog = web.storage.create_dialog(
+        title=payload.title or "新对话", mode=mode, origin=origin)
     return dialog
 
 
@@ -41,6 +46,9 @@ async def create_message(request: Request, dialog_uuid: str, payload: CreateMess
         raise HTTPException(status_code=404, detail="dialog 不存在")
     mode = payload.mode or dialog["current_mode"] or "react_stock"
     ensure_mode(mode, HTTPException)
+    turn_type = str(payload.turn_type or "auto").strip().lower()
+    if turn_type not in ("chat", "auto", "strategy"):
+        raise HTTPException(status_code=400, detail="turn_type 只能是 chat / auto / strategy")
     try:
         return await web.runtime.submit_message(
             storage=web.storage,
@@ -48,6 +56,8 @@ async def create_message(request: Request, dialog_uuid: str, payload: CreateMess
             dialog_uuid=dialog_uuid,
             content=payload.content,
             mode=mode,
+            turn_type=turn_type,
+            attachments=[a.model_dump() for a in (payload.attachments or [])],
         )
     except RunningTaskError as exc:
         raise HTTPException(
@@ -66,12 +76,25 @@ async def delete_dialog(request: Request, dialog_uuid: str):
         raise HTTPException(status_code=404, detail="dialog 不存在")
     messages = web.storage.list_messages(dialog_uuid)
     log_files = set()
+    attachment_ids: list[str] = []
     for m in messages:
         lf = m.get("log_file")
         if lf:
             log_files.add(lf)
+        raw = m.get("attachments")
+        if raw:
+            try:
+                attachment_ids.extend(str(x["id"]) for x in json.loads(raw) if x.get("id"))
+            except Exception:  # noqa: BLE001
+                pass
     web.storage.delete_dialog(dialog_uuid)
     web.agent_context.clear_memory(dialog_uuid)
+    if attachment_ids:
+        try:
+            from server.uploads import delete_ids
+            delete_ids(attachment_ids)
+        except Exception:  # noqa: BLE001
+            pass
     for lf in log_files:
         try:
             from utils.app_paths import get_logs_dir

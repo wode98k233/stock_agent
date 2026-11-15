@@ -27,25 +27,12 @@ class Scenario(Enum):
 
 # ── 股票代码/名称提取 ──────────────────────────────────────
 
-# 常见股票名称（高频出现的，用于快速识别）
-_well_known_stocks = {
-    "贵州茅台": "600519", "茅台": "600519",
-    "长江电力": "600900", "比亚迪": "002594",
-    "中国平安": "601318", "平安银行": "000001",
-    "招商银行": "600036", "五粮液": "000858",
-    "宁德时代": "300750", "中芯国际": "688981",
-    "腾讯": "00700", "阿里巴巴": "09988",
-    "工商银行": "601398", "建设银行": "601939",
-    "农业银行": "601288", "中国银行": "601988",
-    "贵州茅台酒": "600519", "洋河股份": "002304",
-    "泸州老窖": "000568", "山西汾酒": "600809",
-    "隆基绿能": "601012", "通威股份": "600438",
-    "阳光电源": "300274", "药明康德": "603259",
-    "恒瑞医药": "600276", "海天味业": "603288",
-    "中国中免": "601888", "紫金矿业": "601899",
-    "华为": None,  # 未上市
-    "寒武纪": "688256",
-}
+# ⚠️ 红线（2026-11-01）：**名称→代码的映射是数据，不是代码**。
+# 个股高频简称/俗称存 `market_data.db.symbol_alias`（kind='stock'，数据源
+# `data/symbol_aliases.json`，灌库 `scripts/ops/seed_symbol_aliases.py --apply`），
+# 这里只查询（`backtest/symbol_alias.py`）。
+# 不要再加 `{"贵州茅台": "600519"}` 这类字典（守卫：
+# test/unit/test_no_hardcoded_symbol_aliases.py）。
 
 # 板块/概念名称（用于区分板块和个股）
 _common_sectors = [
@@ -79,13 +66,20 @@ def extract_stock_codes(text: str) -> list:
 
 
 def extract_stock_names(text: str) -> list:
-    """从文本中提取股票名称"""
+    """从文本中提取股票名称（名字表在库里，不在代码里）。
+
+    长名优先（「贵州茅台酒」先于「贵州茅台」），等长按数据文件行序；
+    库里查不到就是查不到（返回空列表，不猜）。
+    """
+    from backtest.symbol_alias import list_aliases
+
+    rows = list_aliases("stock")
+    if not rows:
+        return []
     found = []
-    for name in sorted(_well_known_stocks.keys(), key=len, reverse=True):
-        if name in text:
-            code = _well_known_stocks[name]
-            if code:
-                found.append({"name": name, "code": code})
+    for name, code in sorted(rows, key=lambda r: len(r[0]), reverse=True):
+        if name and code and name in text:
+            found.append({"name": name, "code": code})
     return found
 
 

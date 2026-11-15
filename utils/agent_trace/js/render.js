@@ -243,6 +243,111 @@ function closeDrawer() {
   document.querySelectorAll('.step-card.selected-step').forEach(el => el.classList.remove('selected-step'));
 }
 
+/* ── 摘要行（steps.input/output 瘦身产物）──────────────────────────────
+   写入端见 utils/agent_trace/payload.py：
+   - llm_prompt_ref：LLM 步的 prompt 已由后端用 messages 重建，正常不会走到这里；
+   - state_digest：节点步的 state 摘要（有损），渲染成「状态摘要卡」而不是裸 JSON。
+   设计 docs/superpowers/specs/2026-10-19-trace-storage-slimming-design.md §9.3 选项 A。 */
+function parseTraceSummary(raw) {
+  if (!raw) return null;
+  let d = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (t[0] !== '{') return null;
+    try { d = JSON.parse(t); } catch (e) { return null; }
+  }
+  if (!d || typeof d !== 'object') return null;
+  return (d._kind === 'state_digest' || d._kind === 'llm_prompt_ref') ? d : null;
+}
+
+function fmtChars(n) {
+  const v = Number(n) || 0;
+  if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB';
+  if (v >= 1024) return (v / 1024).toFixed(1) + ' KB';
+  return v + ' 字符';
+}
+
+function renderIoPanel(title, raw, emptyText) {
+  if (!raw) {
+    return '<div style="color:var(--muted);text-align:center;padding-top:40px;font-size:10px">' + emptyText + '</div>';
+  }
+  const digest = parseTraceSummary(raw);
+  if (digest) {
+    return '<div class="drawer-section"><div class="drawer-section-title">' + title + '</div>'
+      + renderSummaryCard(digest) + '</div>';
+  }
+  return '<div class="drawer-section"><div class="drawer-section-title">' + title + '</div>'
+    + renderFormattedContent(raw) + '</div>';
+}
+
+function renderSummaryCard(d) {
+  if (d._kind === 'llm_prompt_ref') {
+    return '<div class="digest-card">'
+      + '<div class="digest-note">prompt 已瘦身存储为引用摘要（' + (d.msg_count || 0) + ' 条消息 · '
+      + fmtChars(d.chars) + '），切到「消息」tab 看完整逐条内容。</div>'
+      + '<div class="digest-snippet">' + esc(String(d.preview || '')) + '</div>'
+      + '</div>';
+  }
+
+  // 摘要形状见 utils/agent_trace/payload.py 模块文档：
+  //   "_" 前缀 = 保留键（_acc 累积容器 / _clipped 被裁字段 / _keys / _truncated），
+  //   其余为平铺保留的真实字段（与原 output 同形状，消费点按原字段名照读）。
+  const acc = d._acc || {};
+  const clipped = d._clipped || {};
+  const truncated = new Set(d._truncated || []);
+  const keptKeys = Object.keys(d).filter(k => !k.startsWith('_'));
+
+  let html = '<div class="digest-card">';
+  html += '<div class="digest-note">节点 state 已摘要存储（原文 ' + fmtChars(d._orig_chars)
+    + '）。完整中间产物不再入库 —— 工具入参/出参见 tool 步骤，对话与工具结果见「消息」。</div>';
+
+  const accKeys = Object.keys(acc);
+  if (accKeys.length) {
+    html += '<div class="digest-sub">累积容器（只记形状）</div><table class="digest-table">';
+    for (const k of accKeys) {
+      const v = acc[k] || {};
+      html += '<tr><td class="digest-key">' + esc(k) + '</td>'
+        + '<td class="digest-meta">' + esc(v.type || '?')
+        + (v.count != null ? ' · ' + v.count + ' 条' : '')
+        + ' · ' + fmtChars(v.chars) + '</td></tr>';
+      if (v.last) {
+        html += '<tr><td colspan="2"><div class="digest-snippet">' + esc(String(v.last)) + '</div></td></tr>';
+      }
+    }
+    html += '</table>';
+  }
+
+  const clippedKeys = Object.keys(clipped);
+  if (clippedKeys.length) {
+    html += '<div class="digest-sub">已裁剪字段</div><table class="digest-table">';
+    for (const k of clippedKeys) {
+      const v = clipped[k] || {};
+      html += '<tr><td class="digest-key">' + esc(k) + '</td>'
+        + '<td class="digest-meta">' + esc(v.type || '?') + ' · ' + fmtChars(v.chars)
+        + (truncated.has(k) ? ' · 已截断' : '') + '</td></tr>';
+      if (v.head) {
+        html += '<tr><td colspan="2"><div class="digest-snippet">' + esc(String(v.head)) + '</div></td></tr>';
+      }
+    }
+    html += '</table>';
+  }
+
+  if (keptKeys.length) {
+    html += '<div class="digest-sub">保留字段</div><table class="digest-table">';
+    for (const k of keptKeys) {
+      html += '<tr><td class="digest-key">' + esc(k) + '</td>'
+        + '<td class="digest-meta">' + esc(JSON.stringify(d[k])) + '</td></tr>';
+    }
+    html += '</table>';
+  }
+
+  if (d._note) html += '<div class="digest-note">' + esc(d._note) + '</div>';
+  html += '<div class="digest-note">键：' + esc((d._keys || []).join('、'))
+    + (d._keys_omitted ? '（其余 ' + d._keys_omitted + ' 个键省略）' : '') + '</div>';
+  html += '</div>';
+  return html;
+}
+
 function renderDrawerContent() {
   const el = document.getElementById('drawerBody');
   const s = S.selectedStep;
@@ -294,13 +399,9 @@ function renderDrawerContent() {
     }
     el.innerHTML = html;
   } else if (tab === 'input') {
-    el.innerHTML = s.input
-      ? '<div class="drawer-section"><div class="drawer-section-title">输入数据</div>' + renderFormattedContent(s.input) + '</div>'
-      : '<div style="color:var(--muted);text-align:center;padding-top:40px;font-size:10px">无输入数据</div>';
+    el.innerHTML = renderIoPanel('输入数据', s.input, '无输入数据');
   } else if (tab === 'output') {
-    el.innerHTML = s.output
-      ? '<div class="drawer-section"><div class="drawer-section-title">输出数据</div>' + renderFormattedContent(s.output) + '</div>'
-      : '<div style="color:var(--muted);text-align:center;padding-top:40px;font-size:10px">无输出数据</div>';
+    el.innerHTML = renderIoPanel('输出数据', s.output, '无输出数据');
   } else if (tab === 'messages') {
     el.innerHTML = renderDrawerMessagesContent(s);
   }
@@ -444,6 +545,8 @@ function renderTraceView() {
 
   leftHtml += renderAnalysisPanel(steps, ctxAnalysis);
   leftPanel.innerHTML = leftHtml;
+  // 左栏加「概览（现状，leftHtml 原样平移）/ 上下文（新增）」两个 pane；概览内的行为不变
+  window.ContextPanel.mount(leftPanel, leftHtml, run.id);
 
   const dupFingerprints = new Set(ctxAnalysis.dupMessages.map(d => d.fingerprint));
   _paraMap = ctxAnalysis.paraMap;

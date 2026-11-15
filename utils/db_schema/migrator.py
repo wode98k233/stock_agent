@@ -22,6 +22,32 @@ _SKIP_COL_LINE = re.compile(
     r"^\s*(PRIMARY|UNIQUE|FOREIGN|CHECK|CONSTRAINT)\b", re.IGNORECASE)
 
 
+def _strip_sql_comments(text: str) -> str:
+    """去掉 DDL 里的 -- 行注释（字符串字面量内的不算）。
+
+    ⚠️ 必须在**按逗号切分之前**剥掉：注释行与它后面的列定义属于同一个顶层
+    片段，片段以 -- 开头时列名正则匹配不到 → 该列被整段吞掉。实测
+    strategy_run.trace_run_id（声明在 5 行 -- 注释之后）就是这样从 diff 引擎里
+    消失的：init_dbs.py --check 报「无差异」，ensure_schema 永远不补列，生产库
+    悄悄缺列（写侧只能靠 _missing_columns 兜底跳过）。
+    """
+    out = []
+    for line in text.splitlines():
+        quote = ""
+        cut = -1
+        for i, ch in enumerate(line):
+            if quote:
+                if ch == quote:
+                    quote = ""
+            elif ch in ("'", '"'):
+                quote = ch
+            elif ch == "-" and line[i + 1:i + 2] == "-":
+                cut = i
+                break
+        out.append(line[:cut] if cut >= 0 else line)
+    return "\n".join(out)
+
+
 def _split_top_level(s: str, sep: str = ",") -> list[str]:
     """按 sep 分割，忽略括号内的 sep。"""
     parts, depth, cur = [], 0, []
@@ -47,7 +73,8 @@ def _extract_columns(ddl: str) -> list[str]:
     if start == -1 or end == -1 or end < start:
         return []
     cols = []
-    for part in _split_top_level(ddl[start + 1:end]):
+    body = _strip_sql_comments(ddl[start + 1:end])
+    for part in _split_top_level(body):
         s = part.strip()
         if not s or _SKIP_COL_LINE.match(s):
             continue
@@ -74,10 +101,10 @@ def _table_exists(conn, name: str) -> bool:
 
 def _col_def(ddl: str, col: str) -> str:
     """从 DDL 原文取某列的定义片段（ALTER TABLE ADD COLUMN 用）。"""
-    for line in ddl.splitlines():
+    for line in _strip_sql_comments(ddl).splitlines():
         m = re.match(r"^\s*([A-Za-z_]\w*)\s+(.*)$", line)
         if m and m.group(1) == col:
-            return f"{m.group(1)} {m.group(2).rstrip(',')}"
+            return f"{m.group(1)} {m.group(2).strip().rstrip(',').strip()}"
     raise ValueError(f"列定义未找到: {col}（column={col} ddl={ddl!r}）")
 
 

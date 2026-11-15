@@ -29,6 +29,8 @@ MACRO_INDICATOR_META = {
     "lpr_1y":  {"label": "LPR 1年期",     "unit": "%", "period_type": "monthly"},
     "lpr_5y":  {"label": "LPR 5年期",     "unit": "%", "period_type": "monthly"},
     "cpi_yoy": {"label": "CPI 同比",      "unit": "%", "period_type": "monthly"},
+    # 社零同比：消费/白酒深度报告的需求侧主指标（deep_sector_consumer / baijiu 模板使用）
+    "cn_retail_yoy": {"label": "社会消费品零售总额同比", "unit": "%", "period_type": "monthly"},
     "gdp_yoy": {"label": "GDP 同比",      "unit": "%", "period_type": "quarterly"},
     "pmi_mfg": {"label": "制造业 PMI",    "unit": "指数", "period_type": "monthly"},
     "cn10_y":  {"label": "10Y 国债收益率", "unit": "%", "period_type": "daily"},
@@ -42,6 +44,14 @@ MACRO_INDICATOR_META = {
     # 黄金台账（gold_regime）专用：六因子中五个走宏观表，只有位置维度走指数日线。
     "us2_y":    {"label": "2Y 美债收益率",   "unit": "%", "period_type": "daily"},
     "us_cpi_yoy": {"label": "美国 CPI 同比", "unit": "%", "period_type": "monthly"},
+    # 美国 10Y 实际利率（TIPS，FRED DFII10）：黄金台账 ③ 的前瞻口径。
+    # 与 us_cpi_yoy 的关系：后者是「10Y 名义 − CPI 同比」事后口径的另一条腿，
+    # 换口径后仍保留声明（历史对照/回测复现用），但 ③ 号因子不再引用。
+    "tips_10y": {"label": "美国10Y实际利率(TIPS)", "unit": "%", "period_type": "daily"},
+    # 中证800 盈利收益率（E/P = 100/滚动PE，月频）。A股台账 ② 的长历史估值口径。
+    "idx800_ey": {"label": "中证800盈利收益率(E/P)", "unit": "%", "period_type": "monthly"},
+    # 红利低波股息率（估算序列，2015 起）。红利台账 ① 的长历史口径。
+    "h30269_dy": {"label": "红利低波股息率(估算)", "unit": "%", "period_type": "daily"},
     "gold_etf_holdings": {"label": "全球黄金ETF总库存", "unit": "吨", "period_type": "daily"},
     "cn_gold_reserve": {"label": "中国黄金储备", "unit": "万盎司", "period_type": "monthly"},
     "au_sge":   {"label": "上海金 Au99.99",  "unit": "元/克", "period_type": "daily"},
@@ -146,19 +156,32 @@ def upsert_indicator_series(code: str, meta: dict, df, source: str = "akshare") 
 
 
 def _upsert_indicator(code: str, meta: dict, df, now: str, source: str = "akshare") -> int:
-    """单指标增量落库：库内 MAX(report_date) 之后的行 INSERT OR REPLACE。"""
+    """单指标落库：**两端增量**——库内已覆盖区间跳过，早于起点或晚于终点的行写入。
+
+    为什么不是单纯的 `report_date > MAX(report_date)`：
+    早期实现只向前增量，导致**历史永远补不进来**。2026-11-01 把 `_MACRO_APIS` 的
+    lookback_days 从 400 放大到 4000（为了让台账的分位/相关性有足够样本）后，
+    重新同步返回 `added: 0`——因为源返回的 2015-2026 全量数据里，每一行的日期都
+    <= 库内已有的 2026-10-30，被增量过滤整体丢弃。
+    改为「只跳过库内已覆盖的 [min, max] 区间」后，向前回填与向后增量都成立。
+
+    ⚠️ 已知不覆盖：区间**中间的空洞**（如某年整段缺失）不会被补——那种情况在
+    akshare 系日频源上没出现过，真要补得先删该指标的区间再重跑。
+    """
     if df is None or df.empty:
         return 0
     with get_fundamental_db() as conn:
         row = conn.execute(
-            "SELECT MAX(report_date) FROM macro_indicator WHERE indicator_code = ?",
-            (code,)).fetchone()
+            "SELECT MAX(report_date), MIN(report_date) FROM macro_indicator"
+            " WHERE indicator_code = ?", (code,)).fetchone()
         max_date = row[0] if row and row[0] else ""
+        min_date = row[1] if row and row[1] else ""
 
         added = 0
         for _, r in df.iterrows():
             report_date = str(r["report_date"])
-            if report_date <= max_date:  # 增量过滤（已存在的不重写）
+            # 库内已覆盖区间 → 跳过（不重写，避免每轮同步都全量覆盖）
+            if min_date and max_date and min_date <= report_date <= max_date:
                 continue
             conn.execute(
                 "INSERT OR REPLACE INTO macro_indicator"

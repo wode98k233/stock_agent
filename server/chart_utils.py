@@ -5,8 +5,13 @@
 import numpy as np
 
 
-def round_list(arr, decimals=2) -> list:
-    """四舍五入并转为列表，NaN 转 None"""
+def round_list(arr, decimals=4) -> list:
+    """四舍五入并转为列表，NaN 转 None
+
+    精度用 4 位而不是 2 位：ETF / 低价股价格量级在 0.5~2 元，两位小数会把均线
+    压成台阶（2026-11-04 用户反馈「均线很多平线」实测 MA5 有 85 个相邻同值）。
+    展示精度由前端的格式化函数决定，不在这里丢。
+    """
     return [round(float(v), decimals) if not np.isnan(v) else None for v in arr]
 
 

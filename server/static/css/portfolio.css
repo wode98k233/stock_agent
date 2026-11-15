@@ -123,7 +123,9 @@
   display: grid;
   /* 列数必须与 pf-pos-head 的 13 个 span / 数据行的 13 个 div 一一对应；
      末列固定宽（表头空占位与数据行按钮区共用同一宽度，保证两行列轨对齐） */
-  grid-template-columns: minmax(110px, 1.4fr) 52px 52px 48px 62px 62px 70px 68px 68px 68px 68px 52px 268px;
+  /* 盈亏率列加宽到 150（迷你条要能读幅度），空间从「已实现 60→44」「来源 46→36」
+     和「操作 236→150（按钮折两行）」里腾出来（2026-11-05 用户要求）。 */
+  grid-template-columns: minmax(96px, 1.3fr) 46px 46px 42px 56px 56px 62px 60px 150px 60px 44px 36px 150px;
   gap: 6px;
   align-items: center;
   padding: 8px 10px;
@@ -195,8 +197,21 @@
 .pf-pos-code { font-size: 11px; color: var(--muted); }
 .pf-pos-qty { font-weight: 600; }
 
-.pf-pos-ops { display: flex; gap: 4px; flex-wrap: nowrap; }
-.pf-pos-ops .pf-btn { padding: 3px 7px; white-space: nowrap; }
+/* 五个按钮固定三列两行：用网格让两行的左边缘对齐，
+   flex-wrap + 右对齐会变成「3 个靠左、2 个靠右」的参差效果。 */
+.pf-pos-ops {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  justify-items: stretch;
+}
+.pf-pos-ops .pf-btn {
+  padding: 3px 4px;
+  white-space: nowrap;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .pf-btn {
   padding: 3px 9px;
@@ -318,3 +333,18 @@
 }
 
 .pf-add-btn:hover { background: var(--brand-hover); }
+
+/* ── 未来 30 天公司事件（2026-11-07） ───────────────────────── */
+.pf-events-section { margin: 10px 16px 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; }
+.pf-events-head { padding: 8px 12px; font-size: 12px; font-weight: 800; border-bottom: 1px solid #eef2f5; }
+.pf-events-count { color: var(--brand); }
+.pf-events-rows { padding: 4px 8px 8px; max-height: 180px; overflow-y: auto; }
+.pf-event-row { display: grid; grid-template-columns: 46px 52px 1fr; gap: 8px; padding: 5px 4px; font-size: 12px; align-items: start; }
+.pf-event-date { font-family: Consolas, monospace; color: #334155; font-weight: 700; }
+.pf-event-type { font-size: 10px; font-weight: 700; color: #fff; text-align: center; border-radius: 3px; padding: 1px 4px; }
+.pf-event-type.unlock { background: #b45309; }
+.pf-event-type.dividend { background: #176b5b; }
+.pf-event-type.disclosure { background: #64748b; }
+.pf-event-type.meeting { background: #7c3aed; }
+.pf-event-type.forecast { background: #b91c1c; }
+.pf-event-main { min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

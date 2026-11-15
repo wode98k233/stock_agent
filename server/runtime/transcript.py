@@ -16,6 +16,16 @@ import json
 INPUT_SUMMARY_CHARS = 200
 OUTPUT_SUMMARY_CHARS = 300
 
+# AI 正文（messages.content）事件内携带上限。
+# ⚠️ 存储侧上限 9500 字，但 SSE 每条都带全文会显著推高事件体积（实测 P90=3602 / max=9500），
+# 故与 reasoning 同量级截断；截断不破坏 JSON 结构（前端只做展示，不 parse 后回传）。
+CONTENT_CHARS = 2000
+
+# 上下文压缩摘要是**内部合成占位消息**，不是模型真实输出（产出点
+# agents/react/context.py::_summary_to_message），不进过程流，否则会凭空多出一堆
+# 「已压缩历史轮次摘要」节点。
+COMPACTION_PREFIX = "【已压缩历史轮次摘要"
+
 # steps.status → 条目状态（trace 侧 success/error/running → UI 侧 ok/error/running）
 _STATUS_MAP = {"success": "ok", "error": "error", "running": "running"}
 
@@ -36,13 +46,15 @@ def summarize(text, limit: int) -> str:
 
 
 def _entry_version(entry: dict) -> str:
-    """条目版本：同 entry_id 内容变化（running→ok/error）时必须重推。"""
+    """条目版本：同 entry_id 内容变化（running→ok/error、正文增长）时必须重推。"""
     return json.dumps(
         {
             "status": entry.get("status"),
             "duration_ms": entry.get("duration_ms"),
             "error": entry.get("error"),
             "text_len": len(entry.get("text") or ""),
+            "content_len": len(entry.get("content") or ""),
+            "content_trunc": entry.get("content_truncated"),
             "out_len": len(entry.get("output_summary") or ""),
         },
         ensure_ascii=False,
@@ -77,23 +89,34 @@ def build_tool_entry(step: dict) -> dict | None:
 
 
 def build_think_entry(message: dict) -> dict | None:
-    """messages 行（reasoning 非空）→ think 条目。"""
+    """messages 行（AI）→ think 条目。
+
+    一条 AI 消息可能只带 reasoning（思考+工具调用轮）、只带 content（思考+正文轮，
+    正文可能是 markdown 也可能是仪表盘 JSON），也可能两者都有 —— 两种都收，
+    reasoning 为空时不返回 None（否则「思考+文字」的正文会被整段丢弃）。
+    """
     if not message:
-        return None
-    text = message.get("reasoning")
-    if not text or not str(text).strip():
         return None
     mid = message.get("id")
     if mid is None:
         return None
+    text = str(message.get("reasoning") or "").strip()
+    content = str(message.get("content") or "").strip()
+    if not text and not content:
+        return None
+    if content.startswith(COMPACTION_PREFIX):
+        return None
     sid = int(message.get("step_id") or 0)
+    truncated = len(content) > CONTENT_CHARS
     return {
         "type": "transcript",
         "entry_id": f"t:{mid}",
         "kind": "think",
         "run_id": message.get("run_id"),
         "sort": [sid, int(mid)],
-        "text": str(text),
+        "text": text,
+        "content": content[:CONTENT_CHARS],
+        "content_truncated": truncated or None,
     }
 
 
@@ -110,10 +133,15 @@ def read_run_entries(conn, run_id: str) -> list[dict]:
         entry = build_tool_entry(dict(row))
         if entry:
             entries.append(entry)
+    # ⚠️ role='ai' 是硬约束：一旦引入 content 条件，system/tool/human 行同样有 content，
+    #    实测会多带进 1877 system + 1107 tool + 941 human 行（原查询靠 reasoning 非空
+    #    天然排除了它们，content 路径没有这层保护）。
     for row in conn.execute(
-        "SELECT m.id, m.step_id, m.reasoning, s.run_id "
+        "SELECT m.id, m.step_id, m.reasoning, m.content, s.run_id "
         "FROM messages m JOIN steps s ON s.id = m.step_id "
-        "WHERE s.run_id=? AND m.reasoning IS NOT NULL AND TRIM(m.reasoning) != '' "
+        "WHERE s.run_id=? AND m.role='ai' "
+        "AND ((m.reasoning IS NOT NULL AND TRIM(m.reasoning) != '') "
+        "  OR (m.content IS NOT NULL AND TRIM(m.content) != '')) "
         "ORDER BY m.id",
         (run_id,),
     ).fetchall():
@@ -139,13 +167,17 @@ def changed_entries(conn, run_id: str, seen: dict) -> list[dict]:
     return changed
 
 
-def entries_for_task(trace_run_id: str | None = None) -> list[dict]:
-    """按 run_id 取全量条目；run_id 未知时回退「当前运行中的 run」（与 trace_poller 同口径）。"""
+def entries_for_task(trace_run_id: str | None = None, since: str | None = None) -> list[dict]:
+    """按 run_id 取全量条目；run_id 未知时回退「当前运行中的 run」（与 trace_poller 同口径）。
+
+    ⚠️ 回退分支必须带 `since`（= 任务创建时间）：不带会跨月命中陈旧 running 行
+    （进程被杀后 end_run 未执行的残留 run），把上一次/上个月的执行过程当成当前任务。
+    """
     from utils.agent_trace.store import store
 
     run_id = trace_run_id
     if not run_id:
-        run = store.find_latest_run(status="running")
+        run = store.find_latest_run(status="running", since=since or "")
         run_id = run["id"] if run else None
     if not run_id:
         return []

@@ -21,7 +21,56 @@ from utils.cache.db_utils import make_db_context
 
 logger = logging.getLogger(__name__)
 
-get_market_data_db = make_db_context(lambda: Config.get_market_data_db_path())
+# ⚠️ 必须 WAL（2026-10-18 全站卡顿事故的真因）：
+# 本库是全站最热、也是被后台任务写得最凶的库（K 线保活 / 补尾 / 快照成交额历史）。
+# 默认的 rollback journal 模式下，**写事务持排他锁，所有读被阻塞**（每次最多等
+# busy_timeout=5000ms）——实测 K 线保活写它的 42 秒里，web 全站接口 5~12 秒：
+#   /backtest/runs/.../kline 11596ms、/strategy-research/.../curve 5720ms、
+#   /market-dashboard/snapshot 8584ms（面板是**受害者**，它自己也读写这个库）。
+# backtest.db 早就因为同样的理由开了 WAL（utils/cache/backtest_db.py:49），
+# 本库当时漏了。synchronous=NORMAL 在 WAL 下是安全且推荐的（不必每次提交 fsync）。
+_WAL_LOCK = threading.Lock()
+_wal_ensured = False
+
+
+def _ensure_wal(conn) -> None:
+    """把本库切到 WAL（每进程只尝试一次）。
+
+    两个坑（2026-10-18 实测）：
+    1. **切换需要独占锁** —— 库被其它连接占用时 PRAGMA journal_mode = WAL 直接
+       抛 database is locked。所以「服务在跑」时切不了，
+       **重启后第一轮连接才会生效**；切成功后模式写在库文件头，永久有效。
+    2. **不能每次连接都试** —— 库忙时那条 PRAGMA 会**等待独占锁**，等于把每个
+       请求都拖慢。故先用 PRAGMA journal_mode（读，不需要锁）判断，已经是 WAL 就不动。
+
+    失败只告警不抛：并发优化不该让任何一次数据访问失败。
+    """
+    global _wal_ensured
+    if _wal_ensured:
+        return
+    with _WAL_LOCK:
+        if _wal_ensured:
+            return
+        try:
+            mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+            if mode != "wal":
+                conn.execute("PRAGMA journal_mode = WAL")
+                mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+            if mode == "wal":
+                _wal_ensured = True
+            else:
+                logger.warning(
+                    "[market_data.db] 仍非 WAL（当前 %s）：库被占用时无法切换，"
+                    "重启服务后自动生效；期间后台写入会阻塞全站读接口", mode)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[market_data.db] 切换 WAL 失败（下次连接重试）：%s", e)
+
+
+get_market_data_db = make_db_context(
+    lambda: Config.get_market_data_db_path(),
+    pragmas=("PRAGMA synchronous = NORMAL",),
+    on_connect=_ensure_wal,
+)
 
 
 def init_market_data_tables():
@@ -29,6 +78,9 @@ def init_market_data_tables():
     from utils.db_schema.migrator import ensure_schema
     from utils.db_schema.registry import ALL_DBS
     with get_market_data_db() as conn:
+        # 启动早期显式再试一次：此时进程内连接最少，最容易拿到独占锁把模式切到 WAL
+        # （模式写在库文件头，切一次永久有效）。
+        _ensure_wal(conn)
         ensure_schema(conn, ALL_DBS["market_data"].tables)
 
 
@@ -189,6 +241,34 @@ def get_stock_info(code: str) -> Optional[Dict[str, Any]]:
         c.execute(sql, (code,))
         row = c.fetchone()
         return dict(row) if row else None
+
+
+_NAME_MAP_TTL_S = 300
+_name_map_cache: Dict[str, Any] = {"at": 0.0, "data": {}}
+
+
+def get_stock_name_map(max_age_s: int = _NAME_MAP_TTL_S) -> Dict[str, str]:
+    """一次查出 ``{6 位代码: 名称}``（进程内缓存 5 分钟）。
+
+    用途：全市场快照（同花顺 ``get_spot_all``）不带名称，而涨跌停判定要看 ST。
+    失败一律返回空 dict——名称缺失只会让「剔 ST 口径」退化，不应让广度统计失败。
+    """
+    now = time.time()
+    cached = _name_map_cache["data"]
+    if cached and now - _name_map_cache["at"] < max_age_s:
+        return cached
+    try:
+        with get_market_data_db() as conn:
+            rows = conn.execute(
+                "SELECT code, name FROM stock_info WHERE length(code) = 6 AND name IS NOT NULL"
+            ).fetchall()
+        data = {str(r[0]): str(r[1]) for r in rows}
+        _name_map_cache["data"] = data
+        _name_map_cache["at"] = now
+        return data
+    except Exception:
+        logger.debug("股票名称映射读取失败（涨跌停剔 ST 口径退化）", exc_info=True)
+        return cached or {}
 
 
 # ============================================================
@@ -417,13 +497,65 @@ def _detect_market(code: str) -> str:
     return 'UNKNOWN'
 
 
+# 相邻 bar 间隔中位数超过该值即判定「非日线」（周线 7 天 / 月线 ~30 天）。
+# 用中位数而非最大值：停牌、春节长假都会产生个别长间隔。
+_MAX_DAILY_GAP_DAYS = 5
+
+
 def _min_kline_rows(days: int) -> int:
+    """按请求区间推算最少应有多少根**日线**。
+
+    固定 20 根会放过月线：2026-10 实测 ``stock_daily`` 的 ``000300`` 被写入
+    24 根月末快照（source=mx_data），通过了旧校验并短路回测取数。
+    改为按自然日比例（约 5/7 为交易日，再放宽到 1/5）：一年 ≈ 73 根。
+    """
     if days <= 5:
         return 1
-    return min(days, min(20, max(5, days // 4)))
+    # min(days, ...)：短窗口不可能产出比自然日更多的 bar，不额外抬门槛
+    return min(days, max(20, days // 5))
+
+
+def _median_kline_gap_days(df: pd.DataFrame) -> Optional[float]:
+    """相邻交易日期差值的中位数（天）；不足 3 根无法判定时返回 None。"""
+    if df is None or len(df) < 3:
+        return None
+    for col in ("date", "trade_date"):
+        if col in df.columns:
+            dates = df[col]
+            break
+    else:
+        dates = df.index
+    series = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dropna().sort_values()
+    if len(series) < 3:
+        return None
+    gaps = series.diff().dt.days.dropna()
+    if gaps.empty:
+        return None
+    return float(gaps.median())
+
+
+def _ensure_daily_kline(df: pd.DataFrame, days: int, code: str, source: str) -> None:
+    """拒绝周线/月线快照写库（2026-10 实测 000300 被写入 24 根月末 bar）。
+
+    停牌可能造成个别长间隔，故只卡**中位数**；长期停牌的极端标的宁可拒收让
+    上层报错，也不能把月线当日线喂给回测（会把「月末买次月卖」当次日交易）。
+    """
+    gap = _median_kline_gap_days(df)
+    if gap is None or gap <= _MAX_DAILY_GAP_DAYS:
+        return
+    logger.warning(
+        "拒绝非日线数据 %s: 请求区间 %s 天, 实际 %s 行, 相邻间隔中位数 %.1f 天, 源=%s",
+        code, days, len(df), gap, source or "auto",
+    )
+    raise ValueError(
+        f"{source or 'auto'} 返回 {code} 的不是日线数据"
+        f"（请求 {days} 天, 共 {len(df)} 根, 相邻间隔中位数 {gap:g} 天）"
+    )
 
 
 def _ensure_enough_history_rows(df: pd.DataFrame, days: int, code: str, source: str) -> None:
+    # 频率闸门先判：月线快照同时会触发「行数过少」，但「不是日线」的提示更准确
+    _ensure_daily_kline(df, days, code, source)
     min_rows = _min_kline_rows(days)
     if len(df) < min_rows:
         raise ValueError(f"{source or 'auto'} 返回 {code} K 线过少: {len(df)} < {min_rows}")
@@ -703,9 +835,12 @@ def fetch_and_store_index_daily(code: str, name: str = '', days: int = 500,
     for attempt in range(max_retries):
         try:
             if is_csindex:
-                # 中证指数走公司自有接口；无「条数」参数，按天数换算起止日
-                from datetime import timedelta as _td
-                start = (_date.today() - _td(int(days * 1.5))).strftime('%Y%m%d')
+                # 中证指数走公司自有接口；无「条数」参数。
+                # **一律从 2010 起拉全量**，不再按 days*1.5 换算起点：那个窗口会把历史
+                # 截断——2026-11-01 实测 H30269（红利低波）库内只有 524 行（2024-08 起），
+                # 直接导致 dividend_env 全部因子 n=26、相关性无法验证、分位只有两年样本。
+                # 全量本身很小（H30269 全程约 3400 行），一次拉完即可，增量靠库内去重。
+                start = '20100101'
                 df = ak_index_hist_csindex(symbol, start, '')
             elif is_hk:
                 df = _fetch_hk_index_daily(ak, symbol)
@@ -739,9 +874,21 @@ def fetch_and_store_index_daily(code: str, name: str = '', days: int = 500,
             if 'trade_date' in df.columns:
                 df = df.tail(days)
 
-            # 5. 增量过滤：去掉库里已有的日期，只入库新数据
+            # 5. 增量过滤：**跳过库内已覆盖的 [earliest, latest] 区间**，两端都写。
+            #
+            # ⚠️ 原实现是 `df['trade_date'] > existing_latest`（只向前增量），
+            # 导致历史永远补不进来：2026-11-01 把中证指数源改成全量拉取后，
+            # H30269 仍然 added=0——因为源返回的 2013-2026 全部 <= 库内已有的 2026-10-30，
+            # 被整体丢弃，库内继续停在 524 行（2024-08 起）。
+            # 改为两端增量后，首次采集即可把 2013 年以来的历史补齐，日常仍只补新交易日。
+            # ⚠️ 已知不覆盖区间中间的缺口（同 macro_db._upsert_indicator）。
             if existing_latest and 'trade_date' in df.columns:
-                df = df[df['trade_date'] > existing_latest]
+                hi = pd.Timestamp(existing_latest)
+                if existing_earliest:
+                    lo = pd.Timestamp(existing_earliest)
+                    df = df[(df['trade_date'] < lo) | (df['trade_date'] > hi)]
+                else:
+                    df = df[df['trade_date'] > hi]
 
             if df.empty:
                 if name:
@@ -891,3 +1038,108 @@ def fetch_and_store_board_kline(board_code: str, days: int = 500,
                 _time.sleep((attempt + 1) * 3)
 
     raise RuntimeError(f'板块 {board_code} K线采集失败（重试{max_retries}次）: {last_error}')
+
+# ============================================================
+# 公司事件（corporate_events）
+# ============================================================
+
+def upsert_corporate_events(records: List[Dict[str, Any]]) -> int:
+    """公司事件幂等写入（event_id 主键）。"""
+    if not records:
+        return 0
+    import json as _json
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows = [(
+        str(r['event_id']), str(r['code']), str(r['event_type']),
+        str(r['event_date']), str(r['title']),
+        _json.dumps(r.get('payload'), ensure_ascii=False) if r.get('payload') is not None else None,
+        str(r.get('source') or 'akshare'), now,
+    ) for r in records]
+    with get_market_data_db() as conn:
+        conn.executemany(
+            'INSERT OR REPLACE INTO corporate_events '
+            '(event_id, code, event_type, event_date, title, payload, source, fetched_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)', rows)
+    return len(rows)
+
+
+def query_corporate_events(*, codes=None, date_from=None, date_to=None,
+                           types=None, limit=500) -> List[Dict[str, Any]]:
+    """按代码/日期窗口/类型查询公司事件，日期升序。"""
+    import json as _json
+    where, params = [], []
+    if codes:
+        marks = ','.join('?' * len(codes))
+        where.append(f'code IN ({marks})')
+        params.extend([str(c) for c in codes])
+    if date_from:
+        where.append('event_date >= ?')
+        params.append(str(date_from))
+    if date_to:
+        where.append('event_date <= ?')
+        params.append(str(date_to))
+    if types:
+        marks = ','.join('?' * len(types))
+        where.append(f'event_type IN ({marks})')
+        params.extend([str(t) for t in types])
+    sql = ('SELECT event_id, code, event_type, event_date, title, payload, source '
+           'FROM corporate_events')
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY event_date, code LIMIT ?'
+    params.append(int(limit or 500))
+    try:
+        with get_market_data_db() as conn:
+            rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        # 新库/未迁移时表还不存在：按「无事件」处理，日历与事件条不应因此 500
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        try:
+            item['payload'] = _json.loads(item['payload']) if item.get('payload') else None
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(item)
+    return out
+
+# ============================================================
+# 融资融券日度（margin_daily）
+# ============================================================
+
+def upsert_margin_daily(records: List[Dict[str, Any]]) -> int:
+    """融资融券日度幂等写入（主键 code + trade_date）。"""
+    if not records:
+        return 0
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows = [(
+        str(r['code']), str(r['trade_date']), str(r.get('market') or 'cn'),
+        r.get('fin_balance'), r.get('fin_buy'), r.get('fin_repay'),
+        r.get('sec_balance'), r.get('total_balance'),
+        str(r.get('source') or 'akshare'), now,
+    ) for r in records]
+    with get_market_data_db() as conn:
+        conn.executemany(
+            'INSERT OR REPLACE INTO margin_daily '
+            '(code, trade_date, market, fin_balance, fin_buy, fin_repay, '
+            ' sec_balance, total_balance, source, updated_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', rows)
+    return len(rows)
+
+
+def query_margin_daily(code: str, days: int = 60) -> List[Dict[str, Any]]:
+    """按代码取最近 days 个交易日的融资融券数据（日期升序）。"""
+    try:
+        with get_market_data_db() as conn:
+            rows = conn.execute(
+                'SELECT code, trade_date, market, fin_balance, fin_buy, fin_repay, '
+                '       sec_balance, total_balance, source '
+                'FROM margin_daily WHERE code = ? '
+                'ORDER BY trade_date DESC LIMIT ?',
+                (str(code), int(days))).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = [dict(r) for r in rows]
+    out.reverse()
+    return out

@@ -8,25 +8,71 @@
 实现上直接调用 server.routes.strategy_research.start_strategy_run 同一入口
 （同进程内函数调用，不走 HTTP 自调用），保证面板与对话两个入口行为一致。
 """
+import re
+from typing import List
+
 from tools.skill_builder import SkillBuilder, skill_tool
+
+_CODE_RE = re.compile(r'^(sh|sz|bj)?[0-9]{6}$')
+
+
+def _is_tradable_code(code: str) -> bool:
+    """标的代码是否可回测（6 位数字，或 sh/sz/bj 前缀）。"""
+    return bool(_CODE_RE.match((code or '').strip().lower()))
 
 
 class StrategyResearchSkill(SkillBuilder):
     """策略研发技能"""
 
     @skill_tool
-    def create_strategy_research(self, idea: str, universe: str = "600519",
-                                 days: int = 1095) -> dict:
+    def create_strategy_research(self, idea: str, universe: str = "",
+                                 days: int = 1095,
+                                 entry_timing: str = "next_open",
+                                 exit_timing: str = "") -> dict:
         """创建策略研究任务。输入自然语言交易想法和 6 位 A 股代码，后台自动执行
-        LLM 生成策略 → 编译校验 → IS/OOS 双段回测 → 最多 8 轮迭代选优。"""
+        LLM 生成策略 → 编译校验 → IS/OOS 双段回测 → 最多 8 轮迭代选优。
+
+        槽位闸门（兜底层）：universe 为空或不是可回测代码、idea 为空时，
+        返回 {code: 1, need_clarify: True, missing: [...]}，必须先向用户问清，
+        不得用默认标的代替。
+
+        成交口径（买卖各自独立，三档枚举）：
+        - entry_timing：next_open（次日开盘，默认）/ same_close（当日收盘价，
+          表达「尾盘买入」）/ next_close（次日收盘）
+        - exit_timing：留空（默认）= 跟随 entry_timing；也可显式给上面三档之一，
+          用来表达「尾盘买入、次日开盘卖出」这类买卖不同口径的需求。"""
         from datetime import datetime, timedelta
         from server.routes.strategy_research import start_strategy_run
 
+        idea = (idea or '').strip()
+        universe = (universe or '').strip().lower()
+        missing: List[str] = []
+        if not idea:
+            missing.append('idea')
+        if not universe:
+            missing.append('universe')
+        elif not _is_tradable_code(universe):
+            return {
+                'code': 1, 'need_clarify': True, 'missing': ['universe'],
+                'msg': '标的 ' + universe + ' 不是可回测的代码（6 位数字，或 sh/sz/bj 前缀）。请先确认标的。',
+            }
+        if universe[:2] in ('sh', 'sz', 'bj'):
+            # 归一到纯 6 位数字：下游 start_strategy_run 只接受 ^\d{6}$
+            # （server/routes/strategy_research.py:126）
+            universe = universe[2:]
+        if missing:
+            hints = {'idea': '想验证的买点/卖点条件', 'universe': '标的（哪只股票/ETF/指数）'}
+            return {
+                'code': 1, 'need_clarify': True, 'missing': missing,
+                'msg': '还缺：' + '、'.join(hints[m] for m in missing) + '。先问清楚再跑，不要用默认标的代替。',
+            }
         days = max(180, min(int(days or 1095), 3650))
         end = datetime.now().strftime('%Y-%m-%d')
         start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         return start_strategy_run(idea, universe, period_start=start,
-                                  period_end=end, source='skill')
+                                  period_end=end, source='skill',
+                                  entry_timing=entry_timing,
+                                  exit_timing=exit_timing)
 
     @skill_tool
     def get_strategy_research_status(self, run_uuid: str) -> dict:

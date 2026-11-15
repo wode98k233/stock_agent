@@ -37,7 +37,9 @@ def test_pdor_planner_injects_template_guidance(mock_logger):
     captured = {}
 
     def fake_llm_json_with_retry(llm, messages, logger, label=None, **kwargs):
-        captured["system"] = messages[0][1]
+        # 前缀对齐后 messages[0] 是共享块（state["input"]），模板指引随固定指令落在最后一条 human
+        captured["shared"] = messages[0][1]
+        captured["instr"] = messages[-1][1]
         return {
             "steps": [
                 {"step": 1, "skill": "mx_data", "purpose": "获取板块行情", "type": "info"},
@@ -82,8 +84,9 @@ def test_pdor_planner_injects_template_guidance(mock_logger):
 
     result = asyncio.run(run_case())
 
-    assert "场景化数据契约" in captured["system"]
-    assert "sector_price_action" in captured["system"]
+    assert "场景化数据契约" in captured["instr"]
+    assert "sector_price_action" in captured["instr"]
+    assert captured["shared"] == "CPO 板块还能买吗"
     assert result["plan_steps"][0]["skill"] == "mx_data"
 
 

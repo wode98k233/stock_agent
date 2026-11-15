@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from utils import sqlite_guard
+from utils.agent_trace.blobstore import install_row_factory
+from utils.agent_trace.payload import restore_step_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,20 @@ _all_conns_lock = threading.Lock()
 def month_of(created_at: str) -> str:
     """由 runs.created_at（UTC isoformat）提取月份键 YYYYMM。"""
     return (created_at or "")[:7].replace("-", "")
+
+
+def _restore_step(step: dict) -> dict:
+    """就地把摘要行还原成可展示文本（见 utils/agent_trace/payload.py）。
+
+    - LLM 步的 ``input`` 是 ``llm_prompt_ref`` 摘要 → 用该步 ``messages`` 重建，
+      与摘要化之前的 ``steps.input``（prompt 的 repr）语义等价、结构更清晰；
+    - 节点步的 ``state_digest`` 原样返回，由前端渲染「状态摘要卡」；
+    - 老格式（普通文本 / 非摘要 JSON）原样返回 —— **向后兼容**，不需要全量迁移。
+    """
+    for field in ("input", "output"):
+        if step.get(field) is not None:
+            step[field] = restore_step_text(step[field], step.get("messages"))
+    return step
 
 
 class TraceStore:
@@ -85,7 +101,8 @@ class TraceStore:
     @staticmethod
     def _open_conn(db_path: str) -> sqlite3.Connection:
         conn = sqlite_guard.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        # T2：行工厂透明解压 blobs 引用 —— 新增读点无需再记得调 decode（见 blobstore.py）
+        install_row_factory(conn)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA cache_size=-32768")
         with _all_conns_lock:
@@ -258,7 +275,7 @@ class TraceStore:
         rows = conn.execute(
             "SELECT * FROM steps WHERE run_id=? ORDER BY id", (run_id,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_restore_step(dict(r)) for r in rows]
 
     def get_steps_with_messages(self, run_id: str) -> list:
         conn = self.conn_for_run(run_id)
@@ -282,6 +299,7 @@ class TraceStore:
         for s in steps:
             d = dict(s)
             d["messages"] = msg_by_step.get(s["id"], [])
+            _restore_step(d)
             result.append(d)
         return result
 
@@ -302,6 +320,7 @@ class TraceStore:
             (step_id,),
         ).fetchall()
         result["messages"] = [dict(m) for m in msgs]
+        _restore_step(result)
         return result
 
     def get_runs_by_ids(self, run_ids: list) -> list:
@@ -376,8 +395,15 @@ class TraceStore:
             out.extend(dict(r) for r in rows)
         return out[:limit]
 
-    def find_latest_run(self, status: str = "") -> Optional[dict]:
-        runs = self.list_runs(limit=1, status=status)
+    def find_latest_run(self, status: str = "", since: str = "") -> Optional[dict]:
+        """最近一条 run（可按 status / created_at 下界过滤）。
+
+        ⚠️ 分库后跨月倒序扫描：`status="running"` 且不带 `since` 时，当月没有
+        running 行就会一路回退到旧月库，命中文档性残留的「陈旧 running」run
+        （进程被杀/异常退出时 end_run 未执行）。需要「本次任务的 run」时务必
+        传 `since`（任务创建时间）——见 TracePoller._find_running_run。
+        """
+        runs = self.list_runs(limit=1, status=status, since=since)
         return runs[0] if runs else None
 
     def find_run_by_input(self, user_input: str, before: str = "") -> Optional[str]:
@@ -463,8 +489,17 @@ class TraceStore:
         - 跳过 cache_hit 步骤（A8 缓存命中非真实调用）
         - 基础指标：llm_calls / input_tokens / output_tokens / cached_tokens /
           reasoning_tokens / cache_hit_ratio（cached/input）
-        - daily：按 runs.created_at 的本地日期分桶，取最近 days 天（缺失日补 0）
+        - daily：桶键是**本地** today 往前 days 天（缺失日补 0），而桶内内容按
+          created_at[:10]（**UTC** 日期串）落桶 —— 两者时区口径不同，是既有行为（测试锁死），
+          **不要**按「since + days」推日期标签
         - by_agent / by_model：按 runs.agent_name / extra.model_name 聚合
+        - cost_*：只 SUM 记录时算好的金额；未计价（cost.total=None）与从未记录（extra 里
+          没有 cost 字段）分别计数、都不入金额 —— 三态不可互相吞并
+        - service_*（2026-10-18 加）：**按次计费服务**（DeepSeek Search/Fetch）的费用，
+          记在 tool step 的 extra.cost(kind='service')。与 cost_* 是**并列的两个口径**：
+          service_cost 只累计已计价金额，service_calls 含未计价次数，service_by_name 给
+          「哪个服务花了多少」。**不并入 cost_total** —— 后者是 LLM token 成本，混入会让
+          历史数字变味（UI 自行并列展示）。
 
         since 为 UTC isoformat 下界（与 runs.created_at 同口径），用于裁剪扫描范围；
         空字符串表示不限制。仅扫描存在的月库，且按 since 跳过整月（月份互斥）。
@@ -481,6 +516,31 @@ class TraceStore:
         daily = [0] * days
         by_agent: dict[str, int] = {}
         by_model: dict[str, int] = {}
+        # 成本维度（设计文档 §8③）：成本已在记录时算好并连价目快照一起落库，
+        # 这里只是 SUM —— 不重算，历史账单才不会被后来的调价改写。
+        # 按供应商：token 五件套 + 成本（月历/大屏/质量页共用同一口径）
+        by_provider: dict[str, dict] = {}
+        cost_total = 0.0
+        cost_daily = [0.0] * days
+        cost_by_provider: dict[str, float] = {}
+        cost_by_model: dict[str, float] = {}
+        cost_cached_saved = 0.0
+        # 按次计费服务（tool step 的 extra.cost, kind='service'，2026-10-18 加）。
+        # ⚠️ **另一个口径，不并入上面的 cost_***：「LLM token 成本」与「按次服务费」的单位、
+        #    计价方式、归属步骤都不同，混进 cost_total 会让历史数字变味且无法回退。
+        #    这里各算各的，UI 决定怎么并列展示。
+        service_cost = 0.0
+        service_cost_daily = [0.0] * days
+        service_calls = 0
+        service_unpriced_calls = 0
+        service_by_name: dict[str, dict] = {}
+        # 成本三态计数：已计价（金额入 cost_total，其中 billing=free 的金额是 0.0）/
+        # 未计价（价目里没有该供应商或模型，cost.total=None）/ 从未记录（extra 里根本没有
+        # cost 字段：COST_TRACKING_ENABLED=false 期间或未回填的历史行）。
+        # 前两者都是「记录过」，只有第三者是「没记」——混成一档会让「未采集」显示成「¥0」。
+        cost_unpriced_calls = 0
+        cost_free_calls = 0
+        cost_missing_calls = 0
         since_month = (since or "")[:7].replace("-", "") if since else ""
 
         for month in self.iter_existing_months():
@@ -527,6 +587,88 @@ class TraceStore:
                 model = (extra.get("model_name") or "unknown")
                 by_model[model] = by_model.get(model, 0) + tu["total_tokens"]
 
+                # 供应商：优先取计价时解析出的 provider（最准），缺失按 unknown
+                _prov = 'unknown'
+                if isinstance(extra.get("cost"), dict):
+                    _prov = str((extra.get("cost") or {}).get('provider') or 'unknown')
+                elif extra.get("provider"):
+                    _prov = str(extra.get("provider"))
+                _pb = by_provider.setdefault(_prov, {"calls": 0, "in": 0, "out": 0,
+                                                     "cached": 0, "reasoning": 0, "cost": 0.0})
+                _pb["calls"] += 1
+                _pb["in"] += tu["input_tokens"]
+                _pb["out"] += tu["output_tokens"]
+                _pb["cached"] += tu.get("cached_tokens", 0)
+                _pb["reasoning"] += tu.get("reasoning_tokens", 0)
+
+                cost = extra.get("cost")
+                if isinstance(cost, dict):
+                    amount = cost.get("total")
+                    if amount is None:
+                        # 未计价（价目里没有该供应商/模型）：单列计数，不按 0 计入金额
+                        cost_unpriced_calls += 1
+                    else:
+                        amount = float(amount)
+                        cost_total += amount
+                        if str(cost.get("billing") or "") == "free":
+                            cost_free_calls += 1
+                        if day in daily_idx:
+                            cost_daily[daily_idx[day]] += amount
+                        prov = str(cost.get("provider") or "unknown")
+                        cost_by_provider[prov] = cost_by_provider.get(prov, 0.0) + amount
+                        by_provider.setdefault(prov, {"calls": 0, "in": 0, "out": 0,
+                                                      "cached": 0, "reasoning": 0,
+                                                      "cost": 0.0})["cost"] += amount
+                        cmodel = str(cost.get("model") or model)
+                        cost_by_model[cmodel] = cost_by_model.get(cmodel, 0.0) + amount
+                    cost_cached_saved += float(cost.get("cached_saved") or 0.0)
+                else:
+                    # 从未记录（不是「未计价」）：extra 里根本没有 cost 字段 ——
+                    # COST_TRACKING_ENABLED=false 期间落下的行、或未回填的历史行。
+                    # 两侧都不入金额，所以必须单独计数，否则下游用
+                    # llm_calls - cost_unpriced_calls 会把它误当成「已计价」而报 0 元。
+                    cost_missing_calls += 1
+
+            # ── 按次计费服务：同一个月的 tool step 里找 extra.cost(kind='service') ──
+            # SQL 先按标记预筛（标记失配只会「扫多」，Python 侧仍二次校验 kind）。
+            try:
+                from utils.pricing import SERVICE_COST_JSON_MARKER
+                tool_rows = conn.execute(
+                    "SELECT s.extra AS extra, r.created_at AS created_at "
+                    "FROM steps s JOIN runs r ON s.run_id = r.id "
+                    "WHERE s.step_type='tool' AND s.extra LIKE ?"
+                    + (" AND r.created_at>=?" if since else ""),
+                    ([f"%{SERVICE_COST_JSON_MARKER}%"] + ([since] if since else [])),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                tool_rows = []
+            for r in tool_rows:
+                try:
+                    extra = json.loads(r["extra"] or "")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                cost = extra.get("cost") if isinstance(extra, dict) else None
+                if not isinstance(cost, dict) or str(cost.get("kind") or "") != "service":
+                    continue
+                try:
+                    count = int(cost.get("count") or 1)
+                except (TypeError, ValueError):
+                    count = 1
+                service_calls += count
+                name = str(cost.get("service") or "unknown")
+                bucket = service_by_name.setdefault(name, {"calls": 0, "cost": 0.0})
+                bucket["calls"] += count
+                amount = cost.get("total")
+                if amount is None:
+                    service_unpriced_calls += count        # 未计价 ≠ 0，单列计数
+                else:
+                    amount = float(amount)
+                    service_cost += amount
+                    bucket["cost"] += amount
+                    day = str(r["created_at"] or "")[:10]
+                    if day in daily_idx:
+                        service_cost_daily[daily_idx[day]] += amount
+
         inp = totals["input_tokens"]
         totals["total_tokens"] = inp + totals["output_tokens"]
         totals["cache_hit_ratio"] = round(totals["cached_tokens"] / inp, 4) if inp > 0 else 0.0
@@ -538,7 +680,135 @@ class TraceStore:
             "daily": daily,
             "by_agent": sorted(by_agent.items(), key=lambda kv: -kv[1]),
             "by_model": sorted(by_model.items(), key=lambda kv: -kv[1]),
+            # 成本（元）：合计 / 按日 / 按供应商 / 按模型 / 缓存省下的钱
+            "cost_total": round(cost_total, 6),
+            "cost_daily": [round(v, 6) for v in cost_daily],
+            "cost_by_provider": sorted(cost_by_provider.items(), key=lambda kv: -kv[1]),
+            # 按供应商的完整口径：token 五件套 + 成本（成本只算已计价部分）
+            "by_provider": sorted(by_provider.items(), key=lambda kv: -kv[1].get("in", 0)),
+            "cost_by_model": sorted(cost_by_model.items(), key=lambda kv: -kv[1]),
+            "cost_cached_saved": round(cost_cached_saved, 6),
+            "cost_unpriced_calls": cost_unpriced_calls,
+            "cost_free_calls": cost_free_calls,
+            # 从未记录：既不在 cost_total、也不在 cost_unpriced_calls 里 —— 下游区分
+            # 「未计价（有价目但没有该供应商/模型）」与「根本没记」靠它
+            "cost_missing_calls": cost_missing_calls,
+            "avg_cost_per_call": round(cost_total / totals["llm_calls"], 6) if totals["llm_calls"] else 0.0,
+            # ── 按次计费服务（**独立口径**，绝不并入上面的 cost_*）──
+            # service_cost 只累计已计价金额；service_calls 是全部计费次数（含未计价），
+            # 所以下游判「有没有真的算过钱」要用 service_calls - service_unpriced_calls。
+            "service_cost": round(service_cost, 6),
+            "service_cost_daily": [round(v, 6) for v in service_cost_daily],
+            "service_calls": service_calls,
+            "service_unpriced_calls": service_unpriced_calls,
+            "service_by_name": dict(sorted(service_by_name.items(), key=lambda kv: -kv[1]["cost"])),
         }
+
+    def cost_totals_for_run(self, run_id: str) -> dict:
+        """单条 run 的成本汇总（单次对话界面 / final SSE 用）。
+
+        口径与 aggregate_llm_usage 一致：只算 step_type='llm' 且 extra.cost 存在的步骤；
+        total=None（未计价）的调用单列计数，不按 0 计入金额。
+
+        ## 按次计费服务（`service_*` 字段，2026-10-18 加）
+
+        Search/Fetch 这类**按请求次数**计费的工具（DeepSeek）产生的费用记在 **tool step** 的
+        `extra.cost`（`kind='service'`）上，与上面的 llm 行是**并列但不同的口径**：
+        - 它们**不并入** `total`/`calls`/`by_provider` —— 那两个键的语义是「LLM token 成本与
+          LLM 调用次数」，混进来会让 `calls` 不再等于 llm 调用数、`avg_cost_per_call` 失真；
+        - 单独给 `service_cost` / `service_calls` / `service_unpriced_calls` / `service_by_name`，
+          由前端/调用方决定怎么合并展示（界面上是另一行「搜索/抓取」）。
+        """
+        out = {"total": 0.0, "calls": 0, "unpriced_calls": 0, "free_calls": 0,
+               "cached_saved": 0.0, "by_provider": {}, "by_model": {},
+               "service_cost": 0.0, "service_calls": 0, "service_unpriced_calls": 0,
+               "service_by_name": {}}
+        run_id = str(run_id or "")
+        if not run_id:
+            return out
+        try:
+            conn = self.conn_for_run(run_id)
+        except Exception:
+            conn = None
+        if conn is None:
+            return out
+        try:
+            rows = conn.execute(
+                "SELECT extra FROM steps WHERE run_id=? AND step_type='llm'", (run_id,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return out
+        for r in rows:
+            raw = r["extra"]
+            if not raw:
+                continue
+            try:
+                extra = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            cost = extra.get("cost")
+            if not isinstance(cost, dict):
+                continue
+            out["calls"] += 1
+            amount = cost.get("total")
+            if amount is None:
+                out["unpriced_calls"] += 1
+            else:
+                out["total"] += float(amount)
+                if str(cost.get("billing") or "") == "free":
+                    out["free_calls"] += 1
+                prov = str(cost.get("provider") or "unknown")
+                out["by_provider"][prov] = out["by_provider"].get(prov, 0.0) + float(amount)
+                model = str(cost.get("model") or extra.get("model_name") or "unknown")
+                out["by_model"][model] = out["by_model"].get(model, 0.0) + float(amount)
+            out["cached_saved"] += float(cost.get("cached_saved") or 0.0)
+
+        # ── 按次计费服务（tool step 的 extra.cost，kind='service'）──
+        # 为什么扫全部 tool 行而不是 SQL 里 LIKE：extra 是 JSON 文本，格式由 json.dumps
+        # 决定（含空格），LIKE 一改格式就静默失配；单 run 的工具行是几十条量级，内存过滤的
+        # 代价可忽略（这个函数本来就只在「一轮对话结束」时调一次）。
+        try:
+            tool_rows = conn.execute(
+                "SELECT extra FROM steps WHERE run_id=? AND step_type='tool'", (run_id,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            tool_rows = []
+        from utils.pricing import SERVICE_COST_JSON_MARKER
+        for r in tool_rows:
+            raw = r["extra"]
+            # 廉价预筛；紧接着仍会校验 kind —— 标记失配只会「扫多」，不会漏记
+            if not raw or SERVICE_COST_JSON_MARKER not in raw:
+                continue
+            try:
+                extra = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            cost = extra.get("cost")
+            if not isinstance(cost, dict) or str(cost.get("kind") or "") != "service":
+                continue
+            name = str(cost.get("service") or "unknown")
+            try:
+                count = int(cost.get("count") or 1)
+            except (TypeError, ValueError):
+                count = 1
+            out["service_calls"] += count
+            bucket = out["service_by_name"].setdefault(name, {"calls": 0, "cost": 0.0})
+            bucket["calls"] += count
+            amount = cost.get("total")
+            if amount is None:
+                # 未计价 ≠ 0：单列计数，不进金额口径
+                out["service_unpriced_calls"] += count
+            else:
+                amount = float(amount)
+                out["service_cost"] += amount
+                bucket["cost"] += amount
+
+        out["total"] = round(out["total"], 6)
+        out["cached_saved"] = round(out["cached_saved"], 6)
+        out["service_cost"] = round(out["service_cost"], 6)
+        out["by_provider"] = dict(sorted(out["by_provider"].items(), key=lambda kv: -kv[1]))
+        out["by_model"] = dict(sorted(out["by_model"].items(), key=lambda kv: -kv[1]))
+        return out
 
     def llm_steps_totals(self, run_ids: list) -> dict:
         """跨 run 聚合 llm step（cli stats 用）：{run_id: [{"step_name","extra"},...]}。"""
@@ -613,7 +883,7 @@ store = TraceStore()
 
 # ── 月库合并只读连接（跨月 SQL 聚合的旧消费方复用） ──────────────────
 
-_MERGED_TABLES = ("runs", "steps", "messages")
+_MERGED_TABLES = ("runs", "steps", "messages", "blobs")
 # SQLite ATTACH 上限 10，留 1 个余量
 _MERGED_MAX_MONTHS = 9
 
@@ -671,7 +941,7 @@ def open_merged_readonly(months: int = 9) -> Optional[sqlite3.Connection]:
         except Exception:
             conn.close()
             raise
-        conn.row_factory = sqlite3.Row
+        install_row_factory(conn)
         return conn
     except Exception as e:
         logger.warning("trace 月库合并视图打开失败（降级 None）: %s", e)

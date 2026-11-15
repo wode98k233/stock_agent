@@ -127,3 +127,41 @@ def test_if_not_exists_ddl_ignored_in_column_parse(tmp_path):
     rep = ensure_schema(conn, [td2])
     cols = [r[1] for r in conn.execute("PRAGMA table_info(k)")]
     assert "e" in cols and "k" in rep.added_columns
+
+def test_comment_lines_do_not_hide_columns(tmp_path):
+    # 真 bug 回归：列定义紧跟 -- 注释行时，注释与列名同属一个顶层片段，
+    # 片段以 -- 开头会让列名正则匹配不到 → 该列被整段吞掉，diff 报「无差异」、
+    # ensure_schema 永远不补列（实测 strategy_run.trace_run_id 就这样从生产库消失）。
+    conn = _conn(tmp_path)
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    td = TableDef(name="t", ddl="""CREATE TABLE t (
+    id INTEGER PRIMARY KEY,
+    -- C 批：策略研发自建的 trace run_id。
+    -- 第二行注释（含逗号, 也要一起忽略）
+    trace_run_id TEXT DEFAULT '',
+    created_at TEXT
+)""")
+    rep = ensure_schema(conn, [td])
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(t)")]
+    assert "trace_run_id" in cols
+    assert rep.added_columns["t"] == ["trace_run_id", "created_at"]
+    # 只读 diff 同样要看得见（--check 路径）
+    assert diff_schema(conn, [td]).added_columns == {}
+
+
+def test_trailing_comment_not_leaked_into_alter(tmp_path):
+    # 行尾注释（含逗号）不得破坏切分，也不得被写进 ALTER 语句
+    conn = _conn(tmp_path)
+    conn.execute("CREATE TABLE k (k TEXT)")
+    conn.commit()
+    td = TableDef(name="k", ddl="""CREATE TABLE k (
+    k TEXT,
+    n INTEGER DEFAULT 0,  -- 新增列（行尾注释, 含逗号）
+    m TEXT
+)""")
+    rep = ensure_schema(conn, [td])
+    info = {r[1]: r for r in conn.execute("PRAGMA table_info(k)")}
+    assert set(rep.added_columns["k"]) == {"n", "m"}
+    assert info["n"][2] == "INTEGER" and info["n"][4] == "0"
+    assert info["m"][2] == "TEXT"

@@ -1,0 +1,144 @@
+{
+  "version": "2026-09-10",
+  "currency": "CNY",
+  "unit": "per_1M_tokens",
+  "note": "DeepSeek V4.1 Flash 峰谷分时价（2026-09-10 12:00 北京时间生效）。2026-10-15 仅新增 sensenova / siliconflow 两个免费源，未动任何价格，故 version 不变。改价请用「定价目录编辑器」，不要改代码。",
+  "peak_schedule": {
+    "tz": "Asia/Shanghai",
+    "weekdays": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "windows": [
+      [
+        "09:00",
+        "12:00"
+      ],
+      [
+        "14:00",
+        "18:00"
+      ]
+    ],
+    "peak_multiplier": 2,
+    "note": "高峰=周一至周五 09:00-12:00 与 14:00-18:00（北京时间，半开区间）；周末/午休/夜间按闲时价。"
+  },
+  "providers": {
+    "deepseek": {
+      "billing": "paid",
+      "hosts": [
+        "api.deepseek.com"
+      ],
+      "note": "DeepSeek 官方（人民币计价，峰谷分时）",
+      "models": {
+        "deepseek-v4.1-flash": {
+          "aliases": [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-pro",
+            "DeepSeek v4.1 Flash"
+          ],
+          "note": "v4-flash / v4-flash-vision-exp / v4-pro 已下线或未上线，请求均路由至 V4.1 Flash，按同价计。",
+          "off_peak": {
+            "in_miss": 1,
+            "in_hit": 0.02,
+            "out": 4
+          },
+          "peak": {
+            "in_miss": 2,
+            "in_hit": 0.04,
+            "out": 8
+          }
+        }
+      }
+    },
+    "opencode-zen": {
+      "billing": "paid",
+      "hosts": [
+        "opencode.ai"
+      ],
+      "note": "第三方中转（当前 .env 的 OPENAI_API_BASE 指向它）：价目按 DeepSeek 官方 Flash 暂估，实际以账单为准，可在此改成真实价。",
+      "models": {
+        "deepseek-v4.1-flash": {
+          "aliases": [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp"
+          ],
+          "off_peak": {
+            "in_miss": 1,
+            "in_hit": 0.02,
+            "out": 4
+          },
+          "peak": {
+            "in_miss": 2,
+            "in_hit": 0.04,
+            "out": 8
+          }
+        }
+      }
+    },
+    "local-relay": {
+      "billing": "free",
+      "hosts": [
+        "10.67.197.178"
+      ],
+      "valid_until": "2026-12-31",
+      "note": "内网/第三方中转，免费额度随时可能取消；过期后自动按「未计价」处理并告警。",
+      "models": {
+        "*": {
+          "free": true
+        }
+      }
+    },
+    "sensenova": {
+      "billing": "free",
+      "hosts": [
+        "token.sensenova.cn"
+      ],
+      "valid_until": "2026-12-31",
+      "note": "压缩/上下文摘要专用端点（COMPRESS_LLM_API_BASE），赠送额度。免费≠永久：valid_until 一过自动降级为「未计价」并告警。",
+      "models": {
+        "*": {
+          "free": true
+        }
+      }
+    },
+    "siliconflow": {
+      "billing": "free",
+      "hosts": [
+        "api.siliconflow.cn"
+      ],
+      "valid_until": "2026-12-31",
+      "note": "记忆系统 embedding / rerank 专用端点（STOCK_MEMORY_*），赠送额度。",
+      "models": {
+        "*": {
+          "free": true
+        }
+      }
+    }
+  },
+  "services": {
+    "deepseek-search": {
+      "billing": "paid",
+      "provider": "deepseek",
+      "unit": "per_request",
+      "price": 0.005,
+      "note": "DeepSeek 官方 Search（/v1/tools/search）：¥5/1000 次成功请求 = ¥0.005/次；只有 HTTP 200 且 results 非空才计费，count 不影响单价。2026-11-01 起官方对 Harness 侧服务端调用开收，本项目打裸 API 自 2026-10-18 起即计费。"
+    },
+    "deepseek-fetch": {
+      "billing": "paid",
+      "provider": "deepseek",
+      "unit": "per_request",
+      "price": 0.005,
+      "note": "DeepSeek 官方 Fetch（/v1/tools/fetch）：¥5/1000 次成功请求 = ¥0.005/次；只有 HTTP 200 且返回网页正文才计费。"
+    }
+  },
+  "fallback": {
+    "billing": "unknown",
+    "policy": "warn"
+  }
+}

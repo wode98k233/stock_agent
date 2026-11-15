@@ -56,6 +56,19 @@ class PlanReportEnhanceNode(ReportEnhanceNode):
         is_unified = bool(state_tool_calls) and len(step_results) == 0
         return state_tool_calls if is_unified else []
 
+    def extract_conversation(self, state: dict) -> tuple:
+        """仅 Unified（单步一口气跑完）适用 fork；plan_solve 多步不适用。
+
+        载荷由 unified_executor 从内层 ReAct 循环透传（`_fork_messages` /
+        `_fork_tools`）。多步模式下这两个键不存在 → 返回空 → report_builder
+        自动回落证据注入路径。
+        """
+        msgs = state.get("_fork_messages") or []
+        tools = state.get("_fork_tools") or []
+        if not msgs or not tools:
+            return None, None
+        return msgs, tools
+
 
 # 向后兼容：保留函数形式的接口
 async def report_enhance_node(state: dict, ctx, run_config=None) -> dict:

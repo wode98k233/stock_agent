@@ -6,8 +6,51 @@ import ipaddress
 import os
 import socket
 import sys
+import types
 
 import pytest
+
+# ── 导入加速：让 langchain_core 的可选 transformers 依赖快速失败（2026-10-16）──
+#
+# 背景：`langchain_core/language_models/base.py:41` 有一段**可选**依赖：
+#     try:    from transformers import GPT2TokenizerFast     # 为 token 计数兜底
+#     except ImportError: _HAS_TRANSFORMERS = False
+# 本环境装了 transformers（记忆系统要用），于是这个 try 走了"成功"路径，
+# 而它能拖进 `transformers` + `torch` + `sentence_transformers` ≈ **9~10 秒**。
+#
+# 代价有多大：`import langchain_core.language_models.chat_models` 实测 11.85s，
+# 其中 9.7s 是这个可选导入。而它**每个进程都要付一次** —— 单条测试 15.6s、
+# `pytest test/unit/agents --collect-only` 25s；xdist 下 8 个 worker 各付一次，
+# 加 worker 完全不提速（实测 -n 4 与 -n 8 都是 ~117s，-n 16 反而 197s）。
+# 拦截后：-n 8 从 116s → 81s，且并行度恢复（-n 8 明显快于 -n 4）。
+#
+# 为什么在单测里拦掉是安全的：
+#   · 全仓 unit 测试**没有任何一处**真的用 transformers / GPT2TokenizerFast /
+#     sentence_transformers（grep 可复验）；
+#   · ML 路径（embedding / rerank）本来就被 `_offline_llm_retrieval` 断网拦截；
+#   · 这只是把"可选的、单测用不到的"依赖变回它设计时的失败分支，**不改变任何
+#     被测逻辑** —— langchain_core 自己就支持 `_HAS_TRANSFORMERS = False`。
+#
+# ⚠️ **安装时机很关键，不能放模块级**：`pytest test/` 会在收集阶段加载**所有**
+# conftest，模块级安装会污染同一进程里的 e2e / integration 用例（它们要真跑 ML）。
+# 因此挪进 `pytest_configure`，并只在「本次会话**只**跑 unit」时才装。
+# 需要真跑 ML 时设 `SR_ALLOW_UNIT_REAL_ML=1` 跳过。
+
+
+def pytest_configure(config):
+    if os.getenv("SR_ALLOW_UNIT_REAL_ML") == "1":
+        return
+    if "transformers" in sys.modules:
+        return
+    args = [str(a).replace("\\", "/") for a in (getattr(config, "args", None) or [])]
+    # 无参（走 rootdir 收集，可能含 e2e）或混跑 → 不拦截，宁可慢也不破坏 e2e
+    if not args or not all("test/unit" in a for a in args):
+        return
+    # 空模块：`from transformers import X` 会抛 ImportError（正是我们要的分支），
+    # 而不是让 langchain_core 真的去加载 9 秒。
+    sys.modules["transformers"] = types.ModuleType("transformers")
+
+
 from unittest.mock import MagicMock, patch
 
 # 项目根目录
@@ -186,6 +229,112 @@ def _block_external_network():
             p.stop()
 
 
+# ── LLM 闸门：unit 测试禁止真实调用大模型 ──────────────────────────────
+# 与网络闸门配套。只堵 socket 时，llm_factory 的重试链会把「Connection error」
+# 当成瞬时错误 → 11 次指数退避 ≈ 140s：实测
+# test/unit/backtest/test_strategy_research.py::TestRedLineAndBest::test_step_marks_overfit_and_low_sample
+# 单例 142.20s（用例还「通过」——意图核对失败后 fail-open），并会让 pytest -n 4 整套卡死。
+# 这里在「调用层」直接抛错：只堵 invoke/_generate，不堵构造，避免误伤只构造不调用的用例。
+# 急用时可 SR_ALLOW_UNIT_LLM=1 绕过（仅调试，勿提交依赖它的用例）。
+
+_LLM_CALL_METHODS = ("invoke", "ainvoke", "stream", "astream", "_generate", "_agenerate")
+
+
+_LLM_GUARD_INSTALLED = False
+
+
+def _install_llm_guard() -> None:
+    """给 ChatOpenAI 的调用方法装闸门（幂等）。
+
+    ⚠️ **不能在这里 `from langchain_openai import ChatOpenAI`** —— 实测导入它要
+    **10.9 秒**：它会顺带拉进 `transformers`（3.5s）+ `torch`（1.5s）+ azure 适配层。
+    而本 fixture 曾经是 session 级 autouse，于是**每个 xdist worker 启动都白付
+    10.7 秒**，哪怕那批测试根本不碰 LLM（`-n 8` 下实测 setup 占了单 worker 的有效时间）。
+
+    代价对比：改成「已导入才装」后，不碰 LLM 的 worker 直接跳过（只花一次 dict 查）；
+    碰 LLM 的 worker 本来就会导入 langchain_openai（`utils/llm_factory` 是模块级导入），
+    这里只是复用已导入的类，**既不增加成本、也不放过任何真实调用**。
+    """
+    global _LLM_GUARD_INSTALLED
+    if _LLM_GUARD_INSTALLED:
+        return
+    try:
+        from langchain_openai import ChatOpenAI
+    except Exception:
+        return
+
+    def _guard(name):
+        def _raise(self, *a, **kw):
+            raise RuntimeError(
+                f"unit 测试禁止真实调用 LLM（{type(self).__name__}.{name}）。"
+                "请 monkeypatch 掉该调用（如 mock backtest.intent_fidelity.check_intent、"
+                "utils.llm_factory.llm_json_with_retry），或把用例移到 test/integration|e2e 并加标记。"
+                "（确需临时真调可设 SR_ALLOW_UNIT_LLM=1）"
+            )
+        return _raise
+
+    for n in _LLM_CALL_METHODS:
+        if hasattr(ChatOpenAI, n):
+            patch.object(ChatOpenAI, n, _guard(n)).start()
+    _LLM_GUARD_INSTALLED = True
+
+
+@pytest.fixture(autouse=True)
+def _block_real_llm():
+    """函数级 autouse：**只做一次 sys.modules 查表**，不主动导入。
+
+    真正的补丁在 langchain_openai 出现后才装（见 _install_llm_guard 的说明）。
+    本 codebase 的 LLM 入口 `utils/llm_factory` 是模块级导入 langchain_openai，
+    所以任何「能调到 LLM」的用例在执行前该模块必然已在 sys.modules 里 —— 闸门不漏。
+    """
+    if os.getenv("SR_ALLOW_UNIT_LLM") == "1":
+        return
+    if "langchain_openai" in sys.modules:
+        _install_llm_guard()
+
+# ── 运行期状态隔离：unit 测试不碰真实对话库 / 真实日志目录 ─────────────
+# utils/logger.py::get_logger 会向真实对话库 INSERT dialog 行，并在真实
+# logs/<日期>/ 下落对话日志文件。xdist 并发时 4 个 worker 争抢同一 SQLite，
+# 实测出现 sqlite3.OperationalError: database is locked（utils/logger.py:843）；
+# 同时真实日志目录会被测试产物污染（历史上 test_clean_requires_confirm 还
+# 误删过真实日志文件）。这里把对话库与日志目录整体改到临时目录。
+# 急用时可 SR_ALLOW_UNIT_REAL_STATE=1 绕过（仅调试，勿提交依赖它的用例）。
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_runtime_state(tmp_path_factory):
+    if os.getenv("SR_ALLOW_UNIT_REAL_STATE") == "1":
+        yield
+        return
+    import sqlite3
+    import config as config_mod
+    from utils.db_schema import tables as schema_tables
+    from utils.db_schema.migrator import ensure_schema
+
+    tmp = tmp_path_factory.mktemp("unit_state")
+    logs_dir = tmp / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp / "stock_radar.db"
+    # 用统一 DDL 源建表（AGENTS.md：DDL 单一事实源 utils/db_schema/tables/），
+    # 保证 get_logger 的 INSERT INTO dialog 有表可写。
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ensure_schema(conn, schema_tables.stock_radar.TABLES)
+    finally:
+        conn.close()
+
+    patchers = [
+        patch.object(config_mod, "get_db_path", lambda: str(db_path)),
+        patch.object(config_mod, "get_logs_dir", lambda: str(logs_dir)),
+    ]
+    for p in patchers:
+        p.start()
+    try:
+        yield
+    finally:
+        for p in patchers:
+            p.stop()
+
 @pytest.fixture(autouse=True)
 def _fast_fetcher_retry(monkeypatch):
     """把 fetcher 重试的指数退避压到 ~0。
@@ -217,28 +366,30 @@ def _fast_fetcher_retry(monkeypatch):
     yield
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _offline_llm_retrieval():
-    """会话级：unit 全程 embedding / rerank 不联网（含**后台线程**）。
+_OFFLINE_PATCHED = False
 
-    实测链路（全量 unit 曾跑出 58 处联网、单例耗时 26s+）：
-        agents/base.py::_enrich_user_input
-          → memory sdk.retrieve → backend/hybrid.search → embedding.search
-          → memory/sdk.py 的 _embed 闭包 → `utils.llm.gateway.embed(purpose=MEMORY)`
-          → utils/llm/backends/embed.py::_embed_openai → api.siliconflow.cn
-    这是 `_enrich_user_input` 的**自动副作用**（不是被测对象），却让大量无关用例
-    （thesis / trace / scoring / watchlist …）隐式联网，既慢又随外部状态漂移。
 
-    **必须是会话级**：后台预热线程（reranker-warm / memory reaper）会跨测试存活，
-    函数级补丁在测试结束就被撤销，线程随后又会调真方法（实测残留 13 处散点命中）。
+def _install_offline_retrieval() -> None:
+    """把 embedding / rerank 的**叶节点**替换成抛错（幂等）。
 
-    只封 embedding 的**叶节点**（`_embed_openai`）与网关入口；`EmbeddingProvider.embed`
-    的分发本身保留，`test_backends.py` 用实例级 monkeypatch 覆盖叶节点仍可测。
+    ⚠️ **不能主动 `from utils.llm import gateway`** —— 实测 11.3 秒：
+        utils.llm 包 __init__ → gateway → utils.llm_factory
+          → `from langchain_openai import ChatOpenAI`
+          → langchain_openai.chat_models.azure → transformers(5s) + torch(1.5s)
+    它是本仓库 unit 套件最大的单点固定成本：曾是 session 级 autouse，
+    于是 **每个 xdist worker 启动都白付一次**。
+
+    改成「已导入才装补丁」后：不碰 embedding 的 worker 零成本跳过；
+    碰 embedding 的用例必然经由 `memory/sdk.py` → `utils.llm.gateway`
+    （模块级导入），执行前它已在 sys.modules 里 —— 补丁不会漏。
     """
+    global _OFFLINE_PATCHED
+    if _OFFLINE_PATCHED:
+        return
     import unittest.mock as _mock
 
     def _offline(*a, **k):
-        raise RuntimeError("unit 测试离线：embedding/rerank 不联网（记忆检索降级 FTS5-only）")
+        raise RuntimeError("unit 测试离线：embedding/rerank 禁止外呼，请走 FTS5-only。")
 
     patchers = []
     try:
@@ -247,22 +398,23 @@ def _offline_llm_retrieval():
             if hasattr(_gw, _name):
                 patchers.append(_mock.patch.object(_gw, _name, _offline))
     except Exception:
-        pass
+        return
     try:
         from utils.llm.backends.embed import EmbeddingProvider as _EP
-        for _name in ("_embed_openai",):
-            if hasattr(_EP, _name):
-                patchers.append(_mock.patch.object(_EP, _name, _offline))
+        if hasattr(_EP, "_embed_openai"):
+            patchers.append(_mock.patch.object(_EP, "_embed_openai", _offline))
     except Exception:
         pass
-
     for p in patchers:
         p.start()
-    try:
-        yield
-    finally:
-        for p in patchers:
-            p.stop()
+    _OFFLINE_PATCHED = True
+
+
+@pytest.fixture(autouse=True)
+def _offline_llm_retrieval():
+    """函数级 autouse：只做一次 sys.modules 查表，不主动导入（见 _install_offline_retrieval）。"""
+    if "utils.llm.gateway" in sys.modules:
+        _install_offline_retrieval()
 
 
 @pytest.fixture
@@ -354,3 +506,42 @@ def isolated_cache(tmp_path):
     conn = sqlite3.connect(db_path)
     yield conn, db_path
     conn.close()
+
+
+# ── 标的别名库（红线：名称→代码是数据，不是代码）────────────────────────
+# 别名唯一事实源是 `data/symbol_aliases.json`（运营直接改），由
+# `scripts/ops/seed_symbol_aliases.py --apply` 灌进 market_data.db.symbol_alias。
+# 单测不读本机真库（db/ 不进 git、各机状态不同），而是把**那个 JSON** 灌进临时库，
+# 再把查询层（backtest/symbol_alias.py）指过去 —— 这样既确定，也顺带守住
+# 「数据文件能被灌库」这条链路。
+
+
+@pytest.fixture
+def symbol_alias_db(tmp_path, monkeypatch):
+    """用 data/symbol_aliases.json 建临时 symbol_alias 库，并把查询层指过去。"""
+    import json
+    import sqlite3
+
+    from utils.db_schema.migrator import ensure_schema
+    from utils.db_schema.tables import market_data as market_data_tables
+
+    seed_path = os.path.join(PROJECT_ROOT, "data", "symbol_aliases.json")
+    with open(seed_path, encoding="utf-8") as f:
+        rows = json.load(f).get("aliases") or []
+
+    db_path = tmp_path / "market_data_alias.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ensure_schema(conn, market_data_tables.TABLES, [])
+        for r in rows:
+            conn.execute(
+                "INSERT INTO symbol_alias (alias, code, kind, source, updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (str(r["alias"]), str(r["code"]), str(r.get("kind") or "etf"),
+                 "seed", "2026-11-01 00:00:00"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("backtest.symbol_alias._db_path", lambda: str(db_path))
+    return str(db_path)

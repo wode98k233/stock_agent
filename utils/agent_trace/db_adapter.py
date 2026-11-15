@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 from utils.agent_trace.models import ensure_trace_schema, _json, _now
+from utils.agent_trace.blobstore import encode_text, install_row_factory
+from utils.agent_trace.payload import restore_step_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,8 @@ class SQLiteAdapter(DBAdapter):
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self._db), check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
+            # T2：透明解压行工厂（写读同一连接，导出/CLI 走这条也能拿到原文）
+            install_row_factory(self._conn)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._ensure_ddl()
@@ -134,7 +137,7 @@ class SQLiteAdapter(DBAdapter):
                     step.get("parent_run_id"),
                     step["step_type"],
                     step.get("step_name", ""),
-                    _json(step.get("input")),
+                    encode_text(c, _json(step.get("input"))),
                     step.get("started_at") or _now(),
                     json.dumps(step["extra"], ensure_ascii=False) if step.get("extra") else None,
                 ),
@@ -146,14 +149,15 @@ class SQLiteAdapter(DBAdapter):
     def update_step(self, step_id: int, **fields):
         if not fields:
             return
-        sets = []
-        vals = []
-        for k, v in fields.items():
-            sets.append(f"{k}=?")
-            vals.append(v)
-        vals.append(step_id)
         with self._lock:
             c = self._get_conn()
+            sets = []
+            vals = []
+            for k, v in fields.items():
+                sets.append(f"{k}=?")
+                # input/output 是长文本列，统一走 blob 压缩（短值原样内联）
+                vals.append(encode_text(c, v) if k in ("input", "output") and isinstance(v, str) else v)
+            vals.append(step_id)
             c.execute(
                 f"UPDATE steps SET {','.join(sets)} WHERE id=?", vals
             )
@@ -172,10 +176,10 @@ class SQLiteAdapter(DBAdapter):
                         m["step_id"],
                         m["seq"],
                         m["role"],
-                        m.get("content"),
-                        m.get("tool_calls"),
+                        encode_text(c, m.get("content")),
+                        encode_text(c, m.get("tool_calls")),
                         m.get("tool_call_id"),
-                        m.get("reasoning"),
+                        encode_text(c, m.get("reasoning")),
                     ),
                 )
             c.commit()
@@ -259,6 +263,11 @@ class SQLiteAdapter(DBAdapter):
             for s in steps:
                 d = dict(s)
                 d["messages"] = msg_by_step.get(s["id"], [])
+                # 摘要行还原（llm 步由 messages 重建 / state_digest 原样）——导出与
+                # viewer 走同一套还原，避免同一 run 两条读路径给出不同形状。
+                for field in ("input", "output"):
+                    if d.get(field) is not None:
+                        d[field] = restore_step_text(d[field], d["messages"])
                 result.append(d)
             return result
 

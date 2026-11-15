@@ -112,6 +112,40 @@ async def route_test(payload: RouteTestRequest):
     return await run_in_threadpool(_route_test_payload, payload.text)
 
 
+def _strategy_preview(text: str, dialog_uuid: str) -> dict:
+    """预览用的策略判定（设计文档 §5.2.1）。
+
+    **与闸门同源**：调 agents.shared.strategy_intent.detect_strategy_intent（同一份词表缓存）。
+    本函数不调 LLM —— 预览是打字级高频调用，R2 的兜底发生在发送后的闸门里。
+    """
+    from config import Config
+
+    mode = str(getattr(Config, "STRATEGY_INTENT_MODE", "confirm") or "confirm").lower()
+    if mode == "off":
+        return {"enabled": False, "mode": "off", "is_strategy": False, "disambiguate": False,
+                "confidence": 0.0, "reason": "", "signals": {}, "session_active": False}
+    session_active = False
+    if dialog_uuid:
+        try:
+            from utils.cache.backtest_db import get_open_strategy_session
+            session_active = bool(get_open_strategy_session(dialog_uuid))
+        except Exception:  # 会话表异常不能拖垮预览条
+            session_active = False
+    from agents.shared.strategy_intent import detect_strategy_intent
+
+    verdict = detect_strategy_intent(text or "")
+    return {
+        "enabled": True,
+        "mode": mode,
+        "is_strategy": bool(verdict.get("is_strategy")),
+        "disambiguate": bool(verdict.get("disambiguate")),
+        "confidence": float(verdict.get("confidence") or 0.0),
+        "reason": verdict.get("reason") or "",
+        "signals": verdict.get("signals") or {},
+        "session_active": session_active,
+    }
+
+
 @router.post("/api/report-templates/route-preview")
 async def route_preview(payload: RouteTestRequest):
     """输入框模板路由预览：按**真实路由口径**（family 两阶段）返回 TOP-N + 命中词。
@@ -121,7 +155,10 @@ async def route_preview(payload: RouteTestRequest):
     """
     def _run():
         from agents.analysis.template_store import rank_templates_for_input
-        return rank_templates_for_input(payload.text, top_n=5)
+
+        data = rank_templates_for_input(payload.text, top_n=5)
+        data["strategy"] = _strategy_preview(payload.text, getattr(payload, "dialog_uuid", "") or "")
+        return data
 
     # 懒加载 agents.analysis.template_store（2026-10-01 冻站实锤点），进线程池
     return await run_in_threadpool(_run)

@@ -28,8 +28,26 @@ class MacroDataSkill(SkillBuilder):
         """获取宏观指标历史时序。indicator 可选: m2_yoy(M2同比)/m1_yoy/m0_yoy/lpr_1y/lpr_5y(LPR)/cpi_yoy(CPI同比)/gdp_yoy(GDP同比)/pmi_mfg(制造业PMI)/cn10_y(10Y国债收益率)/cn30_y(30Y国债收益率)/us10_y(10Y美债收益率)，periods 为返回期数（默认12期）。"""
         meta = self._macro_db.MACRO_INDICATOR_META.get(indicator)
         if meta is None:
-            available = ", ".join(self._macro_db.MACRO_INDICATOR_META)
-            return {"error": f"未知宏观指标: {indicator}", "available": available}
+            # 中文别名兜底：子代理常直接写「社零同比」「CPI同比」而不是代码
+            aliases = {"社零同比": "cn_retail_yoy", "社会消费品零售总额同比": "cn_retail_yoy",
+                       "cpi同比": "cpi_yoy", "10y国债": "cn10_y", "十年国债": "cn10_y",
+                       "m2同比": "m2_yoy", "制造业pmi": "pmi_mfg", "gdp同比": "gdp_yoy",
+                       "生猪价格": "hog_spot_price", "猪价": "hog_spot_price",
+                       "上海金": "au_sge", "沪铜": "cu_main", "螺纹钢": "rb_main"}
+            key = str(indicator or "").strip().replace(" ", "").lower()
+            mapped = aliases.get(key) or aliases.get(str(indicator or "").strip())
+            if mapped is None:
+                # 再按 label 精确/包含匹配
+                for code, m in self._macro_db.MACRO_INDICATOR_META.items():
+                    if str(m.get("label") or "") == str(indicator or "").strip():
+                        mapped = code
+                        break
+            if mapped and mapped in self._macro_db.MACRO_INDICATOR_META:
+                indicator = mapped
+                meta = self._macro_db.MACRO_INDICATOR_META[mapped]
+            else:
+                available = ", ".join(self._macro_db.MACRO_INDICATOR_META)
+                return {"error": f"未知宏观指标: {indicator}", "available": available}
 
         rows = self._macro_db.get_macro_series(indicator, periods=periods)
         if not rows:

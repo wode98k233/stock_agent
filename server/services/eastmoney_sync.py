@@ -365,7 +365,8 @@ def fetch_positions(session: Emsession, timeout: float = 15.0) -> dict:
 def normalize(resp: dict) -> Emsnapshot:
     """东财响应 → Emsnapshot：Data[0] 资产字段 + positions 映射表。
 
-    容错：Dryk="" 空串统一 to_float；qty=0 或缺 code 的行跳过并计数。
+    容错：Dryk="" 空串统一 to_float；qty=0 或缺 code 的行**不进持仓**并计数
+    （但它们的 Dryk 仍计入账户当日盈亏，见下方注释）。
     字段映射（§2）：Zqdm→stock_code、Zqmc→stock_name、Zqsl→qty、Cbjg→avg_cost、
     Zxjg→last_price、Zxsz→market_value、Ckyk→float_pnl、Ykbl→float_pnl_pct
     （已是小数，×100 展示）、Zqlx=='E'→etf、Kysl→avail_qty。
@@ -375,12 +376,19 @@ def normalize(resp: dict) -> Emsnapshot:
 
     positions: list[dict] = []
     skipped = 0
+    # 当日盈亏要按「全部持仓行」收集，**包括 qty=0 的行**（当天已清仓的标的）。
+    # 这些行不能进 positions（不是持仓），但它们的 Dryk 是当日已实现盈亏，
+    # 少算这一段就会出现「券商亏 510、页面亏 163」的对不上（2026-11-06 实测）。
+    row_today_pnls: list = []
     for p in (data.get("positions") or []):
         if not isinstance(p, dict):
             skipped += 1
             continue
         code = str(p.get("Zqdm") or "").strip()
         qty = to_float(p.get("Zqsl"))
+        row_today = to_float(p.get("Dryk"))
+        if row_today is not None:
+            row_today_pnls.append(row_today)
         if not code or not qty:   # qty=0 或空 → 跳过该行并计数
             skipped += 1
             continue
@@ -394,20 +402,22 @@ def normalize(resp: dict) -> Emsnapshot:
             "market_value": to_float(p.get("Zxsz")),
             "float_pnl": to_float(p.get("Ckyk")),
             "float_pnl_pct": to_float(p.get("Ykbl")),
-            "today_pnl": to_float(p.get("Dryk")),
+            "today_pnl": row_today,
             "is_etf": str(p.get("Zqlx") or "") == "E",
             "avail_qty": to_float(p.get("Kysl")),
         })
 
-    # 组合当日盈亏 = 各持仓行 Dryk（当日盈亏）求和；全空 → None
-    today_pnls = [t for t in (pos.get("today_pnl") for pos in positions)
-                  if t is not None]
+    # 账户当日盈亏：① 首选账户级 Dryk（券商权威值，含当日已清仓的已实现盈亏）；
+    # ② 账户级缺失（实测有的版本给空串）才回退求和，且必须用**未过滤**的 row_today_pnls。
+    account_today = to_float(data.get("Dryk"))
+    if account_today is None and row_today_pnls:
+        account_today = round(sum(row_today_pnls), 2)
     account = {
         "total_asset": to_float(data.get("Zzc")),
         "avail_cash": to_float(data.get("Kyzj")),
         "balance": to_float(data.get("Zjye")),
         "positions_market_value": to_float(data.get("totalSecMkval")),
-        "today_pnl": round(sum(today_pnls), 2) if today_pnls else None,
+        "today_pnl": account_today,
     }
     return Emsnapshot(positions=positions, account=account, skipped_rows=skipped,
                       mode="session")

@@ -60,31 +60,53 @@
     completed: 0, failed: 0, logCount: 0,
     scanned: false, scan: null, scanFailed: false, planBlocks: [],
     autoEnabled: true, marketRefreshS: 0,
+    /* 单块重试的独立流：key = blocks.join(',')，value = AbortController。
+       与 state.running（主流的全局互斥）分开 —— 重试不该被正在跑的流挡住，
+       也不该打断正在跑的流。后端按块加锁（overview_service._lock_for），
+       同块重复点击只会复用同一把锁，多开请求的代价可接受。 */
+    retries: new Map(),
+    /* 会话档案的本地视图状态（搜索 / 排序 / 按热力图某天过滤）：只重渲染块体，不重跑流 */
+    sessionFilterDate: '', sessionQuery: '', sessionOrder: 'recent',
   };
 
+  /* 当前正在被解析的事件来自哪条流：'main' 主流 | 'retry' 独立重试流。
+     'final' 事件据此决定要不要动全局进度/按钮/计时。 */
+  let runRole = 'main';
+
   const PAGE_SIZE = 15;
+  /* 会话上下文档案单独一档页长：这一块卡片高、条数多（实测 27 条 / 单块 >1000px），
+     按 15 条渲染会把整屏撑爆（中列被拉长、左右两列留白）。默认 8 条 + 卡内滚动，
+     高度锁在 .sess-scroll 的 max-height 内 —— 其余块（portfolio / watchlist）仍用 15。 */
+  const SESSION_PAGE_SIZE = 8;
   function pagerState(blockId) {
     if (!state.pager) state.pager = {};
     if (!state.pager[blockId]) state.pager[blockId] = { page: 1, expanded: false };
     return state.pager[blockId];
   }
-  function pageSlice(blockId, items) {
+  function pageSlice(blockId, items, size) {
+    const n = size || PAGE_SIZE;
     const ps = pagerState(blockId);
-    const maxPage = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+    const maxPage = Math.max(1, Math.ceil(items.length / n));
     if (ps.page > maxPage) ps.page = maxPage;
-    if (ps.expanded || items.length <= PAGE_SIZE) return items;
-    const start = (ps.page - 1) * PAGE_SIZE;
-    return items.slice(start, start + PAGE_SIZE);
+    if (ps.expanded || items.length <= n) return items;
+    const start = (ps.page - 1) * n;
+    return items.slice(start, start + n);
   }
-  function pagerHtml(blockId, total) {
-    if (total <= PAGE_SIZE) return '';
+  function pagerHtml(blockId, total, label, size) {
+    const n = size || PAGE_SIZE;
+    if (total <= n) return '';
     const ps = pagerState(blockId);
-    const maxPage = Math.ceil(total / PAGE_SIZE);
+    const maxPage = Math.ceil(total / n);
+    /* label：调用方给的「条数」文案。会话档案必须带「后端上限 200」—— 那个条数来自
+       list_dialogs(limit=200)，截断后写成「共 N 条」会被读成总数（KPI 的 runs 同款处理）。
+       不传 label 时文案与改造前逐字一致，portfolio / watchlist 不受影响。 */
+    const head = label || `共 ${total} 条`;
+    const headAll = label ? `已展开 ${label}` : `已展开全部 ${total} 条`;
     if (ps.expanded) {
-      return `<div class="ov-pager"><span>已展开全部 ${total} 条</span><span class="spacer"></span>`
+      return `<div class="ov-pager"><span>${headAll}</span><span class="spacer"></span>`
            + `<button type="button" data-pager="collapse" data-block="${blockId}">收起分页</button></div>`;
     }
-    return `<div class="ov-pager"><span>共 ${total} 条 · 第 ${ps.page}/${maxPage} 页</span><span class="spacer"></span>`
+    return `<div class="ov-pager"><span>${head} · 第 ${ps.page}/${maxPage} 页</span><span class="spacer"></span>`
          + `<button type="button" data-pager="prev" data-block="${blockId}" ${ps.page <= 1 ? 'disabled' : ''}>上一页</button>`
          + `<button type="button" data-pager="next" data-block="${blockId}" ${ps.page >= maxPage ? 'disabled' : ''}>下一页</button>`
          + `<button type="button" data-pager="expand" data-block="${blockId}">展开全部</button></div>`;
@@ -179,10 +201,547 @@
   </div>`;
   };
 
+
+  /* ════════════════════ 上下文洞察三块（任务 12：usage / activity / sessions）
+     视觉基线 docs/prototypes/2026-10-17-context-insight.html 的 section#skinB（浅色）。
+     本任务只允许改 overview.js / index.html，原型类名对应的样式在此按需注入
+     （作用域 #ovPage .ov-insight，色值一律引用 variables.css 既有令牌，不新增色板）。
+     ⚠️ 同屏两块日线的「日」口径不同，禁止拼成同一根时间轴、也禁止互相标注日期：
+        activity.days[].date      = calendar_query 直接对 UTC 时间戳 strftime -> UTC 日；
+        daily_tokens / daily_cost = store 的**后端本地** today - (days-1-i) -> 本地日。
+     ══════════════════════════════════════════════════════════════════════════════ */
+
+  var INSIGHT_CSS = [
+    '#ovPage .ov-insight .grid { display: grid; gap: 10px; }',
+    '#ovPage .ov-insight .g-kpi { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }',
+    '#ovPage .ov-insight .stack { display: grid; gap: 10px; }',
+    '#ovPage .ov-insight .small { font-size: 11px; }',
+    /* KPI 带（原型 .kpi / .k-l / .k-v / .k-s） */
+    '#ovPage .ov-insight .kpi { min-width: 0; }',
+    '#ovPage .ov-insight .kpi .k-l { font-size: 10.5px; color: var(--muted); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+    '#ovPage .ov-insight .kpi .k-v { font-size: 19px; font-weight: 700; line-height: 1.15; font-family: var(--font-mono); }',
+    '#ovPage .ov-insight .kpi .k-s { font-size: 10.5px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+    '#ovPage .ov-insight .kpi .k-v.c-ok { color: var(--success); }',
+    '#ovPage .ov-insight .kpi .k-v.c-muted { color: var(--muted); }',
+    /* 近 N 天 token × 费用双柱（原型 .bars7：堆叠，Token 在下、费用在上） */
+    '#ovPage .ov-insight .bars7 { display: flex; align-items: flex-end; gap: 10px; height: 120px; }',
+    '#ovPage .ov-insight .bars7 .d { flex: 1; display: flex; flex-direction: column-reverse; align-items: center; gap: 1px; height: 100%; min-width: 0; }',
+    '#ovPage .ov-insight .bars7 .d i { display: block; width: 62%; border-radius: 2px 2px 0 0; }',
+    '#ovPage .ov-insight .bars7 .d i.tk { background: var(--brand); }',
+    '#ovPage .ov-insight .bars7 .d i.cs { background: var(--warning); }',
+    '#ovPage .ov-insight .bars7-x { display: flex; gap: 10px; margin-top: 4px; }',
+    '#ovPage .ov-insight .bars7-x span { flex: 1; min-width: 0; overflow: hidden; text-align: center; font-size: 10px; color: var(--muted); }',
+    /* 8 周 × 7 天热力图（原型 .heat；每格 = 一个 UTC 日） */
+    '#ovPage .ov-insight .heat { display: grid; grid-template-columns: 26px repeat(8, 1fr); gap: 3px; align-items: center; }',
+    '#ovPage .ov-insight .heat .hd { font-size: 9.5px; color: var(--muted); text-align: center; }',
+    '#ovPage .ov-insight .heat .w { font-size: 9.5px; color: var(--muted); }',
+    '#ovPage .ov-insight .heat i { display: block; aspect-ratio: 1; border-radius: 2px; background: var(--border-light); cursor: pointer; }',
+    '#ovPage .ov-insight .heat i.empty { cursor: default; }',
+    '#ovPage .ov-insight .heat i.l1 { background: color-mix(in srgb, var(--brand) 22%, transparent); }',
+    '#ovPage .ov-insight .heat i.l2 { background: color-mix(in srgb, var(--brand) 42%, transparent); }',
+    '#ovPage .ov-insight .heat i.l3 { background: color-mix(in srgb, var(--brand) 66%, transparent); }',
+    '#ovPage .ov-insight .heat i.l4 { background: var(--brand); }',
+    '#ovPage .ov-insight .heat i.sel { outline: 2px solid var(--warning); outline-offset: 1px; }',
+    /* Token 构成环形（原型 .ring / .ring-mid；覆写 overview.css 给 .ring 的 ::after 白盘） */
+    '#ovPage .ov-insight .ring { position: relative; width: 132px; height: 132px; flex: none; }',
+    '#ovPage .ov-insight .ring::after { display: none; }',
+    '#ovPage .ov-insight .ring svg { display: block; transform: rotate(-90deg); }',
+    '#ovPage .ov-insight .ring .ring-mid { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }',
+    '#ovPage .ov-insight .ring .ring-mid .v { font-size: 18px; font-weight: 700; line-height: 1.1; font-family: var(--font-mono); }',
+    '#ovPage .ov-insight .ring .ring-mid .l { font-size: 10px; color: var(--muted); }',
+    '#ovPage .ov-insight .ring .ring-mid .r { margin-top: 2px; font-size: 10.5px; font-weight: 700; color: var(--success); }',
+    '#ovPage .ov-insight .ring.mini-ring { width: 44px; height: 44px; }',
+    '#ovPage .ov-insight .ring-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }',
+    '#ovPage .ov-insight .legend { flex: 1 1 180px; min-width: 180px; max-width: 420px; display: grid; gap: 4px; }',
+    '#ovPage .ov-insight .legend .li { display: flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; }',
+    '#ovPage .ov-insight .legend .li .dot { flex: none; width: 8px; height: 8px; border-radius: 2px; }',
+    '#ovPage .ov-insight .legend .li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; }',
+    '#ovPage .ov-insight .legend .li .vl { min-width: 52px; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }',
+    '#ovPage .ov-insight .legend .li .pc { min-width: 46px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }',
+    /* 会话上下文档案：卡片 + 工具条（原型 .session / .toolbar / .searchbox / .chip） */
+    '#ovPage .ov-insight .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }',
+    '#ovPage .ov-insight .searchbox { flex: 1; min-width: 120px; padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel); color: var(--text); font-family: inherit; font-size: 12px; }',
+    '#ovPage .ov-insight .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--text-secondary); font-size: 11px; white-space: nowrap; cursor: pointer; }',
+    '#ovPage .ov-insight .chip:hover { border-color: var(--brand); color: var(--brand); }',
+    '#ovPage .ov-insight .chip.on { border-color: var(--brand); background: var(--brand-light); color: var(--brand); font-weight: 700; }',
+    '#ovPage .ov-insight .session { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); cursor: pointer; }',
+    '#ovPage .ov-insight .session:hover { border-color: var(--brand); background: var(--brand-bg-light); }',
+    '#ovPage .ov-insight .session .t { margin-bottom: 2px; font-size: 12.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+    '#ovPage .ov-insight .session .m { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); }',
+    '#ovPage .ov-insight .session .m b { color: var(--text); font-weight: 600; }',
+    /* 会话档案专属紧凑化（信息一项不减，只收紧行距/间隙/内边距）+ 卡内滚动：
+       实测原样 15 条 = 单块 >1000px，把中列拉长到整屏装不下；这里只动这一块。 */
+    '#ovPage .ov-insight .session { padding: 6px 9px; gap: 9px; }',
+    '#ovPage .ov-insight .session .t { font-size: 12px; line-height: 1.25; margin-bottom: 1px; }',
+    '#ovPage .ov-insight .session .m { gap: 3px 9px; line-height: 1.25; }',
+    '#ovPage .ov-insight .sess-scroll { max-height: 420px; overflow-y: auto; padding-right: 2px; }',
+    '#ovPage .ov-insight .sess-scroll .stack { gap: 7px; }',
+    /* 滚动条样式与仓库既有内滚动容器同款（short-line .sl-scroll / 消息列表） */
+    '#ovPage .ov-insight .sess-scroll::-webkit-scrollbar { width: 5px; }',
+    '#ovPage .ov-insight .sess-scroll::-webkit-scrollbar-track { background: transparent; }',
+    '#ovPage .ov-insight .sess-scroll::-webkit-scrollbar-thumb { background: rgba(17, 24, 39, .16); border-radius: 3px; }',
+    '#ovPage .ov-insight .sess-scroll::-webkit-scrollbar-thumb:hover { background: rgba(17, 24, 39, .32); }'
+  ].join('\n');
+
+  function ensureInsightStyle() {
+    if (document.getElementById('ovInsightStyle')) return;
+    var el = document.createElement('style');
+    el.id = 'ovInsightStyle';
+    el.textContent = INSIGHT_CSS;
+    document.head.appendChild(el);
+  }
+
+  var ovInsight = function (html) { ensureInsightStyle(); return '<div class="ov-insight">' + html + '</div>'; };
+
+  /* ── 空值口径（铁律 3）：缺失一律显式文案，绝不画成 0 / NaN / 破折号 ── */
+
+  var NOT_COLLECTED = '未采集';
+
+  /* 百分比（入参是 0-1 比值）。null（空区间 / 分母为 0）必须有明确分支 ——
+     铁律 1：缓存命中率 None 时显示「未采集」，不得显示 0% / NaN / —% */
+  function pct(v, digits) {
+    var n = num(v);
+    if (n === null) return NOT_COLLECTED;
+    return (n * 100).toFixed(digits === undefined ? 1 : digits) + '%';
+  }
+  /* 成本三态（AGENTS.md：免费 ≠ 未计价）：None=未计价 / 0=免费 / >0=金额 */
+  function costLabel(v) {
+    var n = num(v);
+    if (n === null) return '未计价';
+    if (n === 0) return '¥0（免费）';
+    return fmtCost(n, '元');
+  }
+  /* fmtTok 的缺失分支（这里 0 与 None 语义不同，不能混） */
+  function tokLabel(v) {
+    var n = num(v);
+    return n === null ? NOT_COLLECTED : fmtTok(n);
+  }
+
+  /* ── 日历日工具：只按 Y/M/D 运算，不经 Date 解析字符串（避免时区/夏令时漂移） ── */
+
+  function dayFromIso(iso) {
+    var p = String(iso || '').split('-');
+    if (p.length !== 3) return null;
+    var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function isoOfDay(d) {
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  function addDays(d, n) { var x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+  /* 日线标签：浏览器本地 today - (n-1-i)。桶键是 store 的**后端本地**日（本页是本地单机工具，
+     浏览器与后端同机同时区）。⚠️ 绝不能用 range.since 推 —— 会整体错一天。 */
+  function localDayLabels(n) {
+    var out = [], d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (n - 1));
+    for (var i = 0; i < n; i++) {
+      out.push(String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
+      d = addDays(d, 1);
+    }
+    return out;
+  }
+
+  /* ── 上下文洞察：KPI 带 ── */
+
+  function ovKpiBand(items) {
+    return '<div class="grid g-kpi" style="margin-bottom:14px">' + items.map(function (it) {
+      var cls = it[3] ? ' ' + it[3] : '';
+      var sub = (it[2] === undefined || it[2] === null || it[2] === '') ? ''
+        : '<div class="k-s">' + esc(it[2]) + '</div>';
+      return '<div class="kpi"><div class="k-l">' + esc(it[0]) + '</div>'
+        + '<div class="k-v' + cls + '">' + it[1] + '</div>' + sub + '</div>';
+    }).join('') + '</div>';
+  }
+
+  /* ── 上下文洞察：近 N 天 token × 费用双柱 ──
+     daily_tokens / daily_cost 是后端定长分桶（缺日补 0 = 那天确实没有调用，是实测 0，
+     不是未采集 —— 不许改成「未采集」把柱子打断）。
+     daily_service_cost 是**另一口径**（按次计费服务）：只进图例与 tooltip，不叠进费用柱，
+     否则「费用」这根柱子的含义会随是否用过搜索而变。 */
+
+  function ovDailyBars(tokens, costs, svcCosts) {
+    var tk = (tokens || []).map(function (v) { var n = num(v); return n === null ? 0 : n; });
+    if (!tk.length) return emptyState('暂无日线用量');
+    var hasCost = Array.isArray(costs) && costs.length > 0;
+    var cs = tk.map(function (_, i) {
+      var n = hasCost ? num(costs[i]) : 0;
+      return n === null ? 0 : n;
+    });
+    var hasSvc = Array.isArray(svcCosts) && svcCosts.length > 0;
+    var ss = tk.map(function (_, i) {
+      var n = hasSvc ? num(svcCosts[i]) : 0;
+      return n === null ? 0 : n;
+    });
+    var tkMax = Math.max.apply(null, tk);
+    var csMax = hasCost ? Math.max.apply(null, cs) : 0;
+    var ssMax = hasSvc ? Math.max.apply(null, ss) : 0;
+    var labels = localDayLabels(tk.length);
+    var stride = Math.ceil(tk.length / 7);
+    var bars = tk.map(function (v, i) {
+      var th = tkMax > 0 ? v / tkMax * 100 : 0;
+      var ch = csMax > 0 ? cs[i] / csMax * 100 : 0;
+      var tip = labels[i] + ' · Token ' + fmtTok(v) + ' · 费用 ' + (hasCost ? '¥' + fmt(cs[i], 4) : NOT_COLLECTED);
+      if (hasSvc) tip += ' · 搜索/抓取 ¥' + fmt(ss[i], 4);
+      return '<div class="d" title="' + esc(tip) + '">'
+        + '<i class="tk" style="height:' + th.toFixed(2) + '%"></i>'
+        + (hasCost ? '<i class="cs" style="height:' + ch.toFixed(2) + '%"></i>' : '') + '</div>';
+    }).join('');
+    var xs = labels.map(function (lb, i) {
+      /* 末位对齐（i % stride === stride-1）：保证最后一天一定有标签，且不与前一个标签相邻 */
+      return '<span>' + ((i % stride === stride - 1 || i === tk.length - 1) ? esc(lb) : '') + '</span>';
+    }).join('');
+    var costPeak = !hasCost ? NOT_COLLECTED
+      : (csMax > 0 ? '¥' + fmt(csMax, 4) : '¥0（区间内无已计价金额）');
+    var svcPeak = !hasSvc ? NOT_COLLECTED
+      : (ssMax > 0 ? '¥' + fmt(ssMax, 4) : '¥0（区间内无搜索/抓取）');
+    return '<div style="margin-bottom:10px">'
+      + '<div class="small" style="color:var(--muted);margin-bottom:6px">近 ' + tk.length + ' 天用量　'
+      + '<span style="color:var(--brand)">■ Token 峰值 ' + fmtTok(tkMax) + '</span>　'
+      + '<span style="color:var(--warning)">■ 费用 峰值 ' + costPeak + '</span>'
+      + (hasSvc ? '　<span style="color:var(--text-secondary)">■ 搜索/抓取 峰值 ' + svcPeak + '</span>' : '')
+      + '</div>'
+      + '<div class="bars7">' + bars + '</div>'
+      + '<div class="bars7-x">' + xs + '</div></div>';
+  }
+
+  /* ── 上下文洞察：Token 构成环形 ──
+     输出 = 思考 + 回答，两者合计即输出（思考**不再**额外相加，否则输出被重复计数）。
+     ⚠️ 跨会话聚合没有输入侧六分类（composition 只存在于单 run 快照），故只画输出段，
+        输入侧构成显式标「未采集」，绝不拿模型分布冒充分类构成。 */
+
+  function ovCompositionRing(payload) {
+    var kpi = payload.kpi || {};
+    var think = num(kpi.reasoning_tokens), ans = num(kpi.answer_tokens);
+    if (think === null && ans === null) return '';
+    think = think === null ? 0 : think;
+    ans = ans === null ? 0 : ans;
+    var out = think + ans;
+    var C = 2 * Math.PI * 54, acc = 0;
+    var SEG = [
+      { nm: '思考（含在输出内）', v: think, c: 'var(--insight-think)' },
+      { nm: '回答（正文）', v: ans, c: 'var(--insight-answer)' }
+    ];
+    var arcs = out > 0 ? SEG.map(function (s) {
+      var len = C * s.v / out;
+      var one = '<circle cx="66" cy="66" r="54" fill="none" stroke="' + s.c + '" stroke-width="15"'
+        + ' stroke-dasharray="' + len.toFixed(2) + ' ' + (C - len).toFixed(2) + '"'
+        + ' stroke-dashoffset="' + (-acc).toFixed(2) + '"/>';
+      acc += len;
+      return one;
+    }).join('') : '';
+    var rows = SEG.map(function (s) {
+      var p = out > 0 ? s.v / out * 100 : null;
+      return '<div class="li"><i class="dot" style="background:' + s.c + '"></i>'
+        + '<span class="nm">' + esc(s.nm) + '</span>'
+        + '<span class="vl">' + fmtTok(s.v) + '</span>'
+        + '<span class="pc">' + (p === null ? NOT_COLLECTED : p.toFixed(1) + '%') + '</span></div>';
+    }).join('');
+    rows += '<div class="li"><i class="dot" style="background:var(--border)"></i>'
+      + '<span class="nm" title="输出 = 思考 + 回答（思考含在输出内，不重复相加）">输出合计（思考 + 回答）</span>'
+      + '<span class="vl">' + fmtTok(out) + '</span>'
+      + '<span class="pc">' + (out > 0 ? '100.0%' : NOT_COLLECTED) + '</span></div>';
+    var mid = '<div class="ring-mid"><div class="v">' + fmtTok(out) + '</div>'
+      + '<div class="l">输出 Token</div><div class="r">'
+      + (out > 0 ? '思考 ' + (think / out * 100).toFixed(1) + '%' : NOT_COLLECTED) + '</div></div>';
+    var models = (payload.by_model || []).map(function (m) {
+      var pair = m || [];
+      return [String(pair[0] === undefined || pair[0] === null ? '' : pair[0]), num(pair[1])];
+    }).filter(function (m) { return m[0] !== '' && m[1] !== null; });
+    var modelHtml = '';
+    if (models.length) {
+      var mMax = Math.max.apply(null, models.map(function (m) { return m[1]; })) || 1;
+      modelHtml = '<div style="margin-top:8px">'
+        + '<div class="small" style="color:var(--muted);margin-bottom:3px">按模型（计费 Token 占比）</div>'
+        + models.slice(0, 4).map(function (m) {
+          return '<div class="theme-line"><span class="nm" style="flex-basis:96px" title="' + esc(m[0]) + '">'
+            + esc(m[0]) + '</span><span class="theme-bar"><i style="width:' + (m[1] / mMax * 100).toFixed(0)
+            + '%"></i></span><span class="n" style="flex-basis:56px">' + fmtTok(m[1]) + '</span></div>';
+        }).join('') + '</div>';
+    }
+    return '<div style="border-top:1px dashed var(--border);padding-top:9px">'
+      + '<div class="small" style="color:var(--muted);margin-bottom:8px">Token 构成 · 输出段'
+      + '（输入侧六分类是单 run 快照口径，跨会话未采集）</div>'
+      + '<div class="ring-wrap"><div class="ring">'
+      + '<svg width="132" height="132" viewBox="0 0 132 132">'
+      + '<circle cx="66" cy="66" r="54" fill="none" stroke="var(--border-light)" stroke-width="15"/>'
+      + arcs + '</svg>' + mid + '</div>'
+      + '<div class="legend">' + rows + '</div></div>'
+      + modelHtml + '</div>';
+  }
+
+  /* ── 活跃度：8 周 × 7 天热力图 ──
+     日期来自 calendar_query（对 UTC 时间戳 strftime）→ **UTC 日**，与 usage 的本地日日线
+     不是同一个「日」：本块只用自己的日期做定位与 tooltip，禁止与日线共轴或互相标注。 */
+
+  function ovHeatmap(days) {
+    var rows = (days || []).filter(function (d) { return d && d.date; });
+    if (!rows.length) return emptyState('暂无活跃度数据（近 8 周月库无 run 记录）');
+    var byDate = {}, max = 0;
+    rows.forEach(function (d) {
+      var v = num(d.tokens);
+      v = v === null ? 0 : v;
+      byDate[String(d.date)] = v;
+      if (v > max) max = v;
+    });
+    var keys = Object.keys(byDate).sort();
+    var last = dayFromIso(keys[keys.length - 1]);
+    if (!last) return emptyState('活跃度日期不可解析');
+    var start = addDays(last, -(((last.getDay() + 6) % 7) + 49));   /* 该日所在周的周一往前 7 周 */
+    var WD = ['一', '二', '三', '四', '五', '六', '日'];
+    var head = '<span class="w"></span>';
+    for (var w = 0; w < 8; w++) head += '<span class="hd">W' + (w + 1) + '</span>';
+    var cells = '';
+    for (var wd = 0; wd < 7; wd++) {
+      cells += '<span class="w">' + WD[wd] + '</span>';
+      for (var w2 = 0; w2 < 8; w2++) {
+        var key = isoOfDay(addDays(start, w2 * 7 + wd));
+        var known = Object.prototype.hasOwnProperty.call(byDate, key);
+        var v2 = known ? byDate[key] : 0;
+        var lv = 0;
+        if (known && v2 > 0 && max > 0) {
+          var rr = v2 / max;
+          lv = rr >= 0.7 ? 4 : rr >= 0.45 ? 3 : rr >= 0.2 ? 2 : 1;
+        }
+        var sel = (known && state.sessionFilterDate === key) ? ' sel' : '';
+        var tip = key + '（UTC 日）· ' + (known ? fmtTok(v2) + ' token' : '无 run');
+        cells += '<i class="' + (known ? 'l' + lv : 'empty') + sel + '" data-heat="' + key + '"'
+          + (known ? '' : ' data-heat-none="1"') + ' title="' + esc(tip) + '"></i>';
+      }
+    }
+    var on = state.sessionFilterDate;
+    var hint = on
+      ? '已按 <b class="mono">' + esc(on) + '</b>（UTC 日）过滤下方会话 '
+        + '<span class="chip on" data-heat-clear="1">清除筛选 ✕</span>'
+      : '点某天过滤下方会话档案（日 = UTC 日）';
+    return '<div class="small" style="color:var(--muted);margin-bottom:6px">近 8 周活跃度 · ' + hint + '</div>'
+      + '<div class="heat">' + head + cells + '</div>';
+  }
+
+  /* ── 会话上下文档案：卡片列表 + 搜索 + 排序（按热力图选中的 UTC 日过滤） ──
+
+     ⚠️ 时间口径必须**同源**：热力图格子是 UTC 日（calendar_query 直接对 UTC 时间戳 strftime，
+     本任务不改），过滤也按 UTC 日匹配，所以卡面日期**也**用同一个表达式 utcDayOf() 取值 ——
+     否则北京时间 00:00–08:00 创建的会话（UTC 日 = 本地日 − 1）会出现「点 10-14 却看到卡面写
+     10-15 00:03」，用户会以为筛错了。选定做法 (a)：卡面显示 UTC 日，本地时间留在 tooltip。 */
+
+  function utcDayOf(s) { return String(s || '').slice(0, 10); }
+
+  function sessionList(base) {
+    var data = (state.blocks.sessions && state.blocks.sessions.data) || {};
+    var list = (base || data.sessions || []).slice();
+    if (state.sessionFilterDate) {
+      list = list.filter(function (s) {
+        /* 与卡面 utcDayOf(s.created_at) 是同一个表达式 —— 点哪一格，卡面就写哪一天 */
+        return utcDayOf(s.created_at) === state.sessionFilterDate;
+      });
+    }
+    var q = String(state.sessionQuery || '').trim().toLowerCase();
+    if (q) {
+      list = list.filter(function (s) {
+        return (String(s.title || '') + ' ' + String(s.agent_mode || '')).toLowerCase().indexOf(q) >= 0;
+      });
+    }
+    if (state.sessionOrder === 'token') {
+      list.sort(function (a, b) {
+        var av = num(a.billed_tokens), bv = num(b.billed_tokens);
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        return bv - av;
+      });
+    } else {
+      list.sort(function (a, b) {
+        return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+      });
+    }
+    return list;
+  }
+
+  /* 迷你环：思考 / 回答 两段（与大环 ovCompositionRing **同一语义、同一组色**：靛 / 青）。
+     几何取原型 section#skinB 的 .mini-ring：r=17、周长 2πr≈106.8、stroke-width=6（44×44 viewBox），
+     轨道 --border-light；两段用 dasharray + 逐段累加的负 dashoffset 首尾相接，均从 rotate(-90 22 22) 起。
+     ⚠️ 铁律 3：output_tokens 未采集（null）时**只画轨道**，绝不画 0 长度段 ——
+        小环上一段 0 长度弧等于「看不见」，会被读成「回答极少」，那是拿缺失数据编结论。 */
+  function sessionRing(s, split) {
+    var C = 2 * Math.PI * 17;
+    var segs = '';
+    if (split) {
+      var acc = 0;
+      /* 顺序：思考（靛）在前、回答（青）在后，与大环同向 */
+      [[split.think, 'var(--insight-think)'], [split.answer, 'var(--insight-answer)']].forEach(function (seg) {
+        var len = C * seg[0] / split.out;
+        if (len > 0) {
+          segs += '<circle cx="22" cy="22" r="17" fill="none" stroke="' + seg[1] + '" stroke-width="6"'
+            + ' stroke-dasharray="' + len.toFixed(2) + ' ' + (C - len).toFixed(2) + '"'
+            + ' stroke-dashoffset="' + (-acc).toFixed(2) + '"'
+            + ' transform="rotate(-90 22 22)"/>';
+        }
+        acc += len;
+      });
+    }
+    var tip = split
+      ? '思考 ' + fmtTok(split.think) + ' / 回答 ' + fmtTok(split.answer) + '（占输出）'
+      : '输出 Token ' + NOT_COLLECTED + '：只画轨道';
+    return '<div class="ring mini-ring" title="' + esc(tip) + '">'
+      + '<svg width="44" height="44" viewBox="0 0 44 44">'
+      + '<circle cx="22" cy="22" r="17" fill="none" stroke="var(--border-light)" stroke-width="6"/>'
+      + segs + '</svg></div>';
+  }
+
+  function sessionRows(list) {
+    return list.map(function (s) {
+      var billed = num(s.billed_tokens), reason = num(s.reasoning_tokens);
+      /* 思考 / 回答 的**规范口径**（context_stats.py 铁律 2）：输出 = 思考 + 回答，
+         thinking = min(reasoning, output)，answer = output − thinking（两者恒等于输出）。
+         ⚠️ 分母是**输出**，不是计费 —— 原实现用 reason/billed 属于拿错分母。
+         output_tokens / reasoning_tokens 任一为 null（未采集）时拒绝拆段：
+         宁可写「未采集」，也不把缺失当 0 去暗示「回答极少」。 */
+      var outTok = num(s.output_tokens);
+      var split = (outTok !== null && outTok > 0 && reason !== null)
+        ? { out: outTok, think: Math.min(reason, outTok) } : null;
+      if (split) split.answer = split.out - split.think;
+      var share = split ? split.think / split.out * 100 : null;
+      /* 卡面日期 = 过滤依据（同一个 utcDayOf）；命中时高亮，用户点完能一眼对上 */
+      var day = utcDayOf(s.created_at);
+      var hit = day !== '' && day === state.sessionFilterDate;
+      var dayTip = day === '' ? '创建时间未记录'
+        : '创建（UTC）' + day + ' ' + String(s.created_at).slice(11, 16) + ' · 本地 ' + fmtIso(s.created_at);
+      return '<div class="session"' + (s.dialog_uuid ? ' data-nav="dialog:' + esc(s.dialog_uuid) + '"' : '')
+        + ' title="点击打开该会话">' + sessionRing(s, split)
+        + '<div><div class="t">' + esc(s.title || '未命名') + '</div><div class="m">'
+        + '<span>' + esc(s.agent_mode || '未知模式') + '</span>'
+        + '<span>计费 <b>' + tokLabel(billed) + '</b></span>'
+        + '<span>思考 <b>' + (split ? fmtTok(split.think) : tokLabel(reason)) + '</b></span>'
+        + '<span>回答 <b>' + (outTok === null ? NOT_COLLECTED
+          : (split ? fmtTok(split.answer) : tokLabel(outTok))) + '</b></span>'
+        + '<span>占输出 <b>' + (share === null ? NOT_COLLECTED : share.toFixed(1) + '%') + '</b></span>'
+        + '<span>' + costLabel(s.cost) + '</span>'
+        + '</div></div>'
+        + '<div class="small" style="white-space:nowrap;text-align:right;color:'
+        + (hit ? 'var(--brand);font-weight:700' : 'var(--muted)') + '" title="' + esc(dayTip) + '">'
+        + (day === '' ? dash : esc(day.slice(5)) + ' UTC') + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  /* ── 会话条数的上限口径 ──
+     这个数来自 list_dialogs(limit=200)：超过 200 个会从尾部静默截断，所以**不能**写成会被
+     读成总数的文案（与 KPI 的 runs 用「200+」同一个理由，铁律 3）。 */
+
+  function sessCountLabel(n) {
+    return n >= 200 ? '200+ 条（后端上限 200）' : n + ' 条（后端上限 200）';
+  }
+
+  /* 列表体（只含卡片）—— 放进 .sess-scroll 内滚动，分页条另置容器外固定不滚。
+     页长走 SESSION_PAGE_SIZE（默认 8 条），「展开全部」也仍在这个滚动容器里。 */
+  function sessionBodyHtml(base) {
+    var list = sessionList(base);
+    var page = pageSlice('sessions', list, SESSION_PAGE_SIZE);
+    return page.length ? '<div class="stack">' + sessionRows(page) + '</div>'
+      : emptyState(state.sessionFilterDate
+        ? '该 UTC 日（' + state.sessionFilterDate + '）没有会话创建记录'
+        : '暂无会话记录');
+  }
+
+  function sessionPagerHtml(base) {
+    var total = sessionList(base).length;
+    return pagerHtml('sessions', total, sessCountLabel(total), SESSION_PAGE_SIZE);
+  }
+
+  /* ⚠️ 后端按 limit=200 取最近更新的对话，超过 200 个会从尾部静默截断 ——
+     故不写「共 N 个会话」，只报本次取到的条数并在 tooltip 里说明上限。 */
+  function sessionInfoHtml(total, days) {
+    var bits = [];
+    var d = num(days);
+    var label = sessCountLabel(total);
+    bits.push(d === null ? '匹配 ' + label : '近 ' + d + ' 天更新 ' + label);
+    if (state.sessionFilterDate) bits.push('按 ' + state.sessionFilterDate + '（UTC 日）过滤');
+    if (state.sessionQuery) bits.push('搜索「' + state.sessionQuery + '」');
+    return '<span title="后端按 limit=200 取最近更新的对话，超过 200 个时会从尾部截断 ——'
+      + ' 这里不是总会话数">' + esc(bits.join(' · ')) + '</span>';
+  }
+
+  function ovSessionCards(list, days) {
+    var chips = [['recent', '最近'], ['token', '计费 Token']].map(function (c) {
+      return '<span class="chip' + (state.sessionOrder === c[0] ? ' on' : '') + '" data-sess-order="' + c[0] + '">'
+        + c[1] + '</span>';
+    }).join('');
+    return '<div class="toolbar"><input class="searchbox" id="ovSessSearch" type="search"'
+      + ' placeholder="搜索标题 / 模式 …" value="' + esc(state.sessionQuery || '') + '">' + chips + '</div>'
+      + '<div class="small" id="ovSessInfo" style="color:var(--muted);margin:6px 0 8px">'
+      + sessionInfoHtml(sessionList(list).length, days) + '</div>'
+      + '<div class="sess-scroll"><div id="ovSessList">' + sessionBodyHtml(list) + '</div></div>'
+      + '<div id="ovSessPager">' + sessionPagerHtml(list) + '</div>';
+  }
+
+  function refreshSessionList() {
+    var box = document.getElementById('ovSessList');
+    if (!box) { renderBlock('sessions'); return; }
+    box.innerHTML = sessionBodyHtml();
+    /* 分页条在滚动容器外：页长/页号都会影响它，必须与列表同批刷新 */
+    var pagerBox = document.getElementById('ovSessPager');
+    if (pagerBox) pagerBox.innerHTML = sessionPagerHtml();
+    var info = document.getElementById('ovSessInfo');
+    if (info) {
+      var data = (state.blocks.sessions && state.blocks.sessions.data) || {};
+      info.innerHTML = sessionInfoHtml(sessionList().length, data.days);
+    }
+  }
+
+  /* ── 三个块的渲染入口（payload 就是后端形状，无需适配层） ── */
+
+  function renderUsage(payload) {
+    var kpi = payload.kpi || {};
+    var rng = payload.range || {};
+    var days = num(rng.days);
+    var runs = num(kpi.runs);
+    var hit = num(kpi.cache_hit_ratio);
+    var think = num(kpi.reasoning_tokens);
+    var ansTok = num(kpi.answer_tokens);
+    var out = (think === null ? 0 : think) + (ansTok === null ? 0 : ansTok);
+    /* 铁律 3：runs 受后端 limit=200 约束，不是「区间内总运行数」—— 打满时必须显示 200+ */
+    var runsText = runs === null ? dash : (runs >= 200 ? '200+' : String(runs));
+    var runsSub = runs === null ? ''
+      : (runs >= 200 ? '个（后端上限 200，真实值更大）'
+        : '个' + (days === null ? '' : ' · 近 ' + days + ' 天'));
+    var shareSub = (out > 0 && think !== null) ? '占输出 ' + pct(think / out) : '占输出 ' + NOT_COLLECTED;
+    /* 按次计费服务（DeepSeek Search/Fetch）：与「计费 Token」并列的**独立口径**卡片。
+       ⚠️ 三态必须分成三种显示，不能合并（否则「没用过」会被读成「不要钱」）：
+         service_calls 缺字段（老 payload） -> 未采集
+         service_calls === 0               -> 区间内未使用（不是未计价、也不是 ¥0）
+         有调用但 service_cost 为 null      -> 未计价（价目里没有该服务） */
+    var svcCalls = num(kpi.service_calls);
+    var svcUnpriced = num(kpi.service_unpriced_calls);
+    var svcVal = svcCalls === null ? NOT_COLLECTED
+      : (svcCalls === 0 ? dash : costLabel(kpi.service_cost));
+    var svcSub = svcCalls === null ? '未采集'
+      : (svcCalls === 0 ? '区间内未使用'
+        : svcCalls + ' 次按次计费'
+          + (svcUnpriced ? '（' + svcUnpriced + ' 次未计价）' : ''));
+    return ovInsight(ovKpiBand([
+      ['活跃会话', runsText, runsSub, ''],
+      /* 铁律 2：未计价与免费必须分开显示 */
+      ['计费 Token', fmtTok(kpi.billed_tokens), costLabel(kpi.cost), ''],
+      ['搜索/抓取', svcVal, svcSub, ''],
+      /* 铁律 1：空区间 / 分母为 0 → 未采集（不是 0%） */
+      ['缓存命中', pct(hit), hit === null ? '未采集（区间内无输入 token）' : '占输入 token',
+        hit === null ? 'c-muted' : 'c-ok'],
+      ['思考 Token', tokLabel(kpi.reasoning_tokens), shareSub, '']
+    ])
+      + ovDailyBars(payload.daily_tokens || [], payload.daily_cost || [],
+        payload.daily_service_cost || [])
+      + ovCompositionRing(payload));
+  }
+
+  function renderActivity(payload) { return ovInsight(ovHeatmap(payload.days || [])); }
+  function renderSessions(payload) { return ovInsight(ovSessionCards(payload.sessions || [], payload.days)); }
+
+
   /* ════════════════════ 数据适配层：真实 SSE payload → 原型渲染器字段 ════════════════════ */
 
   const LEVEL_CLS = { ice: 'lv-cold', ebb: 'lv-cold', warm: 'lv-warm', hot: 'lv-hot' };
-  const MODE_COLORS = ['#176b5b', '#2f6f9f', '#8b5cf6', '#9ca3af'];
   const VERDICT_CLS = (v) => {
     const s = String(v || '');
     if (s.indexOf('不利') >= 0) return 'st-head';
@@ -299,9 +858,16 @@
     const mv = num(s.total_market_value);
     const cost = num(s.total_cost);
     const todayVals = items.map(x => x.today).filter(v => v !== null);
-    const today = todayVals.length ? todayVals.reduce((a, b) => a + b, 0) : null;
     const floatPnl = num(s.total_float_pnl);
     const acc = d.account || null;
+    /* 今日盈亏优先用券商账户级数值：页面上只列 qty>0 的行，今天卖掉的标的
+       不在 items 里，但对当日盈亏有贡献（已实现）。逐行求和会偏小
+       （2026-11-06 用户实测：券商 -509.69，逐行求和 -163.44）。
+       逐行求和只在账户级缺失时兜底。 */
+    const accToday = acc ? num(acc.today_pnl) : null;
+    const today = accToday !== null
+      ? accToday
+      : (todayVals.length ? todayVals.reduce((a, b) => a + b, 0) : null);
     const totalAsset = acc ? num(acc.total_asset) : null;
     const posMv = acc ? num(acc.positions_market_value) : null;
     return {
@@ -379,6 +945,10 @@
     const cal = d.calibration || {};
     const rv = d.reviews || {};
     const rrun = rv.run || {}, rdlg = rv.dialog || {};
+    // 信号校准用固定 5 日口径：旧 buy_winrate/buy_count 是「至今」，胜率不回退，
+    // 否则会把至今胜率冒充 5 日胜率（仅样本数在 n_5d 缺失时回退 buy_count）。
+    const sigN5 = num(sig.buy_n_5d);
+    const sigWin5 = num(sig.buy_winrate_5d);
     return {
       hasEval: !!latest,
       evalName: latest ? (latest.name || latest.id || '') : '',
@@ -390,53 +960,14 @@
       runReviews: num(rrun.count) || 0, dlgReviews: num(rdlg.count) || 0,
       runAvg: num(rrun.avg_overall), dlgAvg: num(rdlg.avg_overall),
       rubric: rrun.rubric_version || rdlg.rubric_version || null,
-      sigN: num(sig.buy_count),
-      sigWin: num(sig.buy_winrate) !== null ? sig.buy_winrate * 100 : null,
+      sigN: sigN5 !== null ? sigN5 : num(sig.buy_count),
+      sigWin: sigWin5 !== null ? sigWin5 * 100 : null,
       exp: num(sig.expectancy),
       payoff: num(sig.payoff), ece: num(cal.ece),
       calib: (cal.buckets || []).map(b => [b.range, num(b.avg_pred) || 0, num(b.realized) || 0, b.n]),
     };
   }
 
-  function adaptUsage(d) {
-    const runs = num(d.runs) || 0;
-    const modes = (d.modes || []).map((m, i) => [m[0], runs ? Math.round(m[1] / runs * 100) : 0, MODE_COLORS[i % MODE_COLORS.length]]);
-    const tk = d.token || {};
-    const cst = d.cost || {};
-    const tokTotal = num(tk.total_tokens) || 0;
-    const modelTotal = (tk.by_model || []).reduce((s, m) => s + (num(m[1]) || 0), 0) || 1;
-    const agentTotal = (tk.by_agent || []).reduce((s, m) => s + (num(m[1]) || 0), 0) || 1;
-    return {
-      days: 28,
-      dialogs: num(d.dialogs), messages: num(d.messages), runs: num(d.runs),
-      successRate: num(d.success_rate), avgSec: num(d.avg_sec),
-      activity: (d.activity || []).map(v => num(v) || 0),
-      modes,
-      recent: (d.recent || []).map(r => ({
-        t: r.title || r.dialog_uuid || '（无标题）',
-        mode: r.current_mode || dash,
-        tm: fmtIso(r.updated_at),
-        uuid: r.dialog_uuid,
-      })),
-      /* ── token 用量与成本 ── */
-      hasToken: tokTotal > 0,
-      llmCalls: num(tk.llm_calls) || 0,
-      tokIn: num(tk.input_tokens) || 0,
-      tokOut: num(tk.output_tokens) || 0,
-      tokTotal,
-      cached: num(tk.cached_tokens) || 0,
-      reasoning: num(tk.reasoning_tokens) || 0,
-      hitRatio: num(tk.cache_hit_ratio),
-      avgPerCall: num(tk.avg_tokens_per_call) || 0,
-      tokTrend: (tk.daily || []).map(v => num(v) || 0),
-      tokenDays: num(d.token_days) || (tk.daily || []).length || 14,
-      byModel: (tk.by_model || []).slice(0, 5).map(([nm, v], i) => [nm, num(v) || 0, (num(v) || 0) / modelTotal * 100, MODE_COLORS[i % MODE_COLORS.length]]),
-      byAgent: (tk.by_agent || []).slice(0, 5).map(([nm, v], i) => [nm, num(v) || 0, (num(v) || 0) / agentTotal * 100, MODE_COLORS[i % MODE_COLORS.length]]),
-      cost: num(cst.total), costInput: num(cst.input), costCached: num(cst.cached),
-      costOutput: num(cst.output), costUnit: cst.unit || '元',
-      pricing: d.pricing || {},
-    };
-  }
 
   function adaptTodos(d) {
     const SEV = { critical: 'error', error: 'error', warn: 'warn', info: 'info' };
@@ -514,7 +1045,7 @@
   const ADAPTERS = {
     market: adaptMarket, shortline: adaptShortline, thesis: adaptThesis,
     portfolio: adaptPortfolio, watchlist: adaptWatchlist, macro: adaptMacro,
-    quality: adaptQuality, review: adaptReview, usage: adaptUsage,
+    quality: adaptQuality, review: adaptReview,
     todos: adaptTodos, storage: adaptStorage, runtime: adaptRuntime,
     thesis_portfolio: adaptThesisPortfolio,
   };
@@ -625,6 +1156,9 @@
     /* 时效基准 = 扫描块 as_of（最近已完成交易日），旧 payload 缺失时回退容器 latest_date。
        缓存尾部陈旧的标的（latest_date < as_of）会在 tooltip 头标注数据截止。 */
     const asOf = scans.as_of || '';
+    /* 策略可信度：扫描块 payload 的 strategy_health（{sid: {verified, status}}）。
+       undefined（旧缓存 payload 没这个键 / 该策略不在表里）与 false（明确未验证）语义不同 —— 只对 false 打黄标 */
+    const healthMap = scans.strategy_health || {};
     /* 扫描块形状：hits/sells 每 code 值为容器 {hits|sells: [...], latest_date}；兼容直接给数组 */
     const unwrap = (raw, key) => {
       if (Array.isArray(raw)) return { list: raw, latest: '' };
@@ -642,6 +1176,7 @@
     entries.forEach(e => {
       e.sid = e.h.strategy_id || e.h.s || '';
       e.date = e.h.date || e.h.d || '';
+      e.verified = (healthMap[e.sid] || {}).verified;
       const diff = (Date.parse(asOf || e.latestDate) - Date.parse(e.date)) / 86400000;
       e.days = Number.isFinite(diff) ? diff : null;
     });
@@ -666,6 +1201,7 @@
         `<span class="d">${esc(md)}</span>` +
         `<span>${esc(label)}</span>` +
         `<span class="d">${ageOf(e)}</span>` +
+        (e.verified === false ? '<span class="sub">⚠ 未经验证</span>' : '') +
         `<span class="sub">${sub}</span></div>`;
     }).join('');
     const codeLatest = buySide.latest || sellSide.latest;
@@ -674,7 +1210,7 @@
     const head = `<div class='tt'>${esc(it.nm)} ${esc(code || '')} · 策略信号${staleNote}</div>`
       + `<div class="tr"><span class="sub">红=买入、绿=卖出；越亮越近（亮=当天，红/绿=近1-4天，浅=≥5天）</span></div>`;
     return entries.map(e =>
-      `<span class="strat-badge ${e.side === 'buy' ? 'sb-buy' : 'sb-sell'} ${tierOf(e)}" data-tip="${esc(head + tip)}">${esc(labelOf(e))}</span>`).join('');
+      `<span class="strat-badge ${e.side === 'buy' ? 'sb-buy' : 'sb-sell'} ${tierOf(e)}${e.verified === false ? ' sb-unverified' : ''}" data-tip="${esc(head + tip)}">${e.verified === false ? '⚠' : ''}${esc(labelOf(e))}</span>`).join('');
   }
 
   R.portfolio = (d) => {
@@ -783,7 +1319,7 @@
   R.quality = (d) => `
   <div style="display:flex;gap:14px;align-items:center">
     <div style="display:flex;gap:12px;flex:0 0 auto">
-      <div class="ring-wrap">${ringHtml(d.winrate === null ? 0 : d.winrate, 'var(--brand)', d.winrate === null ? dash : d.winrate.toFixed(1) + '%')}<div class="cap">费后胜率<br>signal-eval</div></div>
+      <div class="ring-wrap">${ringHtml(d.winrate === null ? 0 : d.winrate, 'var(--brand)', d.winrate === null ? dash : d.winrate.toFixed(1) + '%')}<div class="cap">费后5日胜率<br>signal-eval</div></div>
       <div class="ring-wrap">${ringHtml(d.cacheHit === null ? 0 : d.cacheHit, '#2f6f9f', d.cacheHit === null ? dash : d.cacheHit.toFixed(1) + '%')}<div class="cap">${d.cacheSrc === 'token' ? '缓存命中（占总 Token）' : '缓存命中（占总量，A8）'}</div></div>
     </div>
     <div style="flex:1;min-width:0">
@@ -822,75 +1358,19 @@
       <div class="calib-legend">
         <span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#9db8d2;margin-right:4px"></i>预测</span>
         <span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--brand);margin-right:4px"></i>实际</span>
-        <span style="margin-left:auto">样本 ${d.sigN ?? dash} · 胜率 ${d.sigWin === null ? dash : d.sigWin.toFixed(1) + '%'} · ECE <b class="mono">${d.ece === null ? dash : d.ece}</b></span>
+        <span style="margin-left:auto">样本 ${d.sigN ?? dash} · 5日胜率 ${d.sigWin === null ? dash : d.sigWin.toFixed(1) + '%'} · ECE <b class="mono">${d.ece === null ? dash : d.ece}</b></span>
       </div>
     </div>
   </div>`;
 
-  R.usage = (d) => `
-  <div class="stat-grid s3" style="margin-bottom:8px">
-    <div class="stat"><span class="l">对话 / 近 ${d.days} 天</span><b>${d.dialogs ?? dash}</b></div>
-    <div class="stat"><span class="l">消息</span><b>${d.messages ?? dash}</b></div>
-    <div class="stat"><span class="l">运行</span><b>${d.runs ?? dash}</b>${d.successRate === null ? '' : `<em class="${d.successRate >= 50 ? 'v-up' : 'v-down'}">成功 ${d.successRate}%</em>`}</div>
-    <div class="stat"><span class="l">平均耗时</span><b>${d.avgSec === null ? dash : d.avgSec + 's'}</b></div>
-    <div class="stat"><span class="l">模式</span><b>${d.modes.length}</b></div>
-  </div>
-  ${d.modes.length ? `<div class="mode-bar">${d.modes.map(([nm, pct, c]) => `<i style="width:${pct}%;background:${c}" title="${esc(nm)} ${pct}%"></i>`).join('')}</div>
-  <div class="mode-legend">${d.modes.map(([nm, pct, c]) => `<span><span class="sw" style="background:${c}"></span>${esc(nm)} ${pct}%</span>`).join('')}</div>` : ''}
-  <div style="margin-top:8px">
-    <span style="font-size:10.5px;color:var(--muted)">近 14 日运行数</span>
-    ${d.activity.length >= 2 ? lineSvg(d.activity, { w: 280, h: 40 }) : ''}
-  </div>
-  ${d.hasToken ? (() => {
-    const pct = (v, t) => (t > 0 ? v / t * 100 : 0);
-    const tc = d.costUnit === '元' ? '¥' : '';
-    return `
-  <div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:9px">
-    <div style="display:flex;align-items:baseline;font-size:11px;color:var(--text-secondary);margin-bottom:6px">
-      <span>Token 用量 · 近 ${d.tokenDays} 天</span>
-      <span style="margin-left:auto;font-size:10.5px;color:var(--muted)">成本估算 <b class="mono" style="color:var(--text);font-size:13px">${tc}${d.cost === null ? dash : d.cost.toFixed(2)}</b></span>
-    </div>
-    <div class="stat-grid s3">
-      <div class="stat"><span class="l">总 Token</span><b>${fmtTok(d.tokTotal)}</b><span class="sub">调用 ${d.llmCalls} 次</span></div>
-      <div class="stat"><span class="l">输入</span><b>${fmtTok(d.tokIn)}</b></div>
-      <div class="stat"><span class="l">输出</span><b>${fmtTok(d.tokOut)}</b><span class="sub">含思考 ${fmtTok(d.reasoning)}</span></div>
-      <div class="stat"><span class="l">缓存命中（占输入）</span><b>${d.hitRatio === null ? dash : (d.hitRatio * 100).toFixed(1) + '%'}</b><span class="sub">${fmtTok(d.cached)} tok</span></div>
-      <div class="stat"><span class="l">思考 Token</span><b>${fmtTok(d.reasoning)}</b>${(d.reasoning > 0 && d.tokOut > 0) ? `<span class="sub">占输出 ${Math.round(d.reasoning / d.tokOut * 100)}%</span>` : ''}</div>
-      <div class="stat"><span class="l">单次均量</span><b>${fmtTok(d.avgPerCall)}</b></div>
-    </div>
-    <div style="display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:8px;background:var(--bg-subtle,rgba(127,127,127,.12))">
-      <i style="width:${pct(d.tokIn - Math.min(d.cached, d.tokIn), d.tokTotal)}%;background:#2f6f9f" title="输入（未命中）"></i>
-      <i style="width:${pct(Math.min(d.cached, d.tokIn), d.tokTotal)}%;background:#7fb8a9" title="缓存命中"></i>
-      <i style="width:${pct(d.tokOut, d.tokTotal)}%;background:#c98a3f" title="输出"></i>
-    </div>
-    <div class="mode-legend" style="margin-top:4px">
-      <span><span class="sw" style="background:#2f6f9f"></span>输入 ${fmtTok(d.tokIn - Math.min(d.cached, d.tokIn))}</span>
-      <span><span class="sw" style="background:#7fb8a9"></span>缓存 ${fmtTok(Math.min(d.cached, d.tokIn))}</span>
-      <span><span class="sw" style="background:#c98a3f"></span>输出 ${fmtTok(d.tokOut)}（含思考 ${fmtTok(d.reasoning)}）</span>
-    </div>
-    <div style="margin-top:8px">
-      <span style="font-size:10.5px;color:var(--muted)">近 ${d.tokenDays} 日 Token 消耗</span>
-      ${d.tokTrend.length >= 2 ? lineSvg(d.tokTrend, { w: 280, h: 40, color: '#c98a3f' }) : ''}
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
-      <div>
-        <div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">模型分布（Token 占比）</div>
-        ${d.byModel.map(([nm, v, p, c]) => `<div class="theme-line"><span class="nm" style="flex-basis:88px" title="${esc(nm)}">${esc(nm)}</span><span class="theme-bar"><i style="width:${p.toFixed(0)}%;background:${c}"></i></span><span class="n" style="flex-basis:44px">${p.toFixed(0)}%</span></div>`).join('') || emptyState('暂无模型数据')}
-      </div>
-      <div>
-        <div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">模式分布（Token 占比）</div>
-        ${d.byAgent.map(([nm, v, p, c]) => `<div class="theme-line"><span class="nm" style="flex-basis:88px" title="${esc(nm)}">${esc(nm)}</span><span class="theme-bar"><i style="width:${p.toFixed(0)}%;background:${c}"></i></span><span class="n" style="flex-basis:44px">${p.toFixed(0)}%</span></div>`).join('') || emptyState('暂无模式数据')}
-      </div>
-    </div>
-    <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.6">
-      计价口径：${esc(d.pricing.model || dash)} · 输入 ${d.pricing.in ?? dash} / 输出 ${d.pricing.out ?? dash} / 缓存 ${d.pricing.cached ?? dash} 元每百万 token（可配置）；成本 = 输入¥${d.costInput === null ? dash : d.costInput.toFixed(2)} + 缓存¥${d.costCached === null ? dash : d.costCached.toFixed(2)} + 输出¥${d.costOutput === null ? dash : d.costOutput.toFixed(2)}；数据源 agent_trace 月库（跳过 A8 缓存命中步骤）
-    </div>
-  </div>`; })() : `<div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:9px">${emptyState('暂无 Token 统计数据（agent_trace 月库无 LLM 调用记录）')}</div>`}
-  <div class="dlg-list">${d.recent.map(r => `
-    <div class="dlg-item"${r.uuid ? ` data-nav="dialog:${esc(r.uuid)}"` : ''}>
-      <span class="tt">${esc(r.t)}</span><span class="mode">${esc(r.mode)}</span><span class="tm">${esc(r.tm)}</span>
-    </div>`).join('')}</div>`;
 
+  /* 上下文洞察 / 活跃度 / 会话档案：payload 已是渲染就绪形状（无适配层）。
+     ⚠️ 旧 usage 块的 token/cost/activity/modes/recent/… 形状已被任务 11 的
+     context_stats.build_context_insight 取代（range/kpi/daily_tokens/daily_cost/by_model/runs），
+     adaptUsage 随之删除 —— 留着它只会把新 payload 读成破折号。 */
+  R.usage = (d) => renderUsage(d);
+  R.activity = (d) => renderActivity(d);
+  R.sessions = (d) => renderSessions(d);
   R.todos = (d) => {
     const list = d.items || [];
     markMeta('todos', `<span class="b b-info">未处理 ${list.length}</span>`);
@@ -937,6 +1417,42 @@
   </div>`;
   };
 
+  /* 策略健康度：只看每个策略「最近一次回测」是否可信（设计文档 §11）。
+     verified 口径与策略详情页同源：体检 ok + 样本达标 + ≥5 笔（server/backtest_service.py）。
+     注意 coverage_pct 落库是 0-1 比值（backtest/health.py:57），展示要 ×100。 */
+  R.strategy_health = (d) => {
+    const rows = d.rows || [];
+    if (!rows.length) return emptyState('暂无策略（先用策略回测跑一次）');
+    const STATUS = {
+      ok: ['✓ 有效', 'ok'],
+      gap: ['⚠ 数据有缺口', 'warn'],
+      weak: ['⚠ 结果偏弱', 'warn'],
+      never: ['⚠ 从未回测', 'never'],
+    };
+    /* 两处降级标注，避免行内结论与「已验证」汇总自相矛盾：
+       - 体检 ok 但样本 <5 笔 → 不能称「已验证」，黄标说明原因；
+       - 有回测记录却没有体检结果（跑完/中断/旧库未迁移）→ 不能写「从未回测」。 */
+    const badgeOf = (r) => {
+      if (r.status === 'ok' && !r.verified) return ['⚠ 样本不足', 'warn'];
+      if (r.status === 'never' && r.last_run_at) return ['⚠ 无体检结果', 'warn'];
+      return STATUS[r.status] || ['—', 'never'];
+    };
+    const sum = d.summary || {};
+    const line = `策略 ${sum.total || rows.length} 个 · 已验证 ${sum.verified || 0} · 从未回测 ${sum.never || 0}`
+      + (sum.gap ? ` · 数据有缺口 ${sum.gap}` : '');
+    return `<div class="sh-line">${esc(line)}</div>` + rows.map((r) => {
+      const st = badgeOf(r);
+      const cov = num(r.coverage_pct) === null ? dash : (Number(r.coverage_pct) * 100).toFixed(1) + '%';
+      const io = num(r.sharpe_ratio_io) === null ? dash : Number(r.sharpe_ratio_io).toFixed(2);
+      return `<div class="sh-row" data-nav="strategy:${esc(r.strategy_id || '')}" title="点开这个策略的详情：回测记录 / 评判 / 前瞻 / 落地">
+        <span class="sh-name">${esc(r.name || r.strategy_id)}</span>
+        <span class="sh-badge ${st[1]}">${esc(st[0])}</span>
+        <span class="sh-meta">最近回测 ${esc((r.last_run_at || '—').slice(0, 10))} · 数据 ${cov} · 样本 ${r.trade_count || 0} 笔 · IS/OOS ${io}</span>
+      </div>`;
+    }).join('')
+      + `<div class="sh-foot">口径：只看最近一次回测；数据覆盖率不足或样本 &lt; 5 笔的策略不算「已验证」。${esc(d.as_of || '')}</div>`;
+  };
+
   /* 组合层：跨资产配比 + 共同风险。紧凑版（大屏节奏），完整视图在台账页「组合层」入口 */
   R.thesis_portfolio = (d) => {
     if (!d.available) return emptyState('组合层暂不可用：' + esc(d.reason || ''));
@@ -961,7 +1477,7 @@
         ? `<div style="font-size:10.5px;color:var(--muted);margin-top:5px">距上一档「${esc(p.upgrade.to_label)}」还差 <b class="mono">${esc(p.upgrade.delta)}</b> 分</div>`
         : '';
       const riskLine = p.riskHit.length
-        ? `<div style="margin-top:6px;font-size:11px;color:var(--warn)">⚠ 共同风险已触发：${esc(p.riskHit.join('、'))}（建议整体降仓）</div>`
+        ? `<div style="margin-top:6px;font-size:11px;color:var(--warn)">⚠ 共同风险已触发：${esc(p.riskHit.join('、'))}（示例口径：内部调权为主）</div>`
         : (p.riskPending.length
           ? `<div style="margin-top:6px;font-size:10.5px;color:var(--muted)">共同风险待评估：${esc(p.riskPending.join('、'))}</div>`
           : `<div style="margin-top:6px;font-size:10.5px;color:var(--muted)">共同风险未触发</div>`);
@@ -991,7 +1507,7 @@
     market: 5, shortline: 7, portfolio: 7, watchlist: 5,
     thesis: 12, quality: 6, review: 6,
     runtime: 12, todos: 12, macro: 12, usage: 12, storage: 12,
-    thesis_portfolio: 12,
+    thesis_portfolio: 12, strategy_health: 12,
   };
   const KIND_CN = { research: '研究类', market: '行情类', system: '系统' };
   /* 卡头「详情 ›」下钻 target（无映射的块不渲染按钮） */
@@ -1001,6 +1517,8 @@
     /* 组合层的完整视图在台账页左侧列表置顶（组合层不是 thesis 定义，
        但入口挂在那里——下钻过去一眼能看到） */
     thesis_portfolio: 'thesis',
+    /* 策略健康度的下钻 = 策略回测页（策略库/账本），那里能做体检与重跑 */
+    strategy_health: 'backtest',
   };
 
   function titleOf(id) {
@@ -1153,14 +1671,40 @@
 
   function abortStream() {
     if (streamAbort) { streamAbort.abort(); streamAbort = null; }
+    /* 全量刷新/自动刷新开始时，残留的单块重试流也要收掉：
+       否则旧的重试结果会晚于新数据落地，把卡片刷回旧值。 */
+    if (state.retries && state.retries.size) {
+      state.retries.forEach(ctrl => { try { ctrl.abort(); } catch (e) { /* 已结束 */ } });
+      state.retries.clear();
+    }
   }
 
   async function runStream(kind, blocks) {
-    if (state.running) return;
-    state.running = true;
-    abortStream();
+    const isRetry = kind === 'force' && !!(blocks && blocks.length);
+    const key = isRetry ? blocks.join(',') : '';
+
+    /* 单块重试：不抢 state.running 这把全局锁，也不 abort 正在跑的流。
+       原实现 `if (state.running) return;` 会把重试点击静默丢弃 —— 初次加载
+       只要有一个慢块（如 agent 消耗统计）在跑，用户点「重试本块」就毫无反应，
+       必须等全部区块跑完才生效。后端按块加锁，多开一条流代价很小，
+       且同块重复点击会先 abort 掉自己上一条，不至于堆积。 */
+    if (isRetry && state.retries.has(key)) {
+      state.retries.get(key).abort();
+      state.retries.delete(key);
+    }
+    if (!isRetry && state.running) return;
+
     const ctrl = new AbortController();
-    streamAbort = ctrl;
+    if (isRetry) {
+      state.retries.set(key, ctrl);
+      runRole = 'retry';
+    } else {
+      state.running = true;
+      abortStream();
+      streamAbort = ctrl;
+      runRole = 'main';
+    }
+
     const qs = new URLSearchParams();
     if (blocks && blocks.length) qs.set('blocks', blocks.join(','));
     if (kind === 'force') qs.set('force', '1');
@@ -1179,17 +1723,26 @@
           const frame = buf.slice(0, idx);
           buf = buf.slice(idx + 2);
           const parsed = parseSseFrame(frame);
+          /* 每帧前重置角色：流之间可能交错（重试与主流并发） */
+          runRole = isRetry ? 'retry' : 'main';
           if (parsed) handleEvent(parsed);
         }
       }
+      runRole = 'main';
     } catch (e) {
+      runRole = 'main';
       if (e.name !== 'AbortError') {
-        logLine('block_error', `连接中断：${esc(e.message)}（3 秒后自动重连一次）`);
-        if (kind !== 'auto') timers.push(setTimeout(() => runStream('initial', null), 3000));
+        logLine('block_error', `${isRetry ? '重试' : '连接'}中断：${esc(e.message)}`);
+        if (!isRetry && kind !== 'auto') timers.push(setTimeout(() => runStream('initial', null), 3000));
       }
     } finally {
-      state.running = false;
-      streamAbort = null;
+      if (isRetry) {
+        if (state.retries.get(key) === ctrl) state.retries.delete(key);
+        runRole = 'main';
+      } else {
+        state.running = false;
+        streamAbort = null;
+      }
     }
   }
 
@@ -1208,6 +1761,31 @@
   /* ── 运行开始：重置日志/进度，目标块进入 loading（auto 只挂「刷新中」徽标） ── */
 
   function beginRun(kind, blocks) {
+    const isRetry = kind === 'force' && !!(blocks && blocks.length);
+    if (isRetry) {
+      /* 单块重试：不重置全局计数 / 不清空日志 / 不重建骨架 / 不动强制刷新按钮。
+         原实现对重试也跑一遍全量重置，导致摘要变成「完成 1/1」、日志被抹掉，
+         且与正在跑的流互相干扰。 */
+      const targets = blocks;
+      targets.forEach(id => {
+        if (id === 'strategy_scan') return;
+        const s = state.blocks[id];
+        /* 计数语义（见 block_done / block_error）：completed = 已结束处理的区块数
+           （含失败），failed = 其中失败的。重试的块此刻先「退回未结算」，
+           结束后由既有 handler 自然补回 —— 成功则 completed 回原值、failed 少 1；
+           再失败则两个都回原值。避免直接 ++ 造成 completed 重复计数。 */
+        if (s && s.status === 'error') {
+          state.completed = Math.max(0, state.completed - 1);
+          state.failed = Math.max(0, state.failed - 1);
+        }
+        state.blocks[id] = { status: 'loading', cache: false, degraded: '', error: null, data: null };
+        renderBlock(id);
+      });
+      $('ovLog').classList.add('open');
+      logLine('block_start', `<span class="dim">重试 ${targets.length} 个区块：</span>${targets.map(titleOf).join('、')}`);
+      return;
+    }
+
     stopTimers();
     state.running = true;
     state.runKind = kind;
@@ -1328,6 +1906,14 @@
     }
 
     if (type === 'final') {
+      /* 独立重试流必须最先短路：进度条 / 强制刷新按钮 / ovMeta / 计时器
+         全部归主流管，否则重试的 final 会把仍在跑的流显示成「已完成」，
+         并顺手 stopElapsed() 把主流的耗时计时也停掉。 */
+      if (runRole === 'retry') {
+        logLine('final', `重试完成 <span class="dim">${blocksSummaryLine()}</span>`);
+        updateSessionPill();
+        return;
+      }
       stopElapsed();
       const s = ((Date.now() - state.runStart) / 1000).toFixed(1);
       const total = PLAN.length || d.total || 0;
@@ -1347,6 +1933,11 @@
       state.running = false;
       return;
     }
+  }
+
+  /* 摘要片段（供重试日志用）。口径对齐主流 final：completed 含失败块，故用「完成」不用「成功」 */
+  function blocksSummaryLine() {
+    return `完成 ${state.completed}/${PLAN.length}${state.failed ? ` · 失败 ${state.failed}` : ''}`;
   }
 
   /* ── 自适应刷新（行情静默 + 运行状态轮询）与下钻 ── */
@@ -1447,6 +2038,15 @@
     if (target === 'skill') { closePage(); R.skillManager && R.skillManager.openPage && R.skillManager.openPage(); return; }
     if (target && clicks[target]) { closePage(); const el = document.querySelector(clicks[target]); if (el) el.click(); return; }
     if (target && /^\d{6}$/.test(target)) { closePage(); window.openKlineChart && window.openKlineChart(target); return; }
+    // strategy:<strategy_id> → 打开回测面板并直接进「策略详情」（大屏策略健康度行的下钻）
+    if (target && target.indexOf('strategy:') === 0) {
+      const sid = target.slice(9);
+      if (!sid) return;
+      closePage();
+      const p = window.initBacktestPanel && window.initBacktestPanel();
+      if (p) { p.show(); p.openLifecycle(sid); }
+      return;
+    }
     if (target && target.indexOf('dialog:') === 0) { closePage(); R._selectDialog && R._selectDialog(target.slice(7)); return; }
   }
 
@@ -1466,6 +2066,13 @@
     };
   }
   updateAutoPill();
+  /* 会话档案搜索：只刷新列表区，保住输入框焦点（整块重渲染会把焦点连同输入框一起丢掉） */
+  $('ovShell').addEventListener('input', (e) => {
+    if (e.target && e.target.id === 'ovSessSearch') {
+      state.sessionQuery = e.target.value || '';
+      refreshSessionList();
+    }
+  });
   $('ovShell').addEventListener('click', (e) => {
     const retry = e.target.closest('[data-retry]');
     if (retry) { runStream('force', [retry.dataset.retry]); return; }
@@ -1480,6 +2087,35 @@
       else if (act === 'expand') ps.expanded = true;
       else if (act === 'collapse') { ps.expanded = false; ps.page = 1; }
       renderBlock(pager.dataset.block);
+      return;
+    }
+    /* 上下文洞察三块的本地交互（只重渲染块体，不触网、不重跑流） */
+    const heat = e.target.closest('[data-heat]');
+    if (heat) {
+      if (heat.dataset.heatNone) return;
+      const day = heat.dataset.heat || '';
+      state.sessionFilterDate = (state.sessionFilterDate === day) ? '' : day;
+      renderBlock('activity');
+      renderBlock('sessions');
+      return;
+    }
+    const heatClear = e.target.closest('[data-heat-clear]');
+    if (heatClear) {
+      state.sessionFilterDate = '';
+      renderBlock('activity');
+      renderBlock('sessions');
+      return;
+    }
+    const orderChip = e.target.closest('[data-sess-order]');
+    if (orderChip) {
+      state.sessionOrder = orderChip.dataset.sessOrder || 'recent';
+      const card = orderChip.closest('.ov-card');
+      if (card) {
+        card.querySelectorAll('[data-sess-order]').forEach((c) => {
+          c.classList.toggle('on', c.dataset.sessOrder === state.sessionOrder);
+        });
+      }
+      refreshSessionList();
       return;
     }
     const nav = e.target.closest('[data-nav]');

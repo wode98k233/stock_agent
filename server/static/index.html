@@ -28,44 +28,51 @@
     .dc-scan-chip.on{border-color:var(--brand,#2f6feb);color:var(--brand,#2f6feb);background:rgba(47,111,235,.12)}
   </style>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📈%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/css/variables.css?v=27">
+  <link rel="stylesheet" href="/static/css/variables.css?v=29">
   <link rel="stylesheet" href="/static/css/layout.css?v=26">
   <link rel="stylesheet" href="/static/css/sidebar.css?v=26">
-  <link rel="stylesheet" href="/static/css/chat.css?v=43">
+  <link rel="stylesheet" href="/static/css/chat.css?v=52">
   <link rel="stylesheet" href="/static/css/markdown.css?v=26">
-  <link rel="stylesheet" href="/static/css/dashboard.css?v=28">
+  <link rel="stylesheet" href="/static/css/dashboard.css?v=31">
   <link rel="stylesheet" href="/static/css/detail-pane.css?v=26">
   <link rel="stylesheet" href="/static/css/market-dashboard.css?v=6">
   <link rel="stylesheet" href="/static/css/exec-drawer.css?v=3">
-  <link rel="stylesheet" href="/static/css/timeline.css?v=28">
-  <link rel="stylesheet" href="/static/css/chat-transcript.css?v=1">
-  <link rel="stylesheet" href="/static/css/config-panel.css?v=34">
+  <link rel="stylesheet" href="/static/css/timeline.css?v=29">
+  <link rel="stylesheet" href="/static/css/chat-transcript.css?v=4">
+  <link rel="stylesheet" href="/static/css/chat-follow.css?v=1">
+  <link rel="stylesheet" href="/static/css/strategy-card.css?v=7">
+  <link rel="stylesheet" href="/static/css/config-panel.css?v=35">
   <link rel="stylesheet" href="/static/css/template-manager.css?v=9">
   <link rel="stylesheet" href="/static/css/route-config.css?v=2">
+  <link rel="stylesheet" href="/static/css/strategy-intent-config.css?v=1">
+  <link rel="stylesheet" href="/static/css/pricing-config.css?v=2">
+  <link rel="stylesheet" href="/static/css/capability-panel.css?v=1">
   <link rel="stylesheet" href="/static/css/attribution-panel.css?v=4">
   <link rel="stylesheet" href="/static/css/diff-modal.css?v=27">
   <link rel="stylesheet" href="/static/css/config-viz.css?v=27">
   <link rel="stylesheet" href="/static/css/config-viz-compression.css?v=2">
-  <link rel="stylesheet" href="/static/css/trading-calendar.css?v=2">
-  <link rel="stylesheet" href="/static/css/signal-eval.css?v=39">
-  <link rel="stylesheet" href="/static/css/watchlist.css?v=3">
+  <link rel="stylesheet" href="/static/css/trading-calendar.css?v=3">
+  <link rel="stylesheet" href="/static/css/signal-eval.css?v=42">
+  <link rel="stylesheet" href="/static/css/watchlist.css?v=4">
   <link rel="stylesheet" href="/static/css/monitor.css?v=1">
-  <link rel="stylesheet" href="/static/css/portfolio.css?v=7">
+  <link rel="stylesheet" href="/static/css/portfolio.css?v=11">
   <link rel="stylesheet" href="/static/css/quality.css?v=37">
-  <link rel="stylesheet" href="/static/css/strategy-research.css?v=38">
+  <link rel="stylesheet" href="/static/css/strategy-research.css?v=46">
   <link rel="stylesheet" href="/static/css/skill-manager.css?v=2">
-  <link rel="stylesheet" href="/static/css/chart-kline.css?v=17">
-  <link rel="stylesheet" href="/static/css/backtest.css?v=20">
+  <link rel="stylesheet" href="/static/css/chart-kline.css?v=21">
+  <link rel="stylesheet" href="/static/css/backtest.css?v=26">
+  <link rel="stylesheet" href="/static/css/factor.css?v=3">
+  <link rel="stylesheet" href="/static/css/pool-study.css?v=5">
   <link rel="stylesheet" href="/static/css/news.css?v=4">
   <link rel="stylesheet" href="/static/css/flow.css?v=2">
-  <link rel="stylesheet" href="/static/css/data-center.css?v=9">
+  <link rel="stylesheet" href="/static/css/data-center.css?v=10">
   <link rel="stylesheet" href="/static/css/monitor-panel.css?v=1">
   <link rel="stylesheet" href="/static/css/responsive.css?v=28">
         <link rel="stylesheet" href="/static/css/style.css?v=2">
-        <link rel="stylesheet" href="/static/css/eval.css?v=11">
+        <link rel="stylesheet" href="/static/css/eval.css?v=12">
   <link rel="stylesheet" href="/static/css/short-line.css?v=7">
-<link rel="stylesheet" href="/static/css/thesis.css?v=12">
-<link rel="stylesheet" href="/static/css/overview.css?v=3">
+<link rel="stylesheet" href="/static/css/thesis.css?v=22">
+<link rel="stylesheet" href="/static/css/overview.css?v=5">
 <link rel="stylesheet" href="/static/css/memory-manager.css?v=7">
         <link rel="stylesheet" href="/static/lib/github-dark.min.css?v=1">
 </head>
@@ -110,6 +117,11 @@
         <span aria-hidden="true">◫</span>
         <span>仪表盘管理</span>
       </button>
+      <a id="deepReportBtn" class="icon-text-button sidebar-tool-button" href="/static/deep-report.html"
+         target="_blank" rel="noopener" style="text-decoration:none" title="生成深度报告，并在当前对话里出卡片">
+        <span aria-hidden="true">▤</span>
+        <span>深度报告</span>
+      </a>
       <button id="logTraceBtn" class="icon-text-button sidebar-tool-button" type="button" hidden>
         <span aria-hidden="true">⇄</span>
         <span>日志关联</span>
@@ -182,6 +194,17 @@
               <button id="backtestBtn" class="tool-menu-item" type="button">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
                 策略回测
+              </button>
+              <button id="factorBtn" class="tool-menu-item" type="button">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                因子研究
+              </button>
+              <button class="tool-menu-item" type="button" onclick="window.StockRadar?.capabilityPanel?.open()">
+                引擎能力清单
+              </button>
+              <button id="poolStudyBtn" class="tool-menu-item" type="button" onclick="window.StockRadar?.poolStudy?.openPage()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                池子研究
               </button>
               <button id="strategyResearchBtn" class="tool-menu-item" type="button" onclick="window.StockRadar?.strategyResearchPanel?.open()">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6.5L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8.5V2"/><line x1="8.5" y1="2" x2="15.5" y2="2"/></svg>
@@ -266,6 +289,12 @@
 
       <section id="messageList" class="message-list" aria-live="polite"></section>
 
+      <!-- 跟随按钮：Agent 运行中自动跟随最新内容；用户上滚则变「回到底部」 -->
+      <button id="chatFollowBtn" class="chat-follow-btn" type="button" aria-pressed="true" title="跟随最新内容中（点击暂停）">
+        <span class="cf-arrow" aria-hidden="true">▼</span>
+        <span class="cf-label">跟随中</span>
+      </button>
+
       <form id="composer" class="composer">
         <!-- 示例问题引导 -->
         <div class="composer-suggestions" id="composerSuggestions">
@@ -282,6 +311,10 @@
             <span>Agent 引擎准备中，暂不可发送…</span>
           </div>
           <textarea id="messageInput" rows="3" placeholder="输入股票分析问题…"></textarea>
+          <button id="imageBtn" class="composer-image-btn" type="button" aria-label="上传图片" title="上传图片（也可直接粘贴截图）">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          </button>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
           <button id="stopTaskBtn" class="stop-task-btn" type="button" hidden title="停止当前任务（下一检查点生效）" aria-label="停止">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>
           </button>
@@ -290,6 +323,7 @@
             <span class="send-spinner"></span>
           </button>
         </div>
+        <div id="imagePreview" class="composer-image-preview" hidden></div>
         <div class="template-preview" id="templatePreview" hidden></div>
         <div class="composer-footer-row">
           <div class="mode-selector" id="modeSelector">
@@ -299,6 +333,14 @@
               <svg class="mode-selector-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </div>
             <div class="mode-selector-dropdown" id="modeDropdown"></div>
+          </div>
+          <div class="mode-selector" id="typeSelector">
+            <span class="mode-selector-label-text">本轮类型</span>
+            <div class="mode-selector-trigger" id="typeTrigger" tabindex="0" role="combobox" aria-expanded="false">
+              <span class="mode-selector-label" id="typeLabel">自动</span>
+              <svg class="mode-selector-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div class="mode-selector-dropdown" id="typeDropdown"></div>
           </div>
           <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
           <input type="hidden" id="modeSelect">
@@ -420,6 +462,20 @@
     </div>
     <div id="configForm" class="config-body"></div>
     <div class="config-footer">
+      <div id="configTestBar" class="config-test-bar">
+        <span class="config-test-label">连通性检测</span>
+        <select id="configTestTarget" class="config-test-select" title="选择要检测的 LLM 用途">
+          <option value="main">主模型</option>
+          <option value="report">报告模型</option>
+          <option value="compress">压缩模型</option>
+          <option value="judge">评测模型</option>
+        </select>
+        <button class="config-header-btn" type="button" data-test-kind="llm" title="用当前配置发一次最小请求，验证 Key / Base / 模型名">LLM</button>
+        <button class="config-header-btn" type="button" data-test-kind="search" title="跑一次真实搜索，验证搜索引擎凭据">搜索</button>
+        <button class="config-header-btn" type="button" data-test-kind="datasource" title="取一次贵州茅台实时行情，验证数据源链路">数据源</button>
+        <button class="config-header-btn" type="button" data-test-kind="memory" title="打开记忆后端并取统计，验证 Embedding / 库可用">记忆</button>
+        <span id="configTestMsg" class="config-test-msg"></span>
+      </div>
       <button id="configDiffBtn" class="send-button" type="button">查看变更</button>
     </div>
   </aside>
@@ -434,6 +490,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <button class="secondary-button" type="button" id="templateRouteConfigBtn">路由配置</button>
+        <button class="secondary-button" type="button" id="strategyIntentConfigBtn">策略词表</button>
         <button id="templateManagerCloseBtn" class="icon-button" type="button" aria-label="关闭">×</button>
       </div>
     </div>
@@ -541,6 +598,117 @@
         </div>
         <div id="rcInspectorDynamic"></div>
       </aside>
+    </div>
+  </aside>
+
+  <!-- 策略意图词表配置（设计文档 §5.2.3 / 需求单 R3） -->
+  <div id="siOverlay" class="rc-overlay"></div>
+  <aside id="siPanel" class="rc-panel" aria-label="策略意图词表配置">
+    <div class="rc-header">
+      <div>
+        <div class="rc-title">策略意图词表</div>
+        <div class="rc-subtitle">调整「对话里怎么认出策略」的词表；保存后免重启即时生效</div>
+      </div>
+      <div class="rc-toolbar">
+        <button class="rc-btn primary" type="button" id="siSaveBtn">保存并生效</button>
+        <button class="rc-btn ghost" type="button" id="siCloseBtn">关闭</button>
+      </div>
+    </div>
+    <div class="rc-body si-body">
+      <div class="si-main">
+        <div id="siGroups"></div>
+        <div class="si-status" id="siStatus"></div>
+      </div>
+      <div class="si-aside">
+        <div class="rc-section-title">一句话检测</div>
+        <div class="rc-section-desc">与实际闸门同一个函数；改完词可直接在这里验证</div>
+        <div class="si-test-row">
+          <input class="si-input" id="siTestInput" placeholder="尾盘买入第二天卖出这个策略如何？">
+          <button class="rc-btn" type="button" id="siTestRunBtn">检测</button>
+        </div>
+        <div class="si-results" id="siTestResults">
+          <div class="rc-empty-hint">输入一句话，查看判定、命中词与解析到的槽位</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 定价目录编辑器（成本 / 计价）：供应商 → 模型价 → 峰谷 + 试算 -->
+  <div id="pricingOverlay" class="pc-overlay"></div>
+  <aside id="pricingPanel" class="pc-panel" aria-label="定价目录">
+    <div class="pc-head">
+      <div class="pc-title">定价目录（成本 / 计价）<span id="pcVersion"></span></div>
+      <div class="pc-head-actions">
+        <button class="pc-btn" type="button" id="pcTrialBtn">试算</button>
+        <button class="pc-btn" type="button" id="pcValidateBtn">校验</button>
+        <button class="pc-btn" type="button" id="pcResetBtn">恢复默认</button>
+        <button class="pc-btn primary" type="button" id="pcSaveBtn">保存</button>
+        <button class="pc-btn" type="button" id="pcCloseBtn" aria-label="关闭">关闭</button>
+      </div>
+    </div>
+    <div class="pc-body">
+      <div id="pcMsgs"></div>
+      <div class="pc-trial" id="pcTrial" hidden>
+        <div class="pc-section-title">试算器<span class="pc-hint">改完价目先用它验证「生效了吗 / 峰谷判对了吗」</span></div>
+        <div class="pc-row">
+          <label>模型</label><input class="pc-in" id="pcTrialModel" value="deepseek-flash">
+          <label>供应商 host</label><input class="pc-in" id="pcTrialHost" value="https://api.deepseek.com/v1">
+        </div>
+        <div class="pc-row">
+          <label>输入 token</label><input class="pc-in" id="pcTrialIn" type="number" value="1000000">
+          <label>其中缓存命中</label><input class="pc-in" id="pcTrialCached" type="number" value="200000">
+          <label>输出 token</label><input class="pc-in" id="pcTrialOut" type="number" value="100000">
+          <button class="pc-btn primary" type="button" id="pcTrialRunBtn">试算</button>
+          <button class="pc-btn" type="button" id="pcTrialCloseBtn">收起</button>
+        </div>
+        <div id="pcTrialResult"></div>
+      </div>
+      <div class="pc-section">
+        <div class="pc-section-title">供应商<span><button class="pc-btn" type="button" id="pcAddProviderBtn">+ 供应商</button></span></div>
+        <div class="pc-section-desc">决定「用哪套价目 / 是否免费」。匹配 host 用来按 base_url 反查（如 api.deepseek.com、10.67.197.178）。</div>
+        <div id="pcProviders"></div>
+      </div>
+      <div class="pc-section">
+        <div class="pc-section-title">模型价目</div>
+        <div class="pc-section-desc">同一模型的不同写法（deepseek-flash / deepseek-v4-pro …）填进「别名」即同价；峰价可用「峰=谷×2」一键填充。</div>
+        <div id="pcModels"></div>
+      </div>
+      <div class="pc-section">
+        <div class="pc-section-title">按次计费服务<span><button class="pc-btn" type="button" id="pcAddServiceBtn">+ 服务</button></span></div>
+        <div class="pc-section-desc">不按 token 计价的外部调用（DeepSeek Search / Fetch）：<b>元 / 每次成功请求</b>，不分峰谷。单价为 0 或删掉条目时，调用会被记成「未计价」而不是 ¥0。</div>
+        <div id="pcServices"></div>
+      </div>
+      <div class="pc-section">
+        <div class="pc-section-title">峰谷设置</div>
+        <div class="pc-section-desc">高峰时段按北京时间判定，其余（含周末/午休/夜间）一律按闲时价。</div>
+        <div id="pcSchedule"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 引擎能力清单 + 扩展提议（AI 出方案 → 人审） -->
+  <div id="capOverlay" class="cap-overlay"></div>
+  <aside id="capPanel" class="cap-panel" aria-label="引擎能力清单">
+    <div class="cap-head">
+      <div class="cap-title">引擎能力清单<span id="capSub"></span></div>
+      <div class="cap-head-actions">
+        <button class="cap-btn" type="button" id="capFromRunBtn" title="按最近一次研发记录到的能力缺口，让 AI 出扩展方案">按缺口生成方案</button>
+        <button class="cap-btn" type="button" id="capReloadBtn">刷新</button>
+        <button class="cap-btn" type="button" id="capCloseBtn">关闭</button>
+      </div>
+    </div>
+    <div class="cap-body">
+      <div id="capMsgs"></div>
+      <div class="cap-section">
+        <div class="cap-section-title">引擎现在能表达什么</div>
+        <div class="cap-section-desc">单一事实源：提示词、缺口判定、本页共用同一份（改引擎要同步这里）</div>
+        <div id="capCatalog"></div>
+      </div>
+      <div class="cap-section">
+        <div class="cap-section-title">扩展提议（AI 出方案 → 人审）</div>
+        <div class="cap-section-desc">批准只代表「方案通过」，引擎还没支持它（effective=false）；真正落地仍走开发流程</div>
+        <div id="capProposals"></div>
+      </div>
     </div>
   </aside>
 
@@ -656,6 +824,7 @@
         <button id="calNextMonth" class="cal-nav-btn" type="button" aria-label="下月">›</button>
       </div>
       <div class="calendar-header-right">
+        <label class="cal-events-toggle"><input type="checkbox" id="calEventsToggle" checked> 公司事件</label>
         <button id="calendarCloseBtn" class="calendar-close-btn" type="button" aria-label="关闭">×</button>
       </div>
     </div>
@@ -691,6 +860,7 @@
         <button id="watchlistCloseBtn" class="watchlist-close-btn" type="button" aria-label="关闭">×</button>
       </div>
     </div>
+    <div id="wlEventsSection" class="wl-events-section" hidden></div>
     <div id="watchlistBody" class="watchlist-body"></div>
     <div class="watchlist-footer">
       <input id="watchlistAddInput" class="watchlist-input" type="text" placeholder="输入股票代码，如 600519" autocomplete="off">
@@ -757,6 +927,7 @@
           <div class="kline-source-dropdown" id="pfSourceDropdown"></div>
         </div>
         <button id="pfRefreshBtn" class="pf-refresh-btn" type="button">刷新行情</button>
+        <button id="pfHistoryBtn" class="pf-refresh-btn" type="button" title="每日账户快照：日历热力 / 构成流">历史</button>
         <button id="pfScanBtn" class="pf-refresh-btn" type="button">策略扫描</button>
         <button id="pfCloseBtn" class="pf-close-btn" type="button" aria-label="关闭">×</button>
       </div>
@@ -764,6 +935,7 @@
     <div id="pfQuoteMeta" class="pf-quote-meta"></div>
     <div id="pfSummary" class="pf-summary">加载中…</div>
     <div id="pfAccount" class="pf-account"><span class="pf-account-hint">加载中…</span></div>
+    <div id="pfEventsSection" class="pf-events-section" hidden></div>
     <div class="pf-body">
       <div id="pfPositionsBody" class="pf-positions"></div>
       <div class="pf-trades-section" id="pfTradesSection">
@@ -844,22 +1016,62 @@
           </div>
         </div>
       </div>
+      <!-- 资金面：北向持股 + 龙虎榜席位（默认折叠，数据随股票切换刷新） -->
+      <div class="kline-funds" id="klineFundsSection">
+        <button class="kline-funds-toggle" id="klineFundsToggle" type="button" aria-expanded="false">
+          <span class="kline-funds-title">资金面</span>
+          <span class="kline-funds-summary" id="klineFundsSummary"></span>
+          <span class="kline-funds-arrow">▾</span>
+        </button>
+        <div class="kline-funds-body" id="klineFundsBody" hidden></div>
+      </div>
       <!-- 工具栏 -->
       <div class="kline-toolbar">
         <div class="kline-toolbar-left">
           <div class="kline-days-group">
             <button class="kline-days-btn" data-days="30">1月</button>
             <button class="kline-days-btn" data-days="60">2月</button>
+            <button class="kline-days-btn" data-days="63">3月</button>
             <button class="kline-days-btn active" data-days="120">半年</button>
             <button class="kline-days-btn" data-days="250">1年</button>
             <button class="kline-days-btn" data-days="500">2年</button>
+            <!-- 连续缩放：外观复用 .kline-days-btn，但**故意不给 data-days**——
+                 前端用 [data-days] 区分「预设区间」和「临时缩放」，带上了会被当成预设
+                 参与 active 判定（点到 120 柱时两个按钮一起亮）。 -->
+            <button class="kline-days-btn" id="klineShrinkBtn" type="button"
+                    title="缩短区间：柱数 ×0.7">缩短</button>
+            <button class="kline-days-btn" id="klineStretchBtn" type="button"
+                    title="拉长区间：柱数 ×1.4">拉长</button>
+          </div>
+          <span id="klineDaysHint" class="kline-days-hint" title="当前加载的柱数">120柱</span>
+          <!-- 自定义起止日期：给了区间就按日历区间取数（days 退化成信号/技术面的近似窗口）。
+               input[type=date] 复用 .kline-search-input 的边框/焦点样式，宽度在
+               .kline-range-group 里钉死——它默认 width:100%，不动会在 flex 里吃满整行。 -->
+          <div class="kline-range-group">
+            <input type="date" id="klineRangeStart" class="kline-search-input kline-range-input"
+                   title="起始日期（含当天）">
+            <span class="kline-range-sep">~</span>
+            <input type="date" id="klineRangeEnd" class="kline-search-input kline-range-input"
+                   title="结束日期（含当天）">
+            <button id="klineRangeApply" class="kline-days-btn" type="button"
+                    title="按起止日期取数（给了区间就以日期为准）">应用</button>
+            <button id="klineRangeClear" class="kline-days-btn" type="button"
+                    title="清除自定义区间，回到应用前的柱数">清除</button>
           </div>
           <div class="kline-chart-type-group">
-            <button class="kline-chart-type-btn active" data-type="candle_solid" title="K线图">
+            <button class="kline-chart-type-btn" data-type="candle_solid" title="K线图">
               <svg width="14" height="14" viewBox="0 0 28 28"><path fill-rule="evenodd" clip-rule="evenodd" d="M9.6748 6V3H8.3252V6H6.7C6.03726 6 5.5 6.53726 5.5 7.2V20.8C5.5 21.4627 6.03726 22 6.7 22H8.3252V24.9998H9.6748V22H11.3C11.9627 22 12.5 21.4627 12.5 20.8V7.2C12.5 6.53726 11.9627 6 11.3 6H9.6748ZM19.6748 8V5H18.3252V8H16.7C16.0373 8 15.5 8.53726 15.5 9.2L15.5 18.8C15.5 19.4627 16.0373 20 16.7 20H18.3252V23H19.6748V20H21.3C21.9627 20 22.5 19.4627 22.5 18.8L22.5 9.2C22.5 8.53726 21.9627 8 21.3 8H19.6748Z" fill="currentColor"/></svg>
             </button>
             <button class="kline-chart-type-btn" data-type="candle_stroke" title="空心K线">
               <svg width="14" height="14" viewBox="0 0 28 28"><path fill-rule="evenodd" clip-rule="evenodd" d="M9.6748 6V3H8.3252V6H6.7002L6.57715 6.00586C5.9721 6.06737 5.5 6.57892 5.5 7.2002V20.7998L5.50586 20.9229C5.56326 21.4875 6.01248 21.9367 6.57715 21.9941L6.7002 22H8.3252V24.9998H9.6748V22H11.2998L11.4229 21.9941C11.9875 21.9367 12.4367 21.4875 12.4941 20.9229L12.5 20.7998V7.2002C12.5 6.57892 12.0279 6.06737 11.4229 6.00586L11.2998 6H9.6748ZM19.6748 8V5H18.3252V8H16.7002L16.5771 8.00586C15.9721 8.06737 15.5 8.57892 15.5 9.2002V18.7998L15.5059 18.9229C15.5633 19.4875 16.0125 19.9367 16.5771 19.9941L16.7002 20H18.3252V23H19.6748V20H21.2998L21.4229 19.9941C21.9875 19.9367 22.4367 19.4875 22.4941 18.9229L22.5 18.7998V9.2002C22.5 8.57892 22.0279 8.06737 21.4229 8.00586L21.2998 8H19.6748ZM21.1504 18.6504H16.8496V9.34961H21.1504V18.6504ZM11.1504 20.6504H6.84961V7.34961H11.1504V20.6504Z" fill="currentColor"/></svg>
+            </button>
+            <button class="kline-chart-type-btn active" data-type="candle_up_stroke" title="空心涨K线（涨空心 · 跌实心）">
+              <svg width="14" height="14" viewBox="0 0 28 28" fill="none">
+                <path d="M9 3v4M9 21v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                <rect x="5.8" y="7" width="6.4" height="14" rx="1" stroke="currentColor" stroke-width="1.6"/>
+                <path d="M20 5v4M20 21v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                <rect x="16.8" y="9" width="6.4" height="12" rx="1" fill="currentColor"/>
+              </svg>
             </button>
             <button class="kline-chart-type-btn" data-type="line" title="折线图">
               <svg width="14" height="14" viewBox="0 0 28 28"><path d="M3.5 18.0833L10.4256 10.7611L16.0291 16.6745L24.5 7.58325" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="square" stroke-linejoin="round"/></svg>
@@ -867,6 +1079,28 @@
             <button class="kline-chart-type-btn" data-type="area" title="面积图">
               <svg width="14" height="14" viewBox="0 0 28 28"><path d="M3 16.5L9.92555 9.17781L15.5291 15.0912L24 6" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="square" stroke-linejoin="round"/><path fill-rule="evenodd" clip-rule="evenodd" d="M3 25.0834H25.1667V6.01001L22.865 6.04419L15.25 14.1664L10.5432 8.90227L5.33334 13.7965L3 16.2736V25.0834Z" fill="currentColor" opacity="0.3"/></svg>
             </button>
+          </div>
+          <!-- 信号布局：贴图（贴着 K 线）/ 分道（按指标族五条轨道） -->
+          <!-- 外观复用 .kline-indicator-group / .kline-indicator-btn（chart-kline.css 冻结，不新增样式） -->
+          <div class="kline-signal-layout-group kline-indicator-group">
+            <button class="kline-signal-layout-btn kline-indicator-btn active" data-layout="pinned" title="信号贴着K线">贴图</button>
+            <button class="kline-signal-layout-btn kline-indicator-btn" data-layout="lanes" title="信号分道显示">分道</button>
+          </div>
+          <!-- 技术面：算法测量的几何图层（斐波那契三种 / 自动趋势线 / 支撑阻力带）。
+               默认关——盯盘时图已经够花；这些线是测量工具，不是交易信号。 -->
+          <div class="kline-ta-group">
+            <select id="klineTaSelect" class="kline-strategy-select" title="技术面图层（算法生成，非交易信号）">
+              <option value="off">技术面：关</option>
+              <option value="retracement">斐波那契回撤</option>
+              <option value="channel">斐波那契通道</option>
+              <option value="fan">斐波那契扇形</option>
+              <option value="trend">自动趋势线</option>
+              <option value="bands">支撑阻力带</option>
+              <option value="structure">波段结构 HH/HL</option>
+              <option value="regression">回归通道 ±2σ</option>
+              <option value="gaps">跳空缺口</option>
+              <option value="all">全显示</option>
+            </select>
           </div>
           <div class="kline-indicator-group">
             <button class="kline-indicator-btn active" data-indicator="macd">MACD</button>
@@ -883,6 +1117,8 @@
             <button id="klineScanBtn" class="kline-strategy-btn kline-scan-btn" type="button" disabled>扫描买点</button>
             <button id="klineBacktestBtn" class="kline-strategy-btn kline-run-btn" type="button" disabled>跑回测</button>
           </div>
+          <button id="klineExportBtn" class="kline-strategy-btn" type="button"
+                  title="把当前 K 线图存成 PNG（白底 2 倍图）">导出图片</button>
         </div>
         <div id="klineStatus" class="kline-status">输入代码后按回车读取本地数据</div>
       </div>
@@ -1008,7 +1244,7 @@ def build_tools(logger, memory_mgr):
       <div class="eval-seg" id="evalSeg">
         <button class="active" data-view="matrix" onclick="window.StockRadar?.evalManager?.switchTab('matrix')">评测矩阵</button>
         <button data-view="regression" onclick="window.StockRadar?.evalManager?.switchTab('regression')">题库回归</button>
-        <button data-view="existing" onclick="window.StockRadar?.evalManager?.switchTab('existing')">存量回测</button>
+        <button data-view="existing" onclick="window.StockRadar?.evalManager?.switchTab('existing')">历史对话复盘</button>
         <button data-view="judge" onclick="window.StockRadar?.evalManager?.switchTab('judge')">Agent 研判</button>
         <button data-view="registry" onclick="window.StockRadar?.evalManager?.switchTab('registry')">维度注册表</button>
       </div>
@@ -1023,7 +1259,7 @@ def build_tools(logger, memory_mgr):
           <button class="eval-tab" data-tab="benchmark" onclick="window.StockRadar?.evalManager?.switchTab('benchmark')">题库管理</button>
           <button class="eval-tab" data-tab="trend" onclick="window.StockRadar?.evalManager?.switchTab('trend')">趋势对比</button>
           <button class="eval-tab" data-tab="review" onclick="window.StockRadar?.evalManager?.switchTab('review')">对话评审</button>
-          <button class="eval-tab" data-tab="backtest" onclick="window.StockRadar?.evalManager?.switchTab('backtest')">存量回测</button>
+          <button class="eval-tab" data-tab="backtest" onclick="window.StockRadar?.evalManager?.switchTab('backtest')">历史对话复盘</button>
         </div>
         <div id="evalRunList" class="eval-run-list"></div>
       </aside>
@@ -1069,6 +1305,8 @@ def build_tools(logger, memory_mgr):
       <div class="th-page-title"><span class="th-title-dot"></span><span>研究台账</span></div>
       <span class="th-meta" id="thMeta">—</span>
       <div class="th-topbar-actions">
+        <button class="th-btn" id="thChartBtn" type="button" title="全部台账的「评分 vs 标的」双轴图总览（左右轴各自自适应）">◫ 双轴总览</button>
+        <button class="th-btn" id="thReportBtn" type="button" title="生成可分享的研究报告图片（首次含证据计算，约 20–60 秒）">生成报告</button>
         <button class="th-btn th-primary" id="thRefreshBtn" type="button" title="按定义重算并落快照">↻ 刷新</button>
       </div>
     </header>
@@ -1083,6 +1321,30 @@ def build_tools(logger, memory_mgr):
         <div class="th-loading">加载中…</div>
       </section>
     </main>
+    <!-- 双轴总览：8 张台账小图（评分 vs 标的）。覆盖整页，关闭后释放全部 ECharts 实例 -->
+    <div id="thChartPanel" class="th-chart-panel" style="display:none">
+      <div class="th-chart-panel-head">
+        <span class="th-chart-panel-title">◫ 双轴总览</span>
+        <span class="th-chart-panel-sub">等权总分 vs 标的价格 · 左右轴各自自适应 · 分数为当前定义阈值的历史重放（内样本，仅看形状）</span>
+        <span class="th-chart-panel-meta" id="thChartMeta">—</span>
+        <button class="th-btn" id="thChartReload" type="button" title="重新拉取全部台账图表（后端按定义缓存，热缓存很快）">↻ 重新拉取</button>
+        <button class="th-btn" id="thChartClose" type="button" title="关闭总览（Esc）">×</button>
+      </div>
+      <div class="th-chart-grid" id="thChartGrid"></div>
+    </div>
+    <!-- 关联性证据抽屉：挂在 thPage 根下（fixed 定位，不受卡片 overflow 裁剪） -->
+    <div id="thEvDock" class="th-ev-dock" style="display:none">
+      <div class="th-ev-dock-head"><b>关联性证据</b>
+        <span class="th-sub" id="thEvDockCount"></span>
+        <select id="thEvAdd" class="th-ev-add" title="继续打开其它因子">
+          <option value="">＋ 添加因子…</option>
+        </select>
+        <button type="button" class="th-btn" id="thEvCloseAll">全部关闭</button>
+        <button type="button" class="th-btn th-ev-x" id="thEvClosePanel" title="关闭">×</button>
+      </div>
+      <div class="th-ev-tabs" id="thEvTabs"></div>
+      <div class="th-ev-dock-body" id="thEvDockBody"></div>
+    </div>
   </div>
 
   <!-- 全局总览全页面 -->
@@ -1265,41 +1527,51 @@ def build_tools(logger, memory_mgr):
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/static/vendor/chart.umd.min.js"></script>
   <script src="/static/lib/marked.min.js?v=1"></script>
   <script src="/static/js/utils.js?v=27"></script>
-  <script src="/static/js/api.js?v=47"></script>
+  <script src="/static/js/api.js?v=56"></script>
   <script src="/static/js/config-viz-budget.js?v=28"></script>
   <script src="/static/js/config-viz-compression.js?v=2"></script>
   <script src="/static/js/config-viz-flow.js?v=27"></script>
-  <script src="/static/js/config.js?v=41"></script>
+  <script src="/static/js/config.js?v=48"></script>
   <script src="/static/js/template-manager.js?v=7"></script>
   <script src="/static/js/dashboard-manager.js?v=4"></script>
   <script src="/static/js/route-config.js?v=2"></script>
+  <script src="/static/js/strategy-intent-config.js?v=1"></script>
+  <script src="/static/js/pricing-config.js?v=2"></script>
+  <script src="/static/js/capability-panel.js?v=1"></script>
   <script src="/static/js/chat-markdown.js?v=25"></script>
-  <script src="/static/js/chat-dashboard.js?v=38"></script>
-  <script src="/static/js/chat-export.js?v=26"></script>
-  <script src="/static/js/chat-core.js?v=43"></script>
-  <script src="/static/js/timeline.js?v=27"></script>
+  <script src="/static/js/chat-dashboard.js?v=43"></script>
+  <script src="/static/js/deep-report-card.js?v=5"></script>
+  <script src="/static/js/chat-export.js?v=27"></script>
+  <script src="/static/js/chart-theme.js?v=1"></script>
+  <script src="/static/js/chat-core.js?v=62"></script>
+  <script src="/static/js/chat-cost.js?v=3"></script>
+  <script src="/static/js/timeline.js?v=29"></script>
   <script src="/static/js/attribution-panel.js?v=4"></script>
   <script src="/static/js/status-player.js?v=1"></script>
-  <script src="/static/js/chat-transcript.js?v=4"></script>
-  <script src="/static/js/trading-calendar.js?v=3"></script>
-  <script src="/static/js/signal-eval.js?v=41"></script>
-  <script src="/static/js/watchlist.js?v=6"></script>
+  <script src="/static/js/chat-transcript.js?v=7"></script>
+  <script src="/static/js/chat-follow.js?v=1"></script>
+  <script src="/static/js/chat-strategy-card.js?v=11"></script>
+  <script src="/static/js/trading-calendar.js?v=5"></script>
+  <script src="/static/js/signal-eval.js?v=48"></script>
+  <script src="/static/js/watchlist.js?v=7"></script>
   <script src="/static/js/monitor.js?v=3"></script>
-  <script src="/static/js/portfolio.js?v=12"></script>
+  <script src="/static/js/portfolio.js?v=25"></script>
   <script src="/static/js/eastmoney-sync.js?v=1"></script>
   <script src="/static/js/quality.js?v=38"></script>
-  <script src="/static/js/strategy-research.js?v=38"></script>
+  <script src="/static/js/strategy-research.js?v=49"></script>
   <script src="/static/js/skill-manager.js?v=4"></script>
-  <script src="/static/js/chart-kline.js?v=16"></script>
-  <script src="/static/js/chart-backtest-kline.js?v=2"></script>
-  <script src="/static/js/chart-batch-compare.js?v=5"></script>
-  <script src="/static/js/chart-multi-compare.js?v=1"></script>
-  <script src="/static/js/backtest.js?v=22"></script>
-  <script src="/static/js/data-center.js?v=14"></script>
-  <script src="/static/js/data-monitor.js?v=10"></script>
+  <script src="/static/js/chart-kline.js?v=31"></script>
+  <script src="/static/js/chart-backtest-kline.js?v=5"></script>
+  <script src="/static/js/chart-batch-compare.js?v=7"></script>
+  <script src="/static/js/chart-multi-compare.js?v=2"></script>
+  <script src="/static/js/backtest.js?v=40"></script>
+  <script src="/static/js/factor.js?v=3"></script>
+  <script src="/static/js/pool-study.js?v=7"></script>
+  <script src="/static/js/data-center.js?v=15"></script>
+  <script src="/static/js/data-monitor.js?v=11"></script>
   <script src="/static/js/crowding.js?v=1"></script>
 
   <!-- 热点新闻弹窗 -->
@@ -1460,7 +1732,7 @@ def build_tools(logger, memory_mgr):
             </div>
           </div>
           <table class="dc-table">
-            <thead><tr><th>任务ID</th><th>类型</th><th>状态</th><th>进度</th><th>详情</th><th>创建时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>任务ID</th><th>类型</th><th>来源</th><th>状态</th><th>进度</th><th>详情</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="dcTaskList"></tbody>
           </table>
           <!-- 任务详情面板 -->
@@ -1478,6 +1750,8 @@ def build_tools(logger, memory_mgr):
         <!-- Tab 2: 数据概览 -->
         <div id="dcOverview" class="dc-panel">
           <div id="dcStats" class="dc-stats"></div>
+
+            <div id="dcBacktestReadiness" class="dc-readiness"></div>
 
           <h3 style="font-size:15px;margin-bottom:16px;">数据库表概览</h3>
           <div id="dcTableOverview"></div>
@@ -1529,6 +1803,8 @@ def build_tools(logger, memory_mgr):
             <div class="dm-scans" id="dmScans"></div>
 
             <div class="dm-hero-grid" id="dmHero"></div>
+
+            <div class="dm-btcov" id="dmBacktestCov"></div>
 
             <div class="dm-layout">
               <div>
@@ -1668,6 +1944,135 @@ def build_tools(logger, memory_mgr):
   </div>
 
   <!-- 策略回测弹窗 -->
+  <!-- 因子研究面板 -->
+  <div id="factorOverlay" class="factor-overlay" role="dialog" aria-modal="true" aria-label="因子研究">
+    <div class="factor-modal">
+      <header class="fr-panel-head">
+        <div class="fr-panel-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+          因子研究
+          <span class="fr-panel-sub" id="frPoolStatus">—</span>
+        </div>
+        <div class="fr-panel-actions">
+          <label class="fr-field">标的池
+            <select id="frIndex">
+              <option value="000300">沪深300</option>
+              <option value="000905">中证500</option>
+            </select>
+          </label>
+          <label class="fr-field">起 <input id="frStart" type="date" value="2024-10-01"></label>
+          <label class="fr-field">止 <input id="frEnd" type="date"></label>
+          <label class="fr-field">持有
+            <select id="frRetPeriod">
+              <option value="1">1 日</option>
+              <option value="5" selected>5 日</option>
+              <option value="10">10 日</option>
+              <option value="20">20 日</option>
+            </select>
+          </label>
+          <label class="fr-field">分层
+            <select id="frQuantiles">
+              <option value="3">3</option>
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+            </select>
+          </label>
+          <label class="fr-field">中性化
+            <select id="frNeutralize">
+              <option value="none" selected>不中性化</option>
+              <option value="industry">行业</option>
+              <option value="size">市值</option>
+              <option value="both">行业+市值</option>
+            </select>
+          </label>
+          <button id="frRun" class="fr-btn primary" type="button">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 3 14 9-14 9V3Z"/></svg>
+            运行评估
+          </button>
+          <button id="frClose" class="fr-icon-btn" type="button" aria-label="关闭">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="fr-panel-body">
+        <aside class="fr-side">
+          <div class="fr-side-head">历史报告 <span id="frReportCount">—</span></div>
+          <div class="fr-report-list" id="frReports"></div>
+          <div class="fr-side-head" style="border-top:1px solid var(--border-light)">因子池 <span id="frFactorCount">—</span></div>
+          <div class="fr-factor-list" id="frFactorList"></div>
+        </aside>
+        <main class="fr-main">
+          <div id="frState" class="fr-state"></div>
+          <div id="frContent" hidden>
+            <div class="fr-kpis" id="frKpis"></div>
+            <div class="fr-sig" id="frSig"></div>
+            <div class="fr-table-wrap"><table class="fr-table" id="frRankTable"></table></div>
+            <p class="fr-note">RankIC = 截面 Spearman（主口径）；IC = Pearson 对照，受极端值影响更大，两者符号不一致属正常。</p>
+            <div class="fr-detail">
+              <div class="fr-detail-head" id="frDetailHead"></div>
+              <div class="fr-charts">
+                <div class="fr-chart-box">
+                  <div class="fr-chart-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                    IC / RankIC 时序
+                  </div>
+                  <div class="fr-chart" id="frChartIC"></div>
+                </div>
+                <div class="fr-chart-box">
+                  <div class="fr-chart-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                    分层净值（Q1 最小 → Q5 最大）
+                  </div>
+                  <div class="fr-chart" id="frChartEquity"></div>
+                </div>
+                <div class="fr-chart-box">
+                  <div class="fr-chart-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 17-8.5-8.5-5 5L2 7"/><path d="M16 17h6v-6"/></svg>
+                    IC 衰减（持有期）
+                  </div>
+                  <div class="fr-chart" id="frChartDecay"></div>
+                </div>
+                <div class="fr-chart-box">
+                  <div class="fr-chart-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 3v9h9"/></svg>
+                    分层换手率
+                  </div>
+                  <div class="fr-chart" id="frChartTurnover"></div>
+                </div>
+              </div>
+              <p class="fr-note">分层口径：Q1 = 因子值最小，Q5 = 因子值最大；多空 = Q5 − Q1。因子方向由 IC 符号判断，标签不预设多空。</p>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <div id="poolStudyOverlay" class="ps-overlay" role="dialog" aria-modal="true" aria-label="池子研究">
+    <div class="ps-modal">
+      <header class="ps-head">
+        <div class="ps-title">
+          池子研究
+          <span class="ps-sub" id="psSub">—</span>
+        </div>
+        <div class="ps-actions">
+          <button id="psCleanFailed" class="ps-btn" type="button" title="删除所有失败记录（成功的研究不受影响）">清理失败</button>
+          <button id="psRefresh" class="ps-btn" type="button">刷新</button>
+          <button id="psClose" class="ps-icon-btn" type="button" aria-label="关闭">&#10005;</button>
+        </div>
+      </header>
+      <div class="ps-body">
+        <aside class="ps-side">
+          <div class="ps-side-head">研究记录</div>
+          <div class="ps-list" id="psList"></div>
+        </aside>
+        <main class="ps-main" id="psMain">
+          <div class="ps-empty">左侧选一条研究记录查看结论</div>
+        </main>
+      </div>
+    </div>
+  </div>
+
   <div id="backtestOverlay" class="backtest-overlay">
     <div class="backtest-modal">
       <div class="bt-tabbar" id="btTabbar">
@@ -1695,6 +2100,7 @@ def build_tools(logger, memory_mgr):
             <button id="btAddStrategyBtn" class="bt-add-btn" title="新建策略" aria-label="新建策略">+ 新建</button>
           </div>
           <div id="btStrategyList"></div>
+          <div id="btLifecyclePanel" class="bt-lifecycle"></div>
           <!-- 策略编辑器（内联，默认隐藏） -->
           <div id="btEditor" class="bt-editor" style="display:none">
             <div class="bt-editor-header">
@@ -1739,14 +2145,22 @@ def build_tools(logger, memory_mgr):
             <div class="bt-builder-section">
               <div class="bt-builder-label">买入条件 <select id="btBuyLogic" class="bt-logic-select"><option value="AND">全部满足 (AND)</option><option value="OR">任一满足 (OR)</option></select></div>
               <div id="btBuyRules" class="bt-builder-rules"></div>
-              <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('buy')">+ 添加买入规则</button>
+              <div id="btBuyPreview" class="bt-builder-preview"></div>
+              <div class="bt-builder-actions">
+                <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('buy')">+ 条件</button>
+                <button class="bt-btn-ghost-sm" onclick="window._btPanel?._builderAddGroupAt('buy','')">+ 子组（组内单独选 AND/OR）</button>
+              </div>
             </div>
 
             <!-- 卖出条件 -->
             <div class="bt-builder-section">
               <div class="bt-builder-label">卖出条件 <select id="btSellLogic" class="bt-logic-select"><option value="AND">全部满足 (AND)</option><option value="OR">任一满足 (OR)</option></select></div>
               <div id="btSellRules" class="bt-builder-rules"></div>
-              <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('sell')">+ 添加卖出规则</button>
+              <div id="btSellPreview" class="bt-builder-preview"></div>
+              <div class="bt-builder-actions">
+                <button class="bt-builder-add-rule" onclick="window._btPanel?._builderAddRule('sell')">+ 条件</button>
+                <button class="bt-btn-ghost-sm" onclick="window._btPanel?._builderAddGroupAt('sell','')">+ 子组（组内单独选 AND/OR）</button>
+              </div>
             </div>
 
             <!-- 图表指标 -->
@@ -1947,7 +2361,10 @@ def build_tools(logger, memory_mgr):
 
         <div id="btResult" style="display:none;">
           <div id="btResultHeader" class="result-header"></div>
+          <div id="btHealth" style="display:none;"></div>
           <div id="btWarnings" style="display:none;"></div>
+      <div id="btGap" style="display:none;"></div>
+<div id="btEval" style="display:none;"></div>
           <div id="btMetrics" class="bt-metrics"></div>
 
           <div class="bt-chart-box" id="btEquityChartBox">
@@ -1974,6 +2391,10 @@ def build_tools(logger, memory_mgr):
           <div class="bt-chart-box">
             <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> 月度收益</h3>
             <div id="btMonthlyHeatmap"></div>
+          </div>
+          <div class="bt-chart-box">
+            <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg> 分年拆解</h3>
+            <div id="btYearlyTable"></div>
           </div>
           <div class="bt-chart-box">
             <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--brand)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> 交易记录</h3>
@@ -2194,10 +2615,10 @@ def build_tools(logger, memory_mgr):
   </div>
   <script src="/static/js/group-chat.js?v=1"></script>
   <script src="/static/js/chat-monitor.js?v=1"></script>
-  <script src="/static/js/eval-detail.js?v=3"></script>
-  <script src="/static/js/eval-manager.js?v=14"></script>
+  <script src="/static/js/eval-detail.js?v=4"></script>
+  <script src="/static/js/eval-manager.js?v=15"></script>
 <script src="/static/js/short-line.js?v=6"></script>
-<script src="/static/js/thesis.js?v=15"></script>
+<script src="/static/js/thesis.js?v=35"></script>
   <script src="/static/js/memory-manager.js?v=10"></script>
   <script>
     // 顶栏分组菜单：单开互斥 + 点外部/Esc 关闭 + aria-expanded 同步
@@ -2249,7 +2670,8 @@ def build_tools(logger, memory_mgr):
     });
   </script>
   <script src="/static/js/market-dashboard.js?v=6"></script>
-  <script src="/static/js/overview.js?v=15"></script>
-  <script src="/static/js/app.js?v=55"></script>
+  <script src="/static/js/overview.js?v=24"></script>
+  <script src="/static/js/app.js?v=70"></script>
 </body>
 </html>
+

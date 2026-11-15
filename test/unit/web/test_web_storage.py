@@ -74,6 +74,16 @@ def test_final_answer_sorts_after_clarify_messages(tmp_path):
     ]
 
 
+def test_utc_now_is_strictly_increasing():
+    """Windows 时钟粒度约 15.6ms：同 tick 连续写消息会拿到相同 created_at，
+    排序退化为按 id。utc_now 必须自己保证单调递增（实测 2000 次调用只 3 个不同值）。"""
+    from server.storage import utc_now
+
+    values = [utc_now() for _ in range(50)]
+    assert len(set(values)) == len(values), "同一 tick 内必须严格递增，否则排序会退化"
+    assert values == sorted(values)
+
+
 def test_latest_trace_runs_for_dialogs_returns_latest_and_handles_chunks(tmp_path, monkeypatch):
     from server import storage as storage_mod
     from server.storage import WebStorage
@@ -354,3 +364,52 @@ def test_watchlist_update_quote_nonexistent(tmp_path):
     storage = WebStorage(tmp_path / "web.db")
     ok = storage.watchlist.update_quote("999999", "cn", {"price": 100.0})
     assert ok is False
+
+
+def test_web_storage_records_dialog_origin(tmp_path):
+    from server.storage import WebStorage
+
+    storage = WebStorage(tmp_path / "web.db")
+    user_dialog = storage.create_dialog(title="用户对话", mode="react_stock")
+    replay_dialog = storage.create_dialog(
+        title="[replay] 用户对话", mode="react_stock", origin="replay")
+
+    assert user_dialog["origin"] == "user"
+    assert replay_dialog["origin"] == "replay"
+    listed = {item["dialog_uuid"]: item for item in storage.list_dialogs()}
+    assert listed[user_dialog["dialog_uuid"]]["origin"] == "user"
+    assert listed[replay_dialog["dialog_uuid"]]["origin"] == "replay"
+
+
+def test_web_storage_migrates_legacy_dialog_origin(tmp_path):
+    """旧库 web_dialogs 无 origin 列；ensure_schema 补列后默认 user。"""
+    import sqlite3
+
+    from server.storage import WebStorage
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE web_dialogs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dialog_uuid TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            current_mode TEXT NOT NULL,
+            title_auto INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO web_dialogs(dialog_uuid,title,current_mode,title_auto,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?)",
+        ("dlg-legacy", "旧对话", "react_stock", 0,
+         "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    storage = WebStorage(db_path)
+    row = storage.get_dialog("dlg-legacy")
+    assert row is not None
+    assert row["origin"] == "user"

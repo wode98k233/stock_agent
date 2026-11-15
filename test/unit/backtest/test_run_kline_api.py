@@ -55,7 +55,8 @@ def test_run_not_found():
         assert build_run_kline('NOPE') is None
 
 
-def test_qfq_calls_apply_adjustment():
+def test_qfq_no_longer_calls_apply_adjustment():
+    """P0 §11.8.3：运行时复权停用——K 线 API 不再调用 _apply_adjustment（直通）。"""
     from server.routes.backtest import build_run_kline
     run = {
         'code': '600519', 'stock_name': '', 'adjust_type': 'qfq',
@@ -69,7 +70,7 @@ def test_qfq_calls_apply_adjustment():
             build_run_kline('BT-X')
         finally:
             for p in ps: p.stop()
-        adj.assert_called_once()
+        adj.assert_not_called()
 
 
 def test_empty_kline_no_crash():

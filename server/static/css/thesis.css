@@ -108,7 +108,10 @@
 .th-scroll { flex: 0 0 auto; padding: 10px 12px; }
 
 /* ── 因子卡网格 ── */
-.th-factors { display: grid; gap: 9px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+/* align-items:start：grid 默认 stretch 会把所有卡拉到最高那张的高度（③ 险资的长明细
+   曾把整行拉到 ~550px，页面出现大片空白）。卡片必须按自身内容高度排列。 */
+.th-factors { display: grid; gap: 9px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-items: start; }
 .th-factor { border: 1px solid var(--border-light, #f0f0f0); border-radius: 10px; padding: 10px 12px;
   display: flex; flex-direction: column; gap: 5px; }
 .th-factor-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -238,6 +241,221 @@
 .th-pct > b { flex: none; font-family: var(--font-mono, monospace);
   color: var(--text-secondary, #6b7280); font-weight: 600; }
 .th-pct-empty { font-style: italic; }
+
+/* ── 因子卡：sparkline / 历史区间条 / 较上次变化 chip ── */
+/* 变化 chip：红=上行、绿=下行（A 股习惯），中性/缺失灰。 */
+.th-factor-chg { margin-top: -2px; }
+.th-chg { display: inline-block; font-size: 10.5px; font-family: var(--font-mono, monospace);
+  border: 1px solid var(--border-light, #f0f0f0); border-radius: 999px; padding: 0 7px;
+  color: var(--text-secondary, #6b7280); background: var(--bg-soft, #f7f9fb); white-space: nowrap; }
+.th-chg.up { color: var(--up, #c0392b); border-color: rgba(192, 57, 43, .35); }
+.th-chg.down { color: var(--down, #1e8449); border-color: rgba(30, 132, 73, .35); }
+.th-chg.flat, .th-chg-na { color: var(--muted, #9aa5b1); }
+
+/* sparkline：纯 SVG 折线（每个因子一个 viewBox，不为它建 ECharts 实例） */
+.th-spark { position: relative; height: 26px; margin: 1px 0 2px; }
+.th-spark svg { width: 100%; height: 26px; display: block; }
+.th-spark-line.up { stroke: var(--up, #c0392b); }
+.th-spark-line.down { stroke: var(--down, #1e8449); }
+.th-spark-dot.up { fill: var(--up, #c0392b); }
+.th-spark-dot.down { fill: var(--down, #1e8449); }
+.th-spark-lab { position: absolute; right: 0; top: -1px; font-size: 9.5px;
+  color: var(--muted, #9aa5b1); font-family: var(--font-mono, monospace); }
+.th-spark-empty { font-size: 10px; color: var(--muted, #9aa5b1); font-style: italic;
+  line-height: 26px; border-bottom: 1px dashed var(--border-light, #f0f0f0); }
+
+/* 历史区间条：p10~p90 浅带 + p25~p75 深盒 + 中位竖线 + 当前值标记 */
+.th-range { display: flex; align-items: center; gap: 6px; font-size: 10.5px;
+  color: var(--muted, #9aa5b1); margin: 2px 0 1px; }
+.th-range-lab { flex: none; }
+.th-range-track { position: relative; flex: 1 1 auto; height: 8px; border-radius: 4px;
+  background: var(--border-light, #f0f0f0); overflow: visible; }
+.th-range-band { position: absolute; top: 0; height: 8px; border-radius: 4px;
+  background: rgba(23, 107, 91, .18); }
+.th-range-box { position: absolute; top: 1px; height: 6px; border-radius: 3px;
+  background: rgba(23, 107, 91, .42); }
+.th-range-med { position: absolute; top: -1px; width: 1px; height: 10px;
+  background: var(--text-secondary, #6b7280); opacity: .8; }
+.th-range-cur { position: absolute; top: -3px; width: 3px; height: 14px; border-radius: 1.5px;
+  background: var(--text, #1c2430); transform: translateX(-1.5px);
+  box-shadow: 0 0 0 1px var(--panel, #fff); }
+.th-range-txt { flex: none; font-family: var(--font-mono, monospace); color: var(--text-secondary, #6b7280); }
+.th-range-txt b { font-weight: 600; }
+/* 「本条即分位」：读数本身就是分位/等级，不再套一层历史分位 */
+.th-nsr { font-size: 10.5px; color: var(--muted, #9aa5b1); font-style: italic; }
+
+/* ── 历史趋势 + 变动归因（同一张卡，左图右归因） ── */
+.th-row-trend { grid-template-columns: minmax(0, 1fr); }
+.th-trend-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); }
+.th-attr { display: flex; flex-direction: column; gap: 5px; min-width: 0;
+  border-left: 1px dashed var(--border-light, #f0f0f0); padding-left: 12px; }
+.th-attr-head { font-size: 12px; font-weight: 600; color: var(--text, #1c2430);
+  display: flex; align-items: baseline; gap: 7px; }
+.th-attr-head .th-sub { font-weight: 400; font-size: 11px; color: var(--text-secondary, #6b7280); }
+.th-attr-chart { width: 100%; height: 172px; }
+.th-attr-note { font-size: 11.5px; line-height: 1.6; color: var(--text, #1c2430);
+  background: var(--bg-soft, #f7f9fb); border: 1px solid var(--border-light, #f0f0f0);
+  border-radius: 7px; padding: 6px 9px; }
+.th-attr-tip { font-size: 10px; color: var(--muted, #9aa5b1); line-height: 1.5; }
+
+/* 因子「关联性证据」右侧抽屉（2026-10-28 布局调整）
+   卡片不再因展开而横跨整行、也不会把下面的卡推走：详情 fixed 在右侧，
+   完全不参与因子网格排版。多个已打开因子用标签切换，只渲染当前标签；
+   全部打开也只是标签横向滚动，不会生成 N×4 张图。
+   抽屉会盖住右半边卡片：仍可直接点左侧可见的卡，或用「＋ 添加因子」追加。 */
+.th-factor.is-ev-open { border-color: var(--brand, #176b5b);
+  background: var(--bg-soft, #f7f9fb);
+  box-shadow: inset 3px 0 0 var(--brand, #176b5b); }
+.th-ev-dock { position: fixed; top: 0; right: 0; bottom: 0;
+  width: min(760px, 92vw); z-index: 1150; display: none; flex-direction: column;
+  background: var(--panel, #fff); border-left: 1px solid var(--border-main, #8a97a8);
+  overflow: hidden; box-shadow: -18px 0 60px rgba(12, 18, 26, .28); }
+.th-ev-dock-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--bg-soft, #f7f9fb); border-bottom: 1px solid var(--border-light, #f0f0f0); }
+.th-ev-dock-head b { font-size: 12.5px; color: var(--text, #1c2430); }
+.th-ev-dock-head .th-sub { font-size: 10.5px; font-weight: 400; color: var(--muted, #9aa5b1); }
+.th-ev-add { margin-left: auto; max-width: 150px; font-size: 10.5px; padding: 2px 4px;
+  border: 1px solid var(--border-light, #f0f0f0); border-radius: 5px;
+  background: var(--panel, #fff); color: var(--text-secondary, #6b7280); }
+.th-ev-dock-head #thEvCloseAll { margin-left: 0; }
+.th-ev-x { padding: 2px 8px; font-size: 13px; line-height: 1.2; }
+.th-ev-tabs { flex: none; display: flex; gap: 4px; padding: 6px 10px 0; overflow-x: auto;
+  white-space: nowrap; border-bottom: 1px solid var(--border-light, #f0f0f0); }
+.th-ev-tab { display: inline-flex; align-items: center; gap: 5px; flex: none;
+  border: 1px solid var(--border-light, #f0f0f0); border-bottom: none;
+  border-radius: 6px 6px 0 0; background: var(--bg-soft, #f7f9fb);
+  color: var(--text-secondary, #6b7280); padding: 4px 7px; font-size: 10.5px; cursor: pointer; }
+.th-ev-tab.is-on { background: var(--panel, #fff); color: var(--brand, #176b5b);
+  border-color: var(--brand, #176b5b); font-weight: 600; }
+.th-ev-tab-x { font-size: 12px; line-height: 1; padding: 0 2px; border-radius: 3px; }
+.th-ev-tab-x:hover { background: rgba(192, 57, 43, .12); color: var(--up, #c0392b); }
+.th-ev-dock-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px 14px; }
+.th-ev-dock-body .th-ev { border: none; padding: 0; background: transparent; }
+.th-ev-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 8px 0 10px; }
+.th-ev-cell { border: 1px solid var(--border-light, #f0f0f0); border-radius: 8px;
+  padding: 7px 9px; min-width: 0; background: var(--panel, #fff); }
+.th-ev-cell-head { display: flex; align-items: baseline; gap: 7px; font-size: 11.5px;
+  font-weight: 600; color: var(--text, #1c2430); margin-bottom: 3px; flex-wrap: wrap; }
+.th-ev-cell-head > span:first-of-type { font-weight: 400; font-size: 10.5px;
+  color: var(--text-secondary, #6b7280); }
+.th-ev-modes { margin-left: auto; display: flex; gap: 4px; }
+.th-ev-mode { border: 1px solid var(--border-light, #f0f0f0); background: var(--panel, #fff);
+  color: var(--text-secondary, #6b7280); font-size: 10px; border-radius: 5px;
+  padding: 0 6px; cursor: pointer; }
+.th-ev-mode.is-on { color: #fff; background: var(--brand, #176b5b); border-color: var(--brand, #176b5b); }
+.th-ev-chart2 { width: 100%; height: 168px; }
+.th-ev-table2 { width: 100%; border-collapse: collapse; font-size: 11px; margin: 2px 0 6px; }
+.th-ev-table2 th { text-align: left; font-weight: 600; color: var(--text-secondary, #6b7280);
+  padding: 3px 5px; border-bottom: 1px solid var(--border-light, #f0f0f0); font-size: 10.5px;
+  white-space: nowrap; }
+.th-ev-table2 td { padding: 4px 5px; border-bottom: 1px dashed var(--border-light, #f0f0f0);
+  color: var(--text, #1c2430); }
+.th-ev-table2 td.mono { font-family: var(--font-mono, monospace); }
+.th-ev-dir { font-size: 11px; color: var(--text, #1c2430); line-height: 1.6;
+  background: var(--bg-soft, #f7f9fb); border-radius: 6px; padding: 5px 8px; margin-bottom: 5px; }
+.th-ev-caveats { margin: 0; padding-left: 16px; font-size: 10px; color: var(--muted, #9aa5b1);
+  line-height: 1.6; }
+.th-ev-acc { font-size: 11px; color: var(--warn, #c88a1e); line-height: 1.6;
+  background: var(--warning-bg, #fff8ec); border: 1px solid var(--warn, #f0dcb4);
+  border-radius: 6px; padding: 5px 8px; margin-bottom: 5px; }
+/* 短窗口期限（常规 20/60 日样本不足时补算的未来 5 日等）：必须显式标出，
+   否则读者会把 h=5 的 r 当主口径（2026-10-27 契约新增 short_window）。 */
+.th-ev-short { font-size: 10px; font-weight: 600; color: var(--warn, #c88a1e);
+  border: 1px solid currentColor; border-radius: 4px; padding: 0 5px;
+  white-space: nowrap; vertical-align: 1px; }
+.th-ev-short-note, .th-ev-sample-note { color: var(--warn, #c88a1e); }
+.th-ev-sample-note { color: var(--muted, #9aa5b1); }
+
+/* ── 报告图片：离屏容器 + 预览弹窗 ──
+   容器由 JS 内联定位（fixed/1240px/z-index:-9999），这里只管排版与字号。
+   ⚠️ 报告图会被截图：字号 ≥12px、表格不许截断、配色不依赖页面主题变量兜底。 */
+.th-report { font-family: var(--font, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif);
+  color: #1c2430; box-sizing: border-box; }
+.th-report *, .th-report *::before, .th-report *::after { box-sizing: border-box; }
+.th-rp-inner { padding: 30px 34px 26px; background: #ffffff; }
+.th-rp-head { border-bottom: 2px solid #176b5b; padding-bottom: 12px; margin-bottom: 16px; }
+.th-rp-title { font-size: 27px; font-weight: 700; color: #1c2430; }
+.th-rp-sub { font-size: 13px; color: #4b5563; margin-top: 6px; line-height: 1.6; }
+.th-rp-meta { font-size: 12px; color: #6b7280; margin-top: 4px; }
+.th-rp-hero { display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  background: #f7f9fb; border: 1px solid #e5e7eb; border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 18px; }
+.th-rp-hero-main { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.th-rp-total { font-size: 24px; font-weight: 700; font-family: var(--font-mono, monospace); }
+.th-rp-verdict { font-size: 17px; font-weight: 700; color: #176b5b;
+  border: 1px solid currentColor; border-radius: 999px; padding: 2px 14px; }
+.th-rp-action { font-size: 14px; color: #1c2430; }
+.th-rp-hero-facts { margin-left: auto; font-size: 12.5px; color: #4b5563; line-height: 1.6;
+  text-align: right; }
+.th-rp-warn { color: #c0392b; }
+.th-rp-sec { margin-bottom: 20px; }
+.th-rp-sec h2 { font-size: 16px; font-weight: 700; color: #1c2430; margin: 0 0 8px;
+  padding-left: 9px; border-left: 4px solid #176b5b; line-height: 1.3; }
+.th-rp-sec h2 span { font-size: 12px; font-weight: 400; color: #6b7280; margin-left: 8px; }
+.th-rp-note { font-size: 12.5px; color: #4b5563; line-height: 1.65; margin-bottom: 8px; }
+/* 趋势图给下方换行图例留出 2 行高度（7–8 个因子在顶部一行会被右轴/右边界裁掉） */
+.th-rp-chart { width: 100%; height: 330px; }
+.th-rp-chart-sm { width: 100%; height: 230px; }
+.th-rp-heat-head { font-size: 13px; font-weight: 600; color: #1c2430; margin: 12px 0 4px; }
+.th-rp-heat-head span { font-size: 12px; font-weight: 400; color: #6b7280; margin-left: 8px; }
+.th-rp-alerts { margin-top: 8px; }
+.th-rp-alert { font-size: 12.5px; color: #1c2430; line-height: 1.65; padding: 3px 0;
+  border-bottom: 1px dashed #f0f0f0; }
+.th-rp-alert b { color: #c0392b; margin-right: 7px; }
+.th-rp-alert em { font-style: normal; color: #9aa5b1; margin-left: 8px; font-size: 11.5px; }
+.th-rp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
+.th-rp-table th { text-align: left; font-size: 12px; font-weight: 600; color: #4b5563;
+  padding: 7px 6px; border-bottom: 2px solid #e5e7eb; white-space: nowrap; }
+.th-rp-table td { padding: 7px 6px; border-bottom: 1px solid #f0f0f0; color: #1c2430;
+  vertical-align: top; line-height: 1.5; word-break: break-word; }
+.th-rp-table td.name { font-weight: 600; }
+.th-rp-table td.num { font-family: var(--font-mono, monospace); text-align: right;
+  white-space: nowrap; }
+.th-rp-table td.dir { font-size: 12px; color: #4b5563; }
+.th-rp-table th:nth-child(1), .th-rp-table td:nth-child(1) { width: 20%; }
+.th-rp-table th:nth-child(2), .th-rp-table td:nth-child(2) { width: 9%; }
+.th-rp-table th:nth-child(3), .th-rp-table td:nth-child(3) { width: 8%; }
+.th-rp-table th:nth-child(4), .th-rp-table td:nth-child(4) { width: 11%; }
+.th-rp-table th:nth-child(5), .th-rp-table td:nth-child(5) { width: 11%; }
+.th-rp-table th:nth-child(6), .th-rp-table td:nth-child(6) { width: 9%; }
+.th-rp-table th:nth-child(7), .th-rp-table td:nth-child(7) { width: 9%; }
+.th-rp-table th:nth-child(8), .th-rp-table td:nth-child(8) { width: 8%; }
+.th-rp-table th:nth-child(9), .th-rp-table td:nth-child(9) { width: 15%; }
+.th-rp-tier { display: inline-block; font-size: 10.5px; font-weight: 500; margin-left: 6px;
+  border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; color: #6b7280;
+  vertical-align: 1px; }
+.th-rp-tier.strong { color: #c0392b; }
+.th-rp-tier.medium { color: #c88a1e; }
+.th-rp-tier.insufficient, .th-rp-tier.unsupported { border-style: dashed; color: #9aa5b1; }
+.th-rp-muted { color: #9aa5b1; font-size: 11.5px; }
+/* 报告表里的「短窗口」角标：h=5 的相关系数不能与常规 20/60 日混看 */
+.th-rp-short { display: inline-block; font-size: 10.5px; font-weight: 600; margin-left: 5px;
+  border: 1px solid #c88a1e; border-radius: 4px; padding: 0 5px; color: #c88a1e;
+  vertical-align: 1px; white-space: nowrap; }
+.th-rp-bad { color: #c0392b; font-weight: 600; }
+.th-rp-list { margin: 0; padding-left: 18px; font-size: 12.5px; color: #1c2430; line-height: 1.75; }
+.th-rp-list li.hit { color: #c0392b; font-weight: 600; }
+.th-rp-caveats { border-top: 1px solid #e5e7eb; padding-top: 12px; }
+.th-rp-foot { margin-top: 14px; font-size: 12px; color: #6b7280; text-align: center;
+  letter-spacing: .5px; }
+
+/* 预览弹窗：img 缩放到视口内，可滚动查看整张长图 */
+.th-report-modal { position: fixed; inset: 0; z-index: 1200; background: rgba(12, 18, 26, .72);
+  display: flex; align-items: center; justify-content: center; padding: 18px; }
+.th-report-box { background: #fff; border-radius: 12px; overflow: hidden;
+  display: flex; flex-direction: column; max-width: 96vw; max-height: 94vh;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .35); }
+.th-report-bar { flex: none; display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+  flex-wrap: wrap; border-bottom: 1px solid #e5e7eb; font-size: 13px; color: #1c2430; }
+.th-report-fn { font-size: 11.5px; color: #6b7280; font-family: var(--font-mono, monospace);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46vw; }
+.th-report-bar .th-btn { margin-left: auto; }
+.th-report-bar .th-btn + .th-btn { margin-left: 0; }
+.th-report-imgwrap { flex: 1 1 auto; min-height: 0; overflow: auto; background: #eef1f4;
+  padding: 10px; }
+.th-report-imgwrap img { display: block; width: 100%; height: auto; background: #fff;
+  border-radius: 6px; }
 /* 因子「数据验证」折叠区：关联性回测的证据链 */
 .th-factor-ev { border-top: 1px dashed var(--border-light, #f0f0f0); padding-top: 4px; margin-top: 3px; }
 .th-ev-btn { border: none; background: none; cursor: pointer; font-size: 10.5px;
@@ -378,8 +596,93 @@
   .th-side-list { display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; padding: 6px 8px; }
   .th-item { min-width: 168px; margin-bottom: 0; }
   .th-row-bottom { grid-template-columns: minmax(0, 1fr); }
+  /* 趋势图与归因在窄屏上下排（左右并排会把归因横条压到读不出因子名） */
+  .th-trend-grid { grid-template-columns: minmax(0, 1fr); }
+  .th-attr { border-left: none; padding-left: 0; border-top: 1px dashed var(--border-light, #f0f0f0);
+    padding-top: 8px; }
 }
 @container thpage (max-width: 760px) {
   .th-hero-right { margin-left: 0; text-align: left; }
   .th-factors { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .th-ev-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── 双轴图：评分 vs 标的（总览面板 + 详情页大图） ──
+   总览是**页内**覆盖面板（不新开页、不切路由），关闭即卸载全部小图；
+   网格自适应列数，窄屏单列。图容器必须给定高度——ECharts 拿不到尺寸就不出图。 */
+.th-chart-panel { position: fixed; inset: 0; z-index: 1160; display: flex; flex-direction: column;
+  background: var(--bg, #f6f7f9); }
+.th-chart-panel-head { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 20px; background: var(--panel, #fff);
+  border-bottom: 1px solid var(--border, #e5e7eb); }
+.th-chart-panel-title { font-size: 14.5px; font-weight: 600; color: var(--text, #1c2430); }
+.th-chart-panel-sub { font-size: 11.5px; color: var(--text-secondary, #6b7280); min-width: 0; }
+.th-chart-panel-meta { margin-left: auto; font-size: 11.5px; color: var(--text-secondary, #6b7280);
+  font-family: var(--font-mono, monospace); white-space: nowrap; }
+.th-chart-grid { flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  padding: 12px 20px 18px; display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  align-items: start; align-content: start; }
+/* align-content:start：grid 默认 stretch 会把剩余高度均摊进 auto 行，卡片之间凭空多出几十 px 空白 */
+.th-chart-empty { font-size: 12.5px; color: var(--text-secondary, #6b7280); padding: 20px 4px; }
+.th-chart-card { background: var(--panel, #fff); border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius-lg, 12px); overflow: hidden; cursor: pointer;
+  display: flex; flex-direction: column; min-width: 0;
+  transition: border-color .12s ease, box-shadow .12s ease; }
+.th-chart-card:hover { border-color: var(--brand, #176b5b);
+  box-shadow: 0 2px 12px rgba(23, 107, 91, .12); }
+.th-chart-card-head { flex: none; display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+  padding: 8px 12px 6px; border-bottom: 1px solid var(--border-light, #f0f0f0); }
+.th-chart-card-name { font-size: 12.5px; font-weight: 600; color: var(--text, #1c2430); }
+.th-chart-card-ver { font-size: 10.5px; color: var(--text-secondary, #6b7280);
+  border: 1px solid var(--border-main, #c8d0d8); border-radius: 4px; padding: 0 5px; }
+.th-chart-card-ver:empty { display: none; }
+.th-chart-rho-wrap { margin-left: auto; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.th-chart-rho { display: inline-flex; align-items: baseline; gap: 3px; font-size: 10.5px;
+  color: var(--text-secondary, #6b7280); }
+.th-chart-rho em { font-style: normal; }
+.th-chart-rho b { font-family: var(--font-mono, monospace); font-size: 11px; font-weight: 600;
+  color: var(--text, #1c2430); }
+/* 详情副标题里三个 ρ 紧挨着会糊成一串，明确留白（卡片头上是 flex + inline-flex 混排） */
+.th-card-head .th-chart-rho { margin-left: 10px; }
+.th-card-head .th-chart-rho:first-child { margin-left: 4px; }
+/* 小图 210px / 详情大图 320px：都是「图容器」，高度必须确定 */
+.th-chart-mini { width: 100%; height: 210px; min-height: 150px; }
+.th-chart-note { font-size: 11.5px; color: var(--text-secondary, #6b7280); padding: 12px;
+  line-height: 1.6; }
+.th-chart-note.err { color: var(--warn, #c88a1e); }
+.th-score-chart { width: 100%; height: 320px; min-height: 200px; }
+/* 详情页这张卡是 .th-main（flex column）的直接子项：不写 flex:none 会被压成 0 高
+   （min-height:0 + 可收缩），图就算 init 了也只剩一条 2px 的边框。 */
+.th-score-card { flex: none; }
+
+/* 定义变更提示 chip：与副标题同级，只在 def_hash 变过时出现。
+   .th-card-head 默认不换行，长副标题（区间 + 样本数 + 三个 ρ）再加 chip 会溢出，
+   这张卡单独允许换行，宁可落行也不挤坏标题。 */
+.th-score-card .th-card-head { flex-wrap: wrap; row-gap: 4px; }
+.th-chart-notice { flex: none; font-size: 10.5px; font-weight: 600; line-height: 1.5;
+  color: var(--warn, #c88a1e); background: rgba(200, 138, 30, .12);
+  border: 1px solid rgba(200, 138, 30, .38); border-radius: 999px; padding: 0 8px;
+  white-space: nowrap; }
+.th-chart-notice:empty { display: none; }
+
+/* 总览卡片：定义变更小圆点（tooltip 给原因）+ 数据截止/缓存新鲜度 */
+.th-chart-card-dot { flex: none; width: 6px; height: 6px; border-radius: 50%;
+  align-self: center; background: var(--warn, #c88a1e);
+  box-shadow: 0 0 0 2px rgba(200, 138, 30, .18); }
+.th-chart-card-fresh { font-size: 10px; color: var(--text-secondary, #6b7280);
+  font-family: var(--font-mono, monospace); white-space: nowrap; }
+.th-chart-card-fresh:empty { display: none; }
+
+/* 报告里的双轴图口径说明：灰字，别抢图表的戏 */
+.th-rp-caliber { color: var(--text-secondary, #6b7280); font-size: 11.5px; margin-bottom: 0; }
+
+@container thpage (max-width: 1180px) {
+  .th-chart-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@container thpage (max-width: 760px) {
+  .th-chart-panel-head { padding: 8px 12px; }
+  .th-chart-grid { padding: 10px 12px 14px; }
+  .th-chart-mini { height: 180px; }
+  .th-score-chart { height: 240px; }
 }

@@ -6,11 +6,21 @@ from pydantic import BaseModel
 class CreateDialogRequest(BaseModel):
     title: str | None = None
     mode: str | None = None
+    origin: str | None = None
+
+
+class AttachmentRef(BaseModel):
+    """已上传图片的引用（图片本身由 /api/uploads 落盘）。"""
+    id: str
 
 
 class CreateMessageRequest(BaseModel):
     content: str
     mode: str | None = None
+    # 本轮类型：chat=普通（硬性跳过策略闸门）/ auto=自动识别 / strategy=策略
+    turn_type: str | None = None
+    # 图片附件（v1：服务端转成文字后拼进本轮问题）
+    attachments: list[AttachmentRef] = []
 
 
 class SaveConfigRequest(BaseModel):
@@ -18,7 +28,19 @@ class SaveConfigRequest(BaseModel):
 
 
 class ApplyConfigRequest(BaseModel):
-    changes: dict
+    changes: dict = {}
+    # 敏感项只写不读：仅当值非空时才写 .env（留空 = 保持原值）
+    secrets: dict[str, str] = {}
+
+
+class ConfigTestRequest(BaseModel):
+    """配置页「连通性检测」：kind=llm/search/datasource/memory。
+
+    target 仅对 llm 有效（main/report/compress/judge）；query 仅对 search 有效。
+    """
+    kind: str
+    target: str = ""
+    query: str = ""
 
 
 class BudgetDecisionRequest(BaseModel):
@@ -149,6 +171,7 @@ class RouteRulesSaveRequest(BaseModel):
 
 class RouteTestRequest(BaseModel):
     text: str
+    dialog_uuid: str = ""  # R1：预览条带会话标识，用于「策略会话进行中」态（加性字段）
 
 
 class DashboardSaveRequest(BaseModel):

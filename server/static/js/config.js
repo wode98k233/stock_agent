@@ -14,6 +14,9 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     this.diffBodyEl = document.getElementById('diffBody');
     this.originalConfig = {};
     this.currentConfig = {};
+    // 敏感项（API Key 等）只写不读：GET 不返回值，这里只暂存用户本次新填的明文，
+    // 保存成功后立即清空，绝不进入 currentConfig / 变更 diff 的普通通道。
+    this.pendingSecrets = {};
     this.items = [];
     this.visualization = null;
     this.summaryEl = null;
@@ -21,6 +24,7 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     this.notificationStatus = null;
     this.notificationPanelEl = null;
     this.notificationStatusError = '';
+    this._testBound = false;
   }
 
   open() {
@@ -30,6 +34,7 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       if (btn) btn.addEventListener('click', () => this._reloadFromEnv());
       this._reloadBound = true;
     }
+    this._bindTestBar();
     this.loadConfig().then(() => {
       this.panelEl.classList.add('open');
       this.overlayEl.classList.add('open');
@@ -45,13 +50,16 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
 
   _hasDirtyChanges() {
     try {
-      return Object.keys(this.getChanges()).length > 0;
+      return Object.keys(this.getChanges()).length > 0 ||
+        Object.keys(this.pendingSecrets || {}).length > 0;
     } catch {
       return false;
     }
   }
 
   async _reloadFromEnv() {
+    // 重载会重建整张表单（含清空刚填的密钥），有未保存变更时先确认
+    if (this._hasDirtyChanges() && !confirm('重载会丢弃未保存的修改（含刚填的密钥），继续？')) return;
     const btn = document.getElementById('configReloadBtn');
     const msg = document.getElementById('configReloadMsg');
     if (btn) { btn.disabled = true; btn.textContent = '... 加载中'; }
@@ -73,6 +81,51 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     }
   }
 
+  _bindTestBar() {
+    if (this._testBound) return;
+    const bar = document.getElementById('configTestBar');
+    if (!bar) return;
+    bar.querySelectorAll('button[data-test-kind]').forEach((btn) => {
+      btn.addEventListener('click', () => this._runTest(btn.dataset.testKind, btn));
+    });
+    this._testBound = true;
+  }
+
+  _testButtons() {
+    return Array.from(document.querySelectorAll('#configTestBar button[data-test-kind]'));
+  }
+
+  async _runTest(kind, btn) {
+    const msg = document.getElementById('configTestMsg');
+    const buttons = this._testButtons();
+    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+    buttons.forEach((b) => { b.disabled = true; });
+    btn.textContent = '检测中…';
+    if (msg) { msg.textContent = ''; msg.className = 'config-test-msg'; }
+    try {
+      const target = kind === 'llm'
+        ? (document.getElementById('configTestTarget')?.value || 'main')
+        : '';
+      const data = await window.StockRadar.api.testConfig(kind, target);
+      const ok = !!data.success;
+      const latency = data.latency_ms ? ` · ${data.latency_ms}ms` : '';
+      if (msg) {
+        msg.textContent = `${ok ? '✓' : '✗'} ${data.message || (ok ? '连通' : '失败')}${latency}`;
+        msg.className = 'config-test-msg ' + (ok ? 'ok' : 'error');
+        msg.title = data.message || '';
+      }
+    } catch (err) {
+      if (msg) {
+        msg.textContent = '✗ 请求失败：' + err.message;
+        msg.className = 'config-test-msg error';
+        msg.title = err.message || '';
+      }
+    } finally {
+      btn.textContent = btn.dataset.label;
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  }
+
   async loadConfig() {
     try {
       const [data, notificationStatus] = await Promise.all([
@@ -83,7 +136,9 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       this.items = data.items || [];
       this.originalConfig = {};
       this.currentConfig = {};
+      this.pendingSecrets = {};
       for (const item of this.items) {
+        if (item.sensitive) continue; // 只写不读：不把密钥放进普通配置表
         this.originalConfig[item.key] = item.value;
         this.currentConfig[item.key] = item.value;
       }
@@ -114,15 +169,16 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       '模型': ['LLM', 'LLM 缓存', '模型路由'],
       'Agent': ['Agent 通用', 'ReAct', '上下文压缩', 'Plan / PDOR / Unified', 'Agent 群模式', '预算'],
       '报告': ['报告'],
-      '数据': ['数据源', '缓存', '搜索引擎'],
+      '数据': ['数据源', '缓存', '搜索引擎', '上传'],
       '记忆系统': ['长期记忆-基础', '长期记忆-Embedding', '长期记忆-Reranker'],
       '通知': ['通知'],
-      '调度': ['后台巡检', '系统监控', '市场面板', '全局总览'],
+      '调度': ['后台巡检', '系统监控', '市场面板', '全局总览', '成本 / 计价'],
+      '回测': ['回测'],
       '诊断': ['调试'],
     };
   }
 
-  _tabOrder() { return ['模型', 'Agent', '报告', '数据', '记忆系统', '通知', '调度', '诊断']; }
+  _tabOrder() { return ['模型', 'Agent', '报告', '数据', '记忆系统', '通知', '调度', '回测', '诊断']; }
 
   renderConfig(items) {
     this.formEl.innerHTML = '';
@@ -380,6 +436,25 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       for (const item of groupItems) {
         card.appendChild(this._renderRow(item));
       }
+      // 「成本 / 计价」的价目是嵌套表（供应商 → 模型 → 峰谷价），塞不进 .env 输入框，
+      // 所以在本分组底部挂一个入口，打开专属的定价目录编辑器。
+      if (groupName === '成本 / 计价') {
+        const bar = document.createElement('div');
+        bar.className = 'pc-open-bar';
+        bar.innerHTML = '<button class="secondary-button" type="button" id="pricingCatalogBtn">打开定价目录编辑器</button>'
+          + '<span class="pc-open-hint">供应商 / 模型价 / 峰谷窗口 / 按次计费服务（Search·Fetch）都在这里改；保存后新调用立即按新价计，历史成本不回算</span>';
+        card.appendChild(bar);
+        const btn = bar.querySelector('#pricingCatalogBtn');
+        if (btn) {
+          btn.addEventListener('click', () => {
+            if (!window.StockRadar.PricingConfigPanel) return;
+            if (!window.StockRadar.pricingPanel) {
+              window.StockRadar.pricingPanel = new window.StockRadar.PricingConfigPanel();
+            }
+            window.StockRadar.pricingPanel.open();
+          });
+        }
+      }
       return card;
     });
   }
@@ -473,8 +548,8 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
       REPORT_MAX_NEWS_CHARS: '进入报告引擎的新闻文本最大字符数。',
       REPORT_LLM_MODEL: '报告专用模型。留空时使用默认模型。',
       REPORT_LLM_API_BASE: '报告专用模型接口地址。留空时使用默认 API Base。',
-      COMPRESS_LLM_MODEL: '工具输出压缩专用模型。留空时使用默认模型。',
-      COMPRESS_LLM_API_BASE: '压缩专用模型接口地址。留空时使用默认 API Base。',
+      TOOL_COMPRESS_LLM_MODEL: '工具输出压缩专用模型。留空时使用默认模型。',
+      TOOL_COMPRESS_LLM_API_BASE: '工具输出压缩专用模型接口地址。留空时使用默认 API Base。',
       TOOL_OUTPUT_COMPRESS_THRESHOLD: '工具输出超过该字符数时触发压缩。',
       TOOL_COMPRESS_THRESHOLDS: '按工具名覆盖压缩阈值，必须是 JSON 对象。',
       TOOL_HARD_TRUNCATE_CHARS: '工具输出硬截断上限，避免异常大结果拖垮上下文。',
@@ -731,7 +806,36 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
 
   _hasConfigValue(key) {
     const value = this.currentConfig[key];
-    return value !== null && value !== undefined && String(value).trim() !== '';
+    if (value !== null && value !== undefined && String(value).trim() !== '') return true;
+    // 敏感项不返回明文（currentConfig 里没有），退回到 GET 给的「是否已配置」标记
+    const item = (this.items || []).find(i => i.key === key);
+    if (item && item.sensitive) return !!item.configured;
+    return false;
+  }
+
+  _onSecretInput(key, value) {
+    const trimmed = String(value || '').trim();
+    if (trimmed) this.pendingSecrets[key] = trimmed;
+    else delete this.pendingSecrets[key];
+    this._updateSummary();
+  }
+
+  _clearSecrets(updatedKeys = null) {
+    const keys = updatedKeys || Object.keys(this.pendingSecrets || {});
+    this.pendingSecrets = {};
+    this.formEl.querySelectorAll('input[data-secret="1"]').forEach((input) => {
+      input.value = '';
+      input.type = 'password';
+      const row = input.closest('.config-row');
+      const item = (this.items || []).find(i => i.key === input.dataset.key);
+      if (item && item.sensitive && keys.includes(item.key)) item.configured = true; // 保存成功 → 视为已配置
+      input.placeholder = item && item.configured ? '已配置（留空不改）' : '未配置（填入后保存）';
+      const eye = row ? row.querySelector('.config-secret-eye') : null;
+      if (eye) { eye.textContent = '显示'; eye.classList.remove('on'); }
+    });
+    // 保存成功后 pendingSecrets 清空 → 变更计数/行状态要跟着归零，否则面板里留着
+    // 上一次的「N 项」脏状态（虽然关面板重开会重建，但读起来像没保存成功）
+    this._updateSummary();
   }
 
   _isCircuitClosed(state) {
@@ -818,12 +922,38 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     controlWrap.className = 'config-control';
 
     if (item.sensitive) {
+      // 只写不读：不回显任何值（连掩码都不给）。留空 = 保持原值，
+      // 只有真的填了内容才进 pendingSecrets，保存时走独立的 secrets 通道。
+      const secretWrap = document.createElement('div');
+      secretWrap.className = 'config-secret';
+
       const input = document.createElement('input');
       input.type = 'password';
-      input.value = item.value || '';
-      input.disabled = true;
-      input.className = 'config-input config-input-disabled';
-      controlWrap.appendChild(input);
+      input.value = '';
+      input.className = 'config-input config-secret-input';
+      input.dataset.key = item.key;
+      input.dataset.secret = '1';
+      input.autocomplete = 'new-password';
+      input.spellcheck = false;
+      input.placeholder = item.configured ? '已配置（留空不改）' : '未配置（填入后保存）';
+      input.addEventListener('input', (e) => this._onSecretInput(item.key, e.target.value));
+
+      const eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'config-secret-eye';
+      eye.title = '显示 / 隐藏';
+      eye.setAttribute('aria-label', '显示或隐藏密钥');
+      eye.textContent = '显示';
+      eye.addEventListener('click', () => {
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        eye.textContent = show ? '隐藏' : '显示';
+        eye.classList.toggle('on', show);
+      });
+
+      secretWrap.appendChild(input);
+      secretWrap.appendChild(eye);
+      controlWrap.appendChild(secretWrap);
     } else if (item.type === 'bool') {
       const toggle = document.createElement('label');
       toggle.className = 'config-toggle';
@@ -972,12 +1102,13 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
     setText('notification', `${notificationEnabled ? 'ON' : 'OFF'} · ${notificationConfigured} 渠道`);
 
     const changes = this.getChanges();
-    const count = Object.keys(changes).length;
+    const secretKeys = Object.keys(this.pendingSecrets || {});
+    const count = Object.keys(changes).length + secretKeys.length;
     const changeCount = document.getElementById('configChangeCount');
     if (changeCount) changeCount.textContent = `${count} 项`;
+    const changedKeys = new Set([...Object.keys(changes), ...secretKeys]);
     this.formEl.querySelectorAll('.config-row-state').forEach((el) => {
-      const key = el.dataset.key;
-      el.classList.toggle('changed', Object.prototype.hasOwnProperty.call(changes, key));
+      el.classList.toggle('changed', changedKeys.has(el.dataset.key));
     });
   }
 
@@ -1014,7 +1145,8 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
   showDiff() {
     const changes = this.getChanges();
     const keys = Object.keys(changes);
-    if (keys.length === 0) {
+    const secretKeys = Object.keys(this.pendingSecrets || {});
+    if (keys.length === 0 && secretKeys.length === 0) {
       alert('没有变更');
       return;
     }
@@ -1034,6 +1166,18 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
         <div class="diff-new">新值：${this._esc(String(newVal))}</div>`;
       this.diffBodyEl.appendChild(row);
     }
+    // 敏感项：只报「将写入」，内容一律不回显
+    for (const key of secretKeys) {
+      const item = this.items.find(i => i.key === key);
+      const label = item ? item.label : key;
+      const row = document.createElement('div');
+      row.className = 'diff-row';
+      row.innerHTML = `
+        <div class="diff-title">${this._esc(label)}</div>
+        <div class="diff-old">旧值：••••••（不回显）</div>
+        <div class="diff-new">新值：将写入新密钥（内容不回显）</div>`;
+      this.diffBodyEl.appendChild(row);
+    }
 
     this.diffModalEl.classList.add('open');
     this.diffOverlayEl.classList.add('open');
@@ -1046,14 +1190,17 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
 
   async saveConfig() {
     const changes = this.getChanges();
-    if (Object.keys(changes).length === 0) {
+    const secrets = { ...(this.pendingSecrets || {}) };
+    if (Object.keys(changes).length === 0 && Object.keys(secrets).length === 0) {
       alert('没有变更需要保存');
       return;
     }
     try {
-      await window.StockRadar.api.applyConfig(changes);
-      alert('配置已保存并应用');
+      const result = await window.StockRadar.api.applyConfig(changes, secrets);
+      const secretKeys = Object.keys(secrets);
+      alert(this._applyResultText('配置已保存并应用', result, secretKeys));
       this.originalConfig = { ...this.currentConfig }; // 已落盘 → 不再算未保存
+      this._clearSecrets(secretKeys);
       this.close();
     } catch (err) {
       alert('保存失败：' + err.message);
@@ -1062,19 +1209,30 @@ window.StockRadar.ConfigPanel = class ConfigPanel {
 
   async applyConfig() {
     const changes = this.getChanges();
-    if (Object.keys(changes).length === 0) {
+    const secrets = { ...(this.pendingSecrets || {}) };
+    if (Object.keys(changes).length === 0 && Object.keys(secrets).length === 0) {
       alert('没有变更需要应用');
       return;
     }
     try {
-      await window.StockRadar.api.applyConfig(changes);
-      alert('配置已应用');
+      const result = await window.StockRadar.api.applyConfig(changes, secrets);
+      const secretKeys = Object.keys(secrets);
+      alert(this._applyResultText('配置已应用', result, secretKeys));
       this.originalConfig = { ...this.currentConfig }; // 已落盘 → 不再算未保存
+      this._clearSecrets(secretKeys);
       this.closeDiff();
       this.close();
     } catch (err) {
       alert('应用失败：' + err.message);
     }
+  }
+
+  _applyResultText(base, result, secretKeys) {
+    const parts = [base];
+    if (secretKeys.length) parts.push(`已更新 ${secretKeys.length} 个密钥`);
+    const blocked = result && Array.isArray(result.blocked) ? result.blocked : [];
+    if (blocked.length) parts.push(`忽略 ${blocked.length} 个不可接口修改项（${blocked.join(', ')}）`);
+    return parts.join('，');
   }
 
   _esc(value) {

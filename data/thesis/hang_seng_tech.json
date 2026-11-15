@@ -21,40 +21,49 @@
     "context_name": "沪深300",
     "scope_note": "benchmark 取恒生指数（r=0.91，恒科是它的子集）；沪深300 作为「中国基本面」对照另列，不参与打分。2026 年 A 股科技与港股科技走出相反方向，正是「定价权在港股流动性、不在 A 股风格」的直接体现。"
   },
+  "evidence": {
+    "target": {
+      "kind": "frame",
+      "alias": "hstech",
+      "name": "恒生科技指数",
+      "unit": "点"
+    },
+    "note": "关联性证据的目标标的（主标的）；收益按该标的收盘/现货价计算，不猜代理。"
+  },
   "data": {
     "us10_y": {
       "kind": "macro",
       "code": "us10_y",
-      "periods": 400
+      "periods": 3000
     },
     "cn10_y": {
       "kind": "macro",
       "code": "cn10_y",
-      "periods": 400
+      "periods": 3000
     },
     "hk_hibor_1w": {
       "kind": "macro",
       "code": "hk_hibor_1w",
-      "periods": 400
+      "periods": 3000
     },
     "dxy": {
       "kind": "macro",
       "code": "dxy",
-      "periods": 400
+      "periods": 3000
     },
     "hstech": {
       "kind": "index_daily",
       "code": "HSTECH",
       "name": "恒生科技指数",
       "label": "恒生科技指数",
-      "days": 1700
+      "days": 4000
     },
     "hsi": {
       "kind": "index_daily",
       "code": "HSI",
       "name": "恒生指数",
       "label": "恒生指数",
-      "days": 1700
+      "days": 4000
     }
   },
   "factors": [
@@ -481,7 +490,7 @@
     ]
   },
   "invalidation": {
-    "_说明": "结论失效条件：命中任意一条即说明本台账的多头结论不再成立，须重新研究。出自 2026-09-18《恒生科技驱动因子实证_74个月相关性分析》与《红利低波与恒生科技哑铃组合回测_2021-2026》；⑤ 的阈值锚自 2017-03 以来港元 HIBOR 1W 分位。",
+    "_说明": "结论失效条件：命中任意一条即说明本台账的多头结论不再成立，须重新研究。出自内部研究（不随开源发布）；⑤ 的阈值锚自 2017-03 以来港元 HIBOR 1W 分位。",
     "rules": [
       {
         "metric": "us10_y",

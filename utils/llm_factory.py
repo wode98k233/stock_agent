@@ -18,6 +18,7 @@ import time
 import random
 import logging
 import asyncio
+import hashlib
 import openai
 from contextvars import ContextVar
 from typing import List, Optional, Any, Sequence, Callable
@@ -124,11 +125,57 @@ class LLMDebugCallback(BaseCallbackHandler):
         self.logger.error("L", f"LLM 调用失败 [{self.label}]", error=str(error))
 
 
+# ── 工具 schema 体积埋点（明细，不参与计价）─────────────────────────────────
+
+
+def tool_schema_stats(tools) -> dict:
+    """量一次工具 schema 的体积。
+
+    ⚠️ 这是**明细不是增量**：工具定义的 token 本来就含在 provider 的 input_tokens 里，
+    只用于把「工具定义」从输入侧切分出来，绝不加到总量、也不参与成本（重复计费）。
+    """
+    items = list(tools or [])
+    chars = 0
+    for item in items:
+        try:
+            chars += len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+        except (TypeError, ValueError):
+            # 降级**只由序列化失败触发**（不可 JSON 化的对象 / 循环引用）。
+            # 有意不处理「非 dict、但可序列化」的元素（如元素本身是字符串：dumps 得 5、
+            # str 得 3）：生产 payload["tools"] 恒为 list[dict]（build_all_langchain_tools
+            # 产出），该形态不可达 —— 为它加分支只会多一条永不执行、又没人敢删的路径。
+            chars += len(str(item))
+    return {"tools_count": len(items), "tools_chars": chars}
+
+
+def _attach_tool_schema_stats(result, stats):
+    """把工具 schema 尺寸并进 ChatResult.llm_output.token_usage（LangChain 会提升到 LLMResult）。
+
+    只做并集（setdefault），绝不改 input/output/total：schema 的 token 已含在
+    provider 回报的 input_tokens 里，再并进总量就是重复计费。
+    """
+    if not stats:
+        return result
+    llm_output = getattr(result, "llm_output", None)
+    if not isinstance(llm_output, dict):
+        return result
+    usage = llm_output.setdefault("token_usage", {})
+    if isinstance(usage, dict):
+        usage.setdefault("tools_count", stats["tools_count"])
+        usage.setdefault("tools_chars", stats["tools_chars"])
+        # 显式哨兵：走到这里 = 本次调用**已被埋点**。
+        # 靠它区分「真绑了 0 个工具」（0 是实测值）与「这条路径没埋点」（流式 /
+        # response_format / responses API 分支不经过本函数）—— 二者在 tools_chars 上同形。
+        usage.setdefault("tools_measured", True)
+    return result
+
+
 class TokenCompatibleChatOpenAI(ChatOpenAI):
     """
     OpenAI-compatible 模型兼容包装器。
     - 为不支持 get_num_tokens_from_messages 的模型提供 fallback
     - 为部分供应商补齐 tool calling 多轮所需的 reasoning_content 回传
+    - 记录 prompt 前缀（tools + system）的 SHA-256 指纹，供缓存命中归因（PRD-A9 M-6）
     """
     _REASONING_CONTENT_KEY = "reasoning_content"
     _REASONING_CONTENT_AUTO_HINTS = ("mimo", "xiaomimimo")
@@ -244,6 +291,22 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
         response_dict = self._as_response_dict(response)
         choices = response_dict.get("choices") or []
 
+        # ── PRD-A9 M-6：把本次请求的前缀指纹回填到响应上 ──────────────
+        # 走 response 而非实例属性：并发（asyncio 多任务共享同一模型实例）下
+        # 实例属性会把指纹归给错误的请求。TokenRecorder.on_llm_end 从这里读，
+        # 写进日志/trace，用于跨请求 diff 定位「哪一次前缀变了」。
+        _fp = getattr(result, "llm_output", None)
+        if isinstance(_fp, dict):
+            _fp["prefix_sha256"] = getattr(self, "_last_prefix_sha256", "")
+            _fp["prefix_bytes"] = getattr(self, "_last_prefix_bytes", 0)
+            # 本次调用的实际端点（供应商识别用）：压缩/报告/评审等旁路模型各走各的
+            # provider，成本与供应商统计必须以这里回填的端点为反查依据，不能拿全局
+            # 默认端点顶替（否则旁路调用会被误归到主端点供应商名下）。
+            _fp["base_url"] = str(getattr(self, "openai_api_base", "") or "")
+        if isinstance(generation_info, dict):
+            generation_info.setdefault("prefix_sha256",
+                                       getattr(self, "_last_prefix_sha256", ""))
+
         for generation, choice in zip(result.generations, choices):
             message = getattr(generation, "message", None)
             raw_message = choice.get("message") or {}
@@ -288,7 +351,8 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
             and hasattr(raw_response, "headers")
         ):
             generation_info = {"headers": dict(raw_response.headers)}
-        return self._create_chat_result(response_dict, generation_info)
+        stats = tool_schema_stats(payload.get("tools"))
+        return _attach_tool_schema_stats(self._create_chat_result(response_dict, generation_info), stats)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         raise_if_cancelled()
@@ -313,7 +377,30 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
             and hasattr(raw_response, "headers")
         ):
             generation_info = {"headers": dict(raw_response.headers)}
-        return self._create_chat_result(response_dict, generation_info)
+        stats = tool_schema_stats(payload.get("tools"))
+        return _attach_tool_schema_stats(self._create_chat_result(response_dict, generation_info), stats)
+
+    # ── 前缀指纹（PRD-A9 M-6）─────────────────────────────────
+
+    def _prefix_bytes(self, payload: dict, payload_messages: list) -> bytes:
+        """渲染 prompt 缓存相关的前缀段（tools + 连续 system 消息）。
+
+        渲染顺序与 provider 一致：tools → system → messages。
+        这里只取前两段——它们才是「每次请求都应字节一致」的稳定前缀；
+        messages 段天然每轮增长，不参与指纹。
+        """
+        parts: list = []
+        tools = payload.get("tools")
+        if isinstance(tools, list) and tools:
+            # sort_keys 保证同一份 tools 因 dict 顺序不同也得到相同字节
+            parts.append(json.dumps(tools, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")))
+        for msg in payload_messages:
+            if not isinstance(msg, dict) or msg.get("role") != "system":
+                break
+            parts.append(json.dumps(msg, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")))
+        return "\x00".join(parts).encode("utf-8")
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         messages = self._convert_input(input_).to_messages()
@@ -347,6 +434,24 @@ class TokenCompatibleChatOpenAI(ChatOpenAI):
         payload_messages = payload.get("messages")
         if not isinstance(payload_messages, list):
             return payload
+
+        # ── PRD-A9 M-6：前缀指纹 ──────────────────────────────────
+        # provider 的 prompt cache 是「从头开始的连续前缀」字节匹配，位置 0 是 tools、
+        # 其次是 system。记录这两段的指纹，便于事后跨请求 diff 出「哪一次请求的前缀变了、
+        # 变了多少字节」，区分「前缀真的变了」与「provider 侧没命中」。
+        try:
+            raw = self._prefix_bytes(payload, payload_messages)
+            fp = hashlib.sha256(raw).hexdigest()[:16]
+            meta = payload.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+            meta.setdefault("prefix_sha256", fp)
+            meta.setdefault("prefix_bytes", str(len(raw)))
+            payload["metadata"] = meta
+            object.__setattr__(self, "_last_prefix_sha256", fp)
+            object.__setattr__(self, "_last_prefix_bytes", len(raw))
+        except Exception:
+            pass
 
         for source_message, payload_message in zip(messages, payload_messages):
             if not isinstance(source_message, AIMessage):
@@ -402,6 +507,8 @@ class LLMConfig:
     reasoning_content_policy: str = "auto"
     reasoning_effort: Optional[str] = None   # low/medium/high/none，None=不发送（老模型兼容）
     extra_body: Optional[dict] = None
+    # PRD-A9 M-5：采集原始响应头（部分 provider 在头里回报缓存状态），默认开
+    include_response_headers: bool = True
 
 
 class LLMFactory:
@@ -415,17 +522,27 @@ class LLMFactory:
         # 兜底：base_url 若误填完整端点（.../chat/completions），SDK 会重复拼接致 404。
         # 归一化后 SDK 自行拼 /chat/completions，兼容正确/错误两种写法。
         base_url = normalize_base_url(config.base_url)
+        # 全仓无一处显式传 timeout，若不给兜底就用 SDK 默认 read=600s×3 次重试
+        # = 最坏 30 分钟静默挂死。这里统一收口，所有创建路径都受控。
+        timeout = config.timeout
+        if timeout is None:
+            try:
+                from config import Config
+                timeout = getattr(Config, "LLM_REQUEST_TIMEOUT", None)
+            except Exception:
+                timeout = None
         llm_kwargs = {
             "model": config.model,
             "api_key": config.api_key,
             "base_url": base_url,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
-            "timeout": config.timeout,
+            "timeout": timeout,
             "model_kwargs": {},
             "reasoning_content_policy": config.reasoning_content_policy,
             "reasoning_effort": config.reasoning_effort,
             "extra_body": {},
+            "include_response_headers": getattr(config, "include_response_headers", True),
         }
 
         if config.headers:
@@ -562,8 +679,18 @@ def get_report_llm() -> TokenCompatibleChatOpenAI:
 
 
 def get_compress_llm() -> TokenCompatibleChatOpenAI:
+    """**工具输出压缩**专用 LLM（PRD-A11 FR-2：已与上下文压缩拆开）。
+
+    优先读 ``TOOL_COMPRESS_LLM_*``；未配置时回落 agent 主模型。
+    旧 ``COMPRESS_LLM_*`` 兼容回落层已于 2026-10-17 删除（发布周期已过，
+    .env 从未配置过该组变量）。
+    """
     # 迁移提示：新代码建议改用 utils.llm 网关 —— gateway.chat("compress")
-    return _get_named_llm('COMPRESS_LLM_MODEL', 'COMPRESS_LLM_API_KEY', 'COMPRESS_LLM_API_BASE', _compress_llm)
+    model = getattr(Config, 'TOOL_COMPRESS_LLM_MODEL', '')
+    if model:
+        return _get_named_llm('TOOL_COMPRESS_LLM_MODEL', 'TOOL_COMPRESS_LLM_API_KEY',
+                              'TOOL_COMPRESS_LLM_API_BASE', _compress_llm)
+    return get_llm()  # 没配压缩端点 = 用主模型（语义不变）
 
 
 def get_judge_llm() -> TokenCompatibleChatOpenAI:

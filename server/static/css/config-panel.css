@@ -839,9 +839,96 @@
   border-top: 1px solid var(--line);
   padding: 12px 20px;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   background: #fff;
+}
+
+/* 连通性检测条：4 个探测按钮 + 结果提示，放在页脚左侧 */
+.config-test-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.config-test-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.config-test-select {
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+}
+
+.config-test-msg {
+  font-size: 12px;
+  color: #888;
+  max-width: 460px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-test-msg.ok {
+  color: #1a7f5a;
+}
+
+.config-test-msg.error {
+  color: #c0392b;
+}
+
+/* 只写不读的密钥输入：密码框 + 显示/隐藏 */
+.config-secret {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.config-secret-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.config-secret-eye {
+  flex: 0 0 auto;
+  height: 36px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: #666;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s;
+}
+
+.config-secret-eye:hover {
+  background: #f2f2f2;
+}
+
+.config-secret-eye.on {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
 }
 
 .config-footer .send-button,

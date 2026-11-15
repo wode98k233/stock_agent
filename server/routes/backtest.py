@@ -19,8 +19,9 @@ from typing import List, Optional, Dict, Any
 from backtest.json_compiler import get_strategy_meta
 from utils.cache.backtest_db import (
     get_strategies, get_strategy,
-    get_backtest_run, get_backtest_runs,
+    get_backtest_run, get_backtest_runs, create_backtest_run,
     get_backtest_result, get_backtest_trades,
+    get_backtest_eval, get_result_health_map,
     update_backtest_run, save_backtest_result, save_backtest_trades,
     delete_backtest_run,
     upsert_strategy, delete_strategy,
@@ -38,11 +39,55 @@ from backtest.batch_engine import _auto_detect_asset_type
 
 router = APIRouter(prefix='/api/backtest', tags=['backtest'])
 
+logger = logging.getLogger(__name__)
+
 # 回测进度存储（内存）: run_id -> {current, total, pct, status}
 _backtest_progress: Dict[str, Dict[str, Any]] = {}
 
 # 批量回测进度存储（内存）: batch_id -> {current, total, pct, status, last_code, last_status}
 _batch_progress: Dict[str, Dict[str, Any]] = {}
+
+# ── 批量验证口径（Plan 3 任务 8 / 设计 §10）──
+# 「有效」= 有结果 + 体检可评判 + 胜率 > VALIDATION_WIN_RATE + 样本 >= VALIDATION_MIN_TRADES。
+# ⚠️ 三档不能合并：health 不是 ok/low_sample 的（data_gap / insufficient_bars / error ...）
+# 属于「没法评判」，把它算进「弱」等于把「没测出来」说成「测出来没用」。
+VALIDATION_MIN_TRADES = 5
+VALIDATION_WIN_RATE = 0.5
+VALIDATION_SCORED_HEALTH = ('ok', 'low_sample')
+
+
+def _median(values: List[Any]) -> Optional[float]:
+    """中位数：只认 int/float（None/字符串自动过滤），空集合返回 None。"""
+    nums = sorted(v for v in (values or []) if isinstance(v, (int, float)))
+    if not nums:
+        return None
+    mid = len(nums) // 2
+    if len(nums) % 2:
+        return round(float(nums[mid]), 4)
+    return round((nums[mid - 1] + nums[mid]) / 2, 4)
+
+def _win_rate_fraction(value: Any, win_count: Any = None) -> Optional[float]:
+    """胜率归一到 0~1 小数；>1 时区分「历史百分数刻度」与「旧算式假象」。
+
+    ⚠️ 2026-11-07 复核：全库 65 行 `win_rate>1` **全部恰好等于 `win_count`**——这是旧公式
+    `won / effective` 在 effective==1 时的产物（111.0 其实是 111 笔盈利），不是百分数。
+    盲除 100 会把 23.0 显示成「23%」（真实 50.56%），比显示 0% 更容易骗人。
+    但只要 `>1` 又不等于 win_count，就仍然按历史百分数刻度处理（9.0 = 9%），
+    保留 Plan 3 那层「别把 11% 显示成 1100%」的保护。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v <= 1:
+        return v
+    if win_count is not None:
+        try:
+            if abs(v - float(win_count)) < 1e-9:
+                return None     # 与盈利笔数完全相等 → won/1 假象，不可用
+        except (TypeError, ValueError):
+            pass
+    return v / 100.0
 
 
 def update_backtest_progress(run_id: str, current: int, total: int, pct: float):
@@ -81,6 +126,8 @@ class RunBacktestRequest(BaseModel):
     t_plus_1: bool = True
     lot_size: int = 100
     adjust_type: str = 'qfq'
+    price_limit_mode: str = ''        # P0 涨跌停拦截口径：'' = 用全局配置；enforce / warn / off
+    entry_timing: str = 'next_open'   # next_open = 次日开盘（默认）；same_close = 当日收盘（尾盘口径）
     stop_loss: float = 0
     take_profit: float = 0
     trailing_stop: float = 0
@@ -106,9 +153,17 @@ def _run_backtest_async(run_id: str, config: dict):
         def on_progress(current, total, pct):
             update_backtest_progress(run_id, current, total, pct)
 
-        result = engine.run(config, run_id=run_id, progress_callback=on_progress)
+        result = engine.run(config, run_id=run_id, progress_callback=on_progress, origin='manual')
         _finish_backtest_progress(run_id, 'completed')
         # engine.run 内部会更新 status=completed
+
+        # 样本内外评判：后台补跑，不阻塞首屏（设计文档 §7；Plan 3 任务 4）
+        try:
+            from backtest.eval_runner import schedule_isoos_eval
+            schedule_isoos_eval(get_backtest_run(run_id) or {'run_id': run_id},
+                                get_backtest_result(run_id) or {})
+        except Exception as e:
+            logger.warning(f'[回测] {run_id} 评判调度失败: {e}')
     except Exception as e:
         _finish_backtest_progress(run_id, 'failed')
         update_backtest_run(
@@ -157,6 +212,19 @@ async def get_strategy_detail(strategy_id: str):
     return strategy
 
 
+@router.get('/strategies/{strategy_id}/lifecycle')
+async def get_strategy_lifecycle(strategy_id: str, run_limit: int = Query(50, ge=1, le=200)):
+    """一个策略的一生：回测记录 / 评判 / 前瞻跟踪 / 落地（设计文档 §9）。
+
+    一次请求返回四块，前端一屏渲染；只读，不触发任何回测或补数。
+    """
+    from server.backtest_service import build_strategy_lifecycle
+    data = await asyncio.to_thread(build_strategy_lifecycle, strategy_id, run_limit=run_limit)
+    if not data:
+        raise HTTPException(status_code=404, detail=f'策略不存在: {strategy_id}')
+    return data
+
+
 # ============================================================
 # 用户策略 CRUD
 # ============================================================
@@ -183,9 +251,17 @@ async def save_strategy(req: SaveStrategyRequest):
 
     # 校验 JSON 可编译
     try:
-        from backtest.json_compiler import compile_strategy
+        from backtest.json_compiler import compile_strategy, validate_strategy_json
         strategy_json_str = json.dumps(req.strategy_json, ensure_ascii=False)
+        problems = validate_strategy_json(strategy_json_str)
+        if problems:
+            raise HTTPException(
+                status_code=400,
+                detail='策略 JSON 不可执行，已拒绝保存：\n' + '\n'.join(f'- {p}' for p in problems),
+            )
         compile_strategy(strategy_json_str)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'策略 JSON 无效: {e}')
 
@@ -353,6 +429,8 @@ async def run_backtest(req: RunBacktestRequest):
         't_plus_1': req.t_plus_1,
         'lot_size': req.lot_size,
         'adjust_type': req.adjust_type,
+        'price_limit_mode': req.price_limit_mode,
+        'entry_timing': req.entry_timing,
         'stop_loss': req.stop_loss,
         'take_profit': req.take_profit,
         'trailing_stop': req.trailing_stop,
@@ -365,7 +443,7 @@ async def run_backtest(req: RunBacktestRequest):
     now = datetime.now()
     run_id = f'BT-{now.strftime("%Y%m%d")}-{uuid.uuid4().hex[:6].upper()}'
     from utils.cache.backtest_db import create_backtest_run
-    create_backtest_run(run_id, config)
+    create_backtest_run(run_id, config, origin='manual', ref_id='')
 
     # 后台线程执行
     thread = threading.Thread(
@@ -404,9 +482,20 @@ async def get_run_detail(run_id: str):
     result = get_backtest_result(run_id)
     trades = get_backtest_trades(run_id)
 
+    # 样本内外评判（设计文档 §7）：没评判过就是 None，前端显示「尚未评判」
+    evaluation = get_backtest_eval(run_id)
+    if evaluation:
+        for key in ['is_metrics_json', 'oos_metrics_json']:
+            if evaluation.get(key):
+                try:
+                    evaluation[key.replace('_json', '')] = json.loads(evaluation[key])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
     # 解析 JSON 字段
     if result:
-        for key in ['equity_curve_json', 'drawdown_curve_json', 'monthly_returns_json']:
+        for key in ['equity_curve_json', 'drawdown_curve_json', 'monthly_returns_json',
+                    'yearly_stats_json']:
             if result.get(key):
                 try:
                     result[key] = json.loads(result[key])
@@ -417,6 +506,7 @@ async def get_run_detail(run_id: str):
         'run': run,
         'result': result,
         'trades': trades,
+        'eval': evaluation,
     }
 
 
@@ -486,10 +576,10 @@ def build_run_kline(run_id: str):
     start_date = run['start_date']
     end_date = run['end_date']
 
-    from backtest.data_adapter import _load_stock_daily, _apply_adjustment
+    from backtest.data_adapter import _load_stock_daily
     df = _load_stock_daily(code, start_date, end_date, auto_heal=False)
-    if adjust in ('qfq', 'hfq') and df is not None and not df.empty:
-        df = _apply_adjustment(df, code, adjust)
+    # 口径声明（P0 §11.8.3）：库内为源侧预复权数据，运行时复权已停用，直通。
+    # （原 _apply_adjustment 会对预复权数据二重下调，已从本路径移除。）
 
     kline = []
     if df is not None and not df.empty:
@@ -545,6 +635,97 @@ async def get_run_kline(run_id: str):
     data = build_run_kline(run_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f'回测记录不存在: {run_id}')
+    return data
+
+
+class RerunRunRequest(BaseModel):
+    reason: str = ''
+
+
+@router.post('/runs/{run_id}/rerun')
+async def rerun_backtest(run_id: str, req: RerunRunRequest = RerunRunRequest()):
+    """按原参数重跑一次（补数之后用）。新 run 用 ref_id 指回原 run。"""
+    run = get_backtest_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f'回测记录不存在: {run_id}')
+    try:
+        config = json.loads(run.get('config_json') or '{}')
+    except (json.JSONDecodeError, TypeError):
+        config = {}
+    if not config.get('code') or not config.get('strategy_id'):
+        raise HTTPException(status_code=400, detail='原记录缺少 code/strategy_id，无法重跑')
+    config['origin'] = 'manual'
+    config['ref_id'] = run_id
+    new_run_id = f'BT-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}'
+    config['run_id'] = new_run_id
+    # origin/ref_id 必须走关键字参数：create_backtest_run 不读 config 里的同名键
+    create_backtest_run(new_run_id, config, origin='manual', ref_id=run_id)
+    _backtest_progress[new_run_id] = {'current': 0, 'total': 0, 'pct': 0, 'status': 'pending'}
+    threading.Thread(target=_run_backtest_async, args=(new_run_id, config), daemon=True,
+                     name=f'backtest-rerun-{new_run_id}').start()
+    return {'run_id': new_run_id, 'status': 'pending', 'rerun_of': run_id, 'reason': req.reason}
+
+
+class RerunWithRequest(BaseModel):
+    # 三个字段都可缺省：只传 code = 换标的；只传区间 = 同标的换区间重跑
+    code: str = ''
+    start_date: str = ''
+    end_date: str = ''
+
+
+@router.post('/runs/{run_id}/rerun-with')
+async def rerun_with(run_id: str, req: RerunWithRequest):
+    """换个标的验证（设计 §10）：同策略同参数，只换标的重跑一次做外部验证。
+
+    config 里 code / stock_name / asset_type 被覆盖；start_date / end_date 只在
+    请求里传了非空值时才覆盖（不传就沿用原区间，否则两次回测的区间不同就没法比）。
+    其余参数（策略、初始资金、手续费、滑点…）原样保留——只变「标的」这一个自变量，
+    两次结果才可比。
+    """
+    run = get_backtest_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f'回测记录不存在: {run_id}')
+    try:
+        config = json.loads(run.get('config_json') or '{}')
+    except (json.JSONDecodeError, TypeError):
+        config = {}
+    # 不传 code 就沿用原标的（等价于「只换区间重跑」），两者都没有才算缺参
+    code = (req.code or config.get('code') or run.get('code') or '').strip()
+    if not code:
+        raise HTTPException(status_code=400, detail='缺少 code，无法换标的验证')
+    if not config.get('strategy_id'):
+        raise HTTPException(status_code=400, detail='原记录缺少 strategy_id，无法换标的验证')
+    config['code'] = code
+    config['stock_name'] = _lookup_stock_names([code]).get(code, '')
+    config['asset_type'] = _auto_detect_asset_type(code)
+    if req.start_date:
+        config['start_date'] = req.start_date
+    if req.end_date:
+        config['end_date'] = req.end_date
+    config['origin'] = 'manual'
+    config['ref_id'] = run_id
+    new_run_id = f'BT-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}'
+    config['run_id'] = new_run_id
+    # origin/ref_id 必须走关键字参数：create_backtest_run 不读 config 里的同名键
+    create_backtest_run(new_run_id, config, origin='manual', ref_id=run_id)
+    _backtest_progress[new_run_id] = {'current': 0, 'total': 0, 'pct': 0, 'status': 'pending'}
+    threading.Thread(target=_run_backtest_async, args=(new_run_id, config), daemon=True,
+                     name=f'backtest-verify-peer-{new_run_id}').start()
+    return {'run_id': new_run_id, 'status': 'pending', 'rerun_of': run_id,
+            'code': code, 'stock_name': config['stock_name'], 'asset_type': config['asset_type']}
+
+
+@router.get('/strategies/{strategy_id}/peer-candidates')
+async def get_peer_candidates(strategy_id: str,
+                              code: str = Query(default='', description='已跑过的标的（用于取同行业）'),
+                              limit: int = Query(3, ge=1, le=20)):
+    """「换个标的验证」候选池（设计 §10）：同行业优先，行业不可用回退持仓 ∪ 自选。
+
+    只读本地库（market_data.db / stock_radar.db），不触发任何回测。
+    """
+    from backtest.peer_candidates import resolve_peer_candidates
+    data = resolve_peer_candidates(code, limit=limit)
+    data['strategy_id'] = strategy_id
     return data
 
 
@@ -729,7 +910,7 @@ async def run_batch_backtest(req: RunBatchBacktestRequest):
             'strategy_name': strategy['name'],
             'params': req.params,
         }
-        create_backtest_run(run_id, per_code_config)
+        create_backtest_run(run_id, per_code_config, origin='batch', ref_id=batch_id)
         items_meta.append({'code': code, 'asset_type': asset_type, 'run_id': run_id})
     create_batch_items(batch_id, items_meta)
 
@@ -826,6 +1007,71 @@ async def get_batch_detail(batch_id: str):
     return {'batch': batch, 'items': items}
 
 
+@router.get('/batches/{batch_id}/validation')
+async def get_batch_validation(batch_id: str):
+    """批量验证卡（设计 §10）：同一策略在一批标的上的外部验证统计。
+
+    ⚠️ 三档口径（不能合并）：
+    - 有效 valid：有结果 + 体检可评判（health ∈ ok/low_sample）+ 胜率 > 50% + 样本 >= 5 笔
+    - 弱 weak：有结果 + 体检可评判，但没达标——是「有结果但没达标」，不是「无效」
+    - 无法评判 unscored：有结果但 health 不可评判（数据缺口 / K 线不足 / 出错），
+      此时「没达标」不等于策略不行
+    中位数只对非 None 项取（缺项的标的直接跳过，不按 0 计入）。
+    """
+    batch = get_batch(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail=f'批次不存在: {batch_id}')
+
+    items = [it for it in get_batch_items(batch_id) if it.get('status') == 'completed']
+    names = _lookup_stock_names([it['code'] for it in items])
+    health_map = get_result_health_map([it.get('run_id') for it in items])
+
+    rows = [{
+        'code': it['code'],
+        'name': names.get(it['code'], ''),
+        'run_id': it.get('run_id') or '',
+        'health': health_map.get(it.get('run_id') or '', ''),
+        'total_return': it.get('total_return'),
+        'annual_return': it.get('annual_return'),
+        'sharpe_ratio': it.get('sharpe_ratio'),
+        'max_drawdown': it.get('max_drawdown'),
+        'win_rate': _win_rate_fraction(it.get('win_rate'), it.get('win_count')),
+        'trade_count': it.get('trade_count'),
+    } for it in items]
+
+    scored = [r for r in rows if r['health'] in VALIDATION_SCORED_HEALTH]
+    valid = [r for r in scored
+             if (r['win_rate'] if r['win_rate'] is not None else 0) > VALIDATION_WIN_RATE
+             and (r['trade_count'] or 0) >= VALIDATION_MIN_TRADES]
+
+    if valid and len(valid) == 1 and len(rows) >= 3:
+        only = valid[0]
+        label = f'{only["name"]}({only["code"]})' if only['name'] else only['code']
+        hint = (f'只在 {label} 上有效（共 {len(rows)} 只有结果）'
+                f'——可能是过拟合到这一只票，建议换同行业标的再验证')
+    elif not valid and rows:
+        hint = (f'没有任何标的达到「胜率 > {VALIDATION_WIN_RATE:.0%} 且样本 >= '
+                f'{VALIDATION_MIN_TRADES} 笔」，这个策略当前形态站不住')
+    else:
+        hint = ''
+
+    return {
+        'batch_id': batch_id,
+        'strategy_id': batch.get('strategy_id') or '',
+        'strategy_name': batch.get('strategy_name') or '',
+        'code_count': batch.get('code_count') or 0,
+        'completed_count': len(rows),
+        'valid_count': len(valid),
+        'weak_count': len(scored) - len(valid),
+        'unscored_count': len(rows) - len(scored),
+        'median_sharpe': _median([r['sharpe_ratio'] for r in rows]),
+        'median_win_rate': _median([r['win_rate'] for r in rows]),
+        'median_total_return': _median([r['total_return'] for r in rows]),
+        'hint': hint,
+        'items': rows,
+    }
+
+
 @router.get('/batches/{batch_id}/progress')
 async def stream_batch_progress(batch_id: str):
     """SSE 推送批次进度"""
@@ -915,7 +1161,7 @@ async def rerun_batch_item_endpoint(batch_id: str, req: RerunBatchItemRequest):
         'initial_cash': config.get('initial_cash') or batch.get('initial_cash') or 100000,
     }
     from utils.cache.backtest_db import create_backtest_run
-    create_backtest_run(new_run_id, config)
+    create_backtest_run(new_run_id, config, origin='batch', ref_id=batch_id)
 
     # 标记 item 为 pending + 初始化 batch 进度（触发 SSE 推送）
     update_batch_item(
@@ -1033,7 +1279,7 @@ async def rerun_failed_items_endpoint(batch_id: str, req: RerunFailedRequest = R
             'end_date': config.get('end_date') or batch.get('end_date') or '2026-06-01',
             'initial_cash': config.get('initial_cash') or batch.get('initial_cash') or 100000,
         }
-        create_backtest_run(new_run_id, per_code_config)
+        create_backtest_run(new_run_id, per_code_config, origin='batch', ref_id=batch_id)
         # 失败 item 重置为 pending，替换为新 run_id
         update_batch_item(
             batch_id, code,
@@ -1289,7 +1535,7 @@ async def run_multi_backtest(req: RunMultiBacktestRequest):
                 'strategy_id': sid, 'strategy_name': sname,
                 'params': strat_params,
             }
-            create_backtest_run(run_id, per_code_config)
+            create_backtest_run(run_id, per_code_config, origin='multi', ref_id=multi_id)
             items_meta.append({'code': code, 'asset_type': asset_type, 'run_id': run_id})
             all_items.append({
                 'strategy_id': sid, 'code': code,

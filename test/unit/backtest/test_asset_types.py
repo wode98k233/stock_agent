@@ -44,6 +44,41 @@ class TestAssetTypeCommission:
         comm_info = cerebro.broker.comminfo[None]
         assert comm_info.p.stamp_tax == 0
 
+    def test_setup_broker_stock_keeps_stamp_tax(self):
+        """个股仍按用户传入的印花税（默认万五）——ETF 分支不得污染个股。"""
+        import backtrader as bt
+        from backtest.a_stock_broker import setup_broker
+
+        cerebro = bt.Cerebro()
+        config = {
+            'initial_cash': 100000,
+            'code': '600519',
+            'commission': 0.0003,
+            'min_commission': 5.0,
+            'stamp_tax': 0.0005,
+            'transfer_fee': 0.00001,
+            'asset_type': 'stock',
+        }
+        with patch('backtest.a_stock_broker._lookup_stock_name', return_value='贵州茅台'):
+            setup_broker(cerebro, config)
+        comm_info = cerebro.broker.comminfo[None]
+        assert comm_info.p.stamp_tax == 0.0005
+
+    def test_setup_broker_etf_limit_pct_is_none(self):
+        """ETF 走 etf_limit_pct 显式入口：当前恒 None（10%/20% 无法可靠区分，默认不拦）。"""
+        import backtrader as bt
+        from backtest.a_share_rules import etf_limit_pct
+        from backtest.a_stock_broker import setup_broker
+
+        assert etf_limit_pct('510300') is None
+        assert etf_limit_pct('588000') is None
+
+        cerebro = bt.Cerebro()
+        setup_broker(cerebro, {
+            'initial_cash': 100000, 'code': '510300', 'asset_type': 'etf',
+        })
+        assert cerebro.broker.rule_ctx['limit_pct'] is None
+
 
 class TestMarketDetection:
     """市场类型检测测试"""

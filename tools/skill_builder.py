@@ -10,6 +10,7 @@ from functools import wraps
 from typing import Callable, Any, Dict, Type, Optional
 from langchain_core.tools import tool
 import json
+import re
 import traceback
 import logging
 import inspect
@@ -19,6 +20,34 @@ logger = logging.getLogger("radar.skill_builder")
 
 # 用于标记工具函数的装饰器
 _skill_tool_mark = "__is_skill_tool__"
+# 拆分后的 usage_guide 挂在函数上的属性名（PRD-A9 §2.3.2）
+_usage_guide_mark = "__usage_guide__"
+
+# description 长度上限（中文���符）。超限只报告不截断——迁移靠重排空行分段。
+DESC_SOFT_LIMIT = 60
+
+_SPLIT_RE = re.compile(r"\n\s*\n")
+
+
+def split_docstring(doc: str | None) -> tuple[str, str]:
+    """docstring 第一段 → description；其余段落 → usage_guide。
+
+    约定（见 docs/superpowers/specs/2026-10-12-docstring-split-and-activate-skill-design.md §1）：
+    空行分段，第一段是「一句话动词 + 作用对象」，进 tools 数组的 description；
+    数据源回落、口径边界、返回结构、易错点等一律进 usage_guide，按需投递。
+
+    这样 51 个工具的 description 可以压到 ~1.7K token（现状 ~4.1K），
+    而完整口径一条不丢——只是从「每次请求都带」改成「激活该技能时才带」。
+
+    ⚠️ 只做「移动」不做「改写」：usage_guide 与 docstring 原文逐字一致，
+    便于回溯核对。
+    """
+    if not doc:
+        return "", ""
+    parts = [p.strip() for p in _SPLIT_RE.split(doc.strip()) if p.strip()]
+    if not parts:
+        return "", ""
+    return parts[0], "\n\n".join(parts[1:])
 
 
 _USAGE_ERRORS = (ValueError, TypeError, KeyError, AttributeError,
@@ -40,6 +69,13 @@ def skill_tool(func: Callable) -> Callable:
     2. 自动捕获异常并返回标准错误格式
     3. 自动序列化返回结果为 JSON
     4. 自动记录工具调用日志
+    5. 按空行分段拆分 docstring：首段作 description，余段存 __usage_guide__
+
+    docstring 约定：
+        \"\"\"获取个股资金流向（主力/散户/净流入）。      <- 首段 -> description
+                                                   （空行分隔）
+        主源 AKShare；取不到时回落问财。                <- 其余段 -> usage_guide
+        \"\"\"
 
     示例：
         @skill_tool
@@ -80,11 +116,19 @@ def skill_tool(func: Callable) -> Callable:
                 msg += "。使用方式错误，请勿重试"
             return msg
 
-    # 保留原始函数的文档字符串
-    wrapper.__doc__ = func.__doc__
+    # 保留原始函数的文档字符串（描述 + 拆出的 usage_guide）
+    desc, guide = split_docstring(func.__doc__)
+    wrapper.__doc__ = desc or func.__doc__
+    if guide:
+        setattr(wrapper, _usage_guide_mark, guide)
     # 标记这是一个技能工具
     setattr(wrapper, _skill_tool_mark, True)
     return wrapper
+
+
+def get_usage_guide(func: Callable) -> str:
+    """取工具函数 docstring 中拆出来的 usage_guide（无则空串）。"""
+    return getattr(func, _usage_guide_mark, "") or ""
 
 
 class SkillBuilder:

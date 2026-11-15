@@ -149,24 +149,36 @@ async def _run_step_with_retry(state, step_info, tools, registry, ctx, budget, e
             return budget_updates, exempt_window
 
         # 构建上下文并执行子图
-        context_msgs = []
+        #
+        # ⚠️ PRD-A11 FR-10/11：内层 agent 必须与主链/planner **同前缀形态**
+        #    `[REACT][history][guidance][user(raw input)] + 尾部(执行规则+技能详情+约束+步骤指令)`。
+        #    旧形态把技能详情/约束插在 history 与 user 之间、且以 `("user", instruction)` 收尾，
+        #    又因未传 tail_system 走 graph.py 的 else 分支 → messages[0] = 每步不同的
+        #    「执行以下任务：{purpose}」system ≠ REACT，planner 预热的前缀一步都拿不到、
+        #    跨步也互不共享（实测每步首调命中 0%）。
+        #    任务指令随尾部一起走（位置不影响遵循，见 graph.py 同款说明）。
+        tail_extra: list[str] = []
 
         # L1 渐进披露：注入当前步骤涉及技能的工具用法详情（多技能逐个注入，与 Unified 对齐）
         for _sk in (step_info.get("skills") or ([skill_name] if skill_name else [])):
             tools_detail = SkillPromptBuilder.build_tools_detail_prompt(registry, _sk)
             if tools_detail:
-                context_msgs.append(("system", f"可用工具详情：\n{tools_detail}"))
+                tail_extra.append(f"可用工具详情：\n{tools_detail}")
 
-        # 注入对话历史
+        user_constraints = state.get("user_constraints", "")
+        if user_constraints:
+            tail_extra.append(f"[用户约束] {user_constraints}")
+
+        # 步骤指令（旧形态是 user 消息，现随尾部走）
+        tail_extra.append(f"[当前步骤指令] {step_info['instruction']}")
+
+        # 上下文头部：history + 用户原话（与 planner / 内层 guidance 同源，保证逐字节一致）
+        context_msgs = []
         if ctx.memory and ctx.memory.enabled:
             history = ctx.memory.get_history()
             if history:
                 context_msgs.extend(history)
-
-        context_msgs.append(("user", step_info["instruction"]))
-        user_constraints = state.get("user_constraints", "")
-        if user_constraints:
-            context_msgs.append(("system", f"[用户约束] {user_constraints}"))
+        context_msgs.append(("user", state["input"]))
 
         try:
             result = await run_react_subgraph(
@@ -174,12 +186,17 @@ async def _run_step_with_retry(state, step_info, tools, registry, ctx, budget, e
                 tools=list(tools),
                 step_purpose=purpose,
                 context_messages=context_msgs,
+                # 角色规则 + 技能详情 + 约束 + 步骤指令一起放尾部
+                tail_system="\n\n".join(tail_extra),
                 max_iterations=Config.PLAN_EXECUTOR_TOOL_CALLS,
                 budget=budget,
                 logger=logger,
                 metadata={"plan_context": "executor_step"},
                 failed_tools=[],
                 template_id=state.get("template_id"),
+                # guidance 的 user_input 用**用户原话**（= planner 用的同一个 state["input"]），
+                # 与内层逐字节相同 → planner 才能预热本 agent 首调。
+                guidance_input=state["input"],
             )
 
             result_text = result["final_result"]
@@ -352,6 +369,7 @@ async def execute_step(state: PlanExecute, ctx: AgentContext, run_config=None):
         ctx.skill_registry, step_skills,
         selected_skills=state.get("selected_skills", []),
         logger=logger, log_tag="E", fallback_skill=step_info["skill_name"],
+    for_binding=True,
     )
     logger.debug("E", f"加载工具: {[t.name for t in tools]}")
     _record_skill_activate(step_info["skill_name"], [t.name for t in tools], "plan_step", step_info["step_num"])

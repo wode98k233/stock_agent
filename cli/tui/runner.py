@@ -109,19 +109,28 @@ class CliAgentRunner:
             registry = SkillRegistry(logger, memory_mgr, register)
             callback = self._make_callback(task_id, self._start_time)
 
-            response = await agent.run(
-                user_input,
-                registry,
-                memory_mgr,
-                logger,
-                progress_callback=callback,
+            # 策略会话闸门（模式无关）：命中则本轮不进任何模式的图（设计文档 §5.1）
+            from agents.shared.strategy_gate import intercept_strategy_turn
+            _gate = await intercept_strategy_turn(
+                user_input=user_input, dialog_uuid="local", mode=ctx.agent_mode,
+                progress_callback=callback, logger=logger, memory=memory_mgr,
             )
-
-            if not response and ctx.agent_mode == "scenario":
-                agent = AgentFactory.get("react_stock")
+            if _gate is not None:
+                response = _gate
+            else:
                 response = await agent.run(
-                    user_input, registry, memory_mgr, logger, progress_callback=callback,
+                    user_input,
+                    registry,
+                    memory_mgr,
+                    logger,
+                    progress_callback=callback,
                 )
+
+                if not response and ctx.agent_mode == "scenario":
+                    agent = AgentFactory.get("react_stock")
+                    response = await agent.run(
+                        user_input, registry, memory_mgr, logger, progress_callback=callback,
+                    )
 
             elapsed = time.time() - self._start_time
 

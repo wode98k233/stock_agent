@@ -17,7 +17,7 @@ category: 策略研究
 - 依赖文件：../../backtest/strategy_research.py、../../server/routes/strategy_research.py
 
 ## 目录层信息
-- 关键参数：研究想法（必填）、标的代码（可选，默认 600519）、任务标识（查进度时必填）
+- 关键参数：研究想法（必填）、标的代码（可选，省略则先回问用户，无默认值）、成交口径（可选，默认次日开盘）、任务标识（查进度时必填）
 - 核心目标：把想法变成经 OOS 验证的策略研究结论（不构成投资建议）
 
 ## 工具列表
@@ -26,8 +26,9 @@ category: 策略研究
 - 调用入口：main.py.build_tools 中的 create_strategy_research
 - 参数约束：
   - idea: str（必填）- 自然语言交易想法，如「DPO 底部上穿 MADPO + KDJ 低位共振时买入」
-  - universe: str（可选，默认600519）- 6 位 A 股代码
+  - universe: str（可选，无默认值）- 6 位 A 股代码；省略或非法时返回 need_clarify，先问清再跑
   - days: int（可选，默认1095）- 回测区间天数（从最近交易日起倒数）
+  - entry_timing: str（可选，默认 next_open）- 成交口径：next_open 次日开盘 / same_close 当日收盘（「尾盘买入」）
 
 ### 工具2：get_strategy_research_status
 - 功能：查询策略研究任务的进度与结果（状态/轮次摘要/最优策略卡）

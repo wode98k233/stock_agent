@@ -363,3 +363,49 @@ def test_report_templates_api_rejects_path_traversal(tmp_path, monkeypatch):
         res = client.get("/api/report-templates/bad")
 
     assert res.status_code == 400
+
+
+def test_message_turn_type_validated_and_forwarded(tmp_path, monkeypatch):
+    """「本轮类型」必须原样传到 runner：普通(chat) 靠它硬性跳过策略闸门。
+
+    - 非法值直接 400（不能静默当自动识别，否则用户以为选了普通、实际进了策略）；
+    - 合法值（大小写/空格混杂）归一后传给 runner。
+    """
+    from fastapi.testclient import TestClient
+
+    from server.agent_runner import AgentRunResult
+    from server.app import create_app
+    from server.runtime import TaskRuntime
+    from server.storage import WebStorage
+
+    seen: list[str] = []
+
+    async def fake_runner(*, user_input, mode, context, progress_callback, turn_type="auto"):
+        seen.append(turn_type)
+        return AgentRunResult(response="ok", log_uuid="log", log_file="logs/log.log")
+
+    state = SimpleNamespace(
+        storage=WebStorage(tmp_path / "web.db"),
+        runtime=TaskRuntime(fake_runner),
+        agent_context=SimpleNamespace(),
+    )
+    _patch_agent_factory(monkeypatch, ["react_stock"])
+    app = create_app(state)
+
+    with TestClient(app) as client:
+        dialog_uuid = client.post("/api/dialogs", json={"title": "t", "mode": "react_stock"}).json()["dialog_uuid"]
+        url = f"/api/dialogs/{dialog_uuid}/messages"
+
+        bad = client.post(url, json={"content": "现在能买吗", "turn_type": "deep_report"})
+        assert bad.status_code == 400
+        assert "turn_type" in bad.json()["detail"]
+
+        ok = client.post(url, json={"content": "现在能买吗", "turn_type": " CHAT "})
+        assert ok.status_code == 200
+        task_id = ok.json()["task_id"]
+
+        # 走完 SSE 流，确保 task 真的跑到了 runner
+        with client.stream("GET", f"/api/tasks/{task_id}/events") as stream:
+            list(stream.iter_text())
+
+    assert seen == ["chat"]

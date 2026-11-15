@@ -128,7 +128,11 @@ def analyze_sentiment(news_list: list, memory_mgr: MemoryManager = None, logger=
     ]
 
     with memory_mgr.temp_disable() if memory_mgr else nullcontext():
-        result = llm_json_with_retry(llm, messages, logger, label="sentiment")
+        # 归因（PRD-A11 FR-7）：本调用跑在工具执行内部，trace 里 node 是一级图节点
+        # `tools`，看不出是哪类子调用，补 purpose 便于归因与缓存分析。
+        from utils.logger import with_trace_node
+        result = llm_json_with_retry(llm, messages, logger, label="sentiment",
+                                     metadata=with_trace_node(None, "sentiment"))
         if result and 'total_score' in result:
             logger.info(f"情感分析完成 | 总分: {result['total_score']} | 结论: {result.get('conclusion', '?')}")
             return result

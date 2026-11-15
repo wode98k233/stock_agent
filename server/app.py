@@ -1,6 +1,7 @@
 """FastAPI Web 服务入口。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -66,6 +67,16 @@ def create_app(state: WebAppState | None = None):
             ).start()
         except Exception:
             logger.debug("对话评审引擎预热线程启动失败（忽略）", exc_info=True)
+        # 残留 running 的策略研究任务收敛为 interrupted（可续跑）。
+        # 表结构已由 get_state() → bootstrap_web → init_common → ensure_cache_tables 建好；
+        # 表很小（一行一个任务），但放到线程里跑，启动关键路径不碰 SQLite 锁。
+        try:
+            from backtest.strategy_research import mark_interrupted_runs
+            count = await asyncio.to_thread(mark_interrupted_runs)
+            if count:
+                logger.info("策略研究：%s 个中断任务已标记为 interrupted（可续跑）", count)
+        except Exception:
+            logger.debug("策略研究中任务收敛失败（忽略）", exc_info=True)
         try:
             yield
         finally:
@@ -114,6 +125,24 @@ def create_app(state: WebAppState | None = None):
 
     app.mount("/static", RevalidatingStaticFiles(directory=str(static_dir)), name="static")
 
+    # 第三方前端库体检：不报错、只静默降级，所以必须在这里提示一次。
+    # 这 5 个库不入库（合计约 3.5MB，mermaid 单个就 3.3MB），首次运行需
+    # `python scripts/ops/fetch_static_libs.py` 拉取；缺失时：
+    # markdown 变纯文本、代码块无高亮、mermaid 不渲染、导出图片失败。
+    _lib_missing = [
+        _n for _n in (
+            "marked.min.js", "mermaid.min.js", "highlight.min.js",
+            "html-to-image.js", "github-dark.min.css",
+        )
+        if not (static_dir / "lib" / _n).is_file()
+    ]
+    if _lib_missing:
+        logger.warning(
+            "前端静态库缺失：%s → 对话 markdown/代码高亮/mermaid/导出图片会降级；"
+            "运行 `python scripts/ops/fetch_static_libs.py` 补齐（详见 server/static/LIB-README.md）",
+            ", ".join(_lib_missing),
+        )
+
     # 路由注册推迟到 lifespan（register_routes），避免 import server.app 时拉入重依赖
     return app
 
@@ -130,11 +159,12 @@ def register_routes(app):
 
     module_names = [f"server.routes.{m}" for m in (
         "static", "meta", "dialogs", "tasks", "traces", "config", "notifications",
-        "skills", "report_templates", "calendar", "watchlist", "charts", "data_tasks",
+        "skills", "report_templates", "calendar", "events", "watchlist", "charts", "data_tasks",
         "backtest", "group_messages", "dashboards", "news", "flow", "monitor", "eval",
         "memory", "logs", "signal_eval", "quality", "market_monitor", "portfolio",
         "strategy_research", "llm_cache", "data_monitor", "short_line", "market_dashboard",
-        "thesis", "crowding", "scans", "reviews", "overview",
+        "thesis", "crowding", "scans", "reviews", "overview", "strategy_intent",
+        "pricing", "capability", "factor", "deep_reports", "funds", "uploads",
     )]
     for name in module_names:
         app.include_router(importlib.import_module(name).router)

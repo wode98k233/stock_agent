@@ -132,12 +132,19 @@ def test_get_stock_history_ignores_invalid_cached_history(monkeypatch, mock_logg
 def test_fetcher_stock_hist_falls_back_when_source_missing_close(monkeypatch):
     """历史 K 线数据源返回缺字段结果时，应继续尝试下一个数据源。"""
     import pandas as pd
+    import tools.fetcher as fetcher_pkg
     import tools.fetcher.base as fetcher_base
     from tools.fetcher import ak_stock_hist
     from tools.fetcher.base import DataSource, DataSourceManager, _request_failed_sources
 
     # 跳过重试等待，加速测试
     monkeypatch.setattr(fetcher_base.time, "sleep", lambda _: None)
+
+    # ⚠️ 必须先短路「延迟注册」：ak_stock_hist 内部会调 _ensure_initialized()，
+    # 它在首次运行时把**真实**数据源（MXData 等）注册进 DataSourceManager._sources，
+    # 覆盖下面 patch 的假数据源 → 真实源发起联网请求 → 被 conftest 的联网守卫拦成失败。
+    # 置 _initialized=True 让注册整体跳过（用例只关心降级逻辑，不需要真实源）。
+    monkeypatch.setattr(fetcher_pkg, "_initialized", True, raising=False)
 
     class BadHistorySource(DataSource):
         name = "bad_history"

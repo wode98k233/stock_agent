@@ -135,14 +135,18 @@
         `上周 ${d.prev_week_count ?? "—"} · <span class="${d.wow_pct >= 0 ? "qy-up" : "qy-down"}">${d.wow_pct >= 0 ? "+" : ""}${d.wow_pct}%</span>`;
       const wr = d.win_rate_after_cost || {};
       const cost = d.avg_cost_per_report || {};
+      const tok = d.avg_tokens_per_report || {};
+      // 单位是元（成本 / 计价 §8③）：token 口径保留在 hint 里，两者不可混读
       const costVal = cost.value == null ? na
-        : `${Number(cost.value).toLocaleString("zh-CN")} <span class="qy-unit">${this._esc(cost.unit || "tokens")}</span>`;
+        : `¥${Number(cost.value).toFixed(4)} <span class="qy-unit">元 / 份</span>`;
       const cards = [
         { star: true, label: "本周可验证结论（北极星）", value: vc == null ? na : String(vc), hint: wow || basisText },
         { label: "buy 类信号实现胜率（费后）", value: (wr && wr.value) == null ? na : (wr.value * 100).toFixed(1) + "%",
           hint: wr && wr.n ? `样本 n=${wr.n} · ${this._esc(wr.coverage || "")}` : "暂无 buy 类跟踪样本" },
         { label: "单报告平均成本", value: costVal,
-          hint: cost.n ? `token 口径估算 · 近 28 天 n=${cost.n}` : "暂无 trace 成本数据" },
+          hint: cost.n
+            ? `近 28 天 n=${cost.n}${cost.unpriced_runs ? ` · 另有 ${cost.unpriced_runs} 份未计价` : ""}${tok.value ? ` · 平均 ${Number(tok.value).toLocaleString("zh-CN")} token` : ""}`
+            : "暂无 trace 成本数据（检查 COST_TRACKING_ENABLED 与定价目录）" },
         { label: "语义缓存命中率", value: d.cache_hit_rate == null ? na : (d.cache_hit_rate * 100).toFixed(1) + "%",
           hint: d.cache_hit_rate == null ? "A8 语义缓存未开启（LLM_CACHE_ENABLED）" : "进程内计数 · 重启清零" },
       ];

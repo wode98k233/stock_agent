@@ -34,6 +34,7 @@ class MarketReviewSkill(SkillBuilder):
             get_stock_news as _news,
         )
         from tools.sentiment import analyze_sentiment
+        from tools.market_snapshot import build_market_snapshot as _snapshot
 
         self._get_limit_up_pool = _lup
         self._get_limit_break_pool = _lbp
@@ -43,6 +44,7 @@ class MarketReviewSkill(SkillBuilder):
         self._get_hot_stocks = _hot
         self._get_stock_news = _news
         self._analyze_sentiment = analyze_sentiment
+        self._build_market_snapshot = _snapshot
 
     # ── 盘面特色数据 ────────────────────────────────────────
 
@@ -75,6 +77,39 @@ class MarketReviewSkill(SkillBuilder):
     def get_hot_stocks(self, n: int = 10) -> list:
         """获取 A 股热股榜（24h 人气排名）。"""
         return self._get_hot_stocks(n, self.logger)
+
+    # ── 市场广度 ────────────────────────────────────────────
+
+    @skill_tool
+    def get_market_breadth(self) -> dict:
+        """获取沪深京全市场广度快照（全市场成交额/涨跌家数/涨停跌停，含上一交易日对比）。
+
+        口径与纪律（必须遵守）：
+        - amount 为沪深京三市全市场成交额合计（含北交所，单位：元，盘中为当日累计值）。
+          它不是任何指数的成交额：禁止用上证指数/深证成指/创业板指等指数成交额相加
+          或用它代替市场总量——指数成交额只代表其成分股。
+        - prev_amount 为上一交易日全市场成交额（同口径，经交易日历校验），可能为 null
+          （首次运行/缓存过期/上一交易日缺失）；为 null 时不得下无标签的量能定性结论——
+          可用带口径与来源标注的替代基准（如媒体口径）兜底并注明置信度打折，
+          无任何可比基准时只能写「缺少可比基准」。
+        - 盘中 amount 与 prev_amount（全天值）对比时必须写明折算方式（如「按半日折算」）。
+        - 全市场快照不可用时返回空对象 {}，不要反复重试；改用 iwc_query 补充确认。
+        - 涨停/跌停为「按各板块涨跌停价逐股复算」口径（dist.limit_up / dist.limit_down，含 ST）；
+          limit_up_excl_st / limit_down_excl_st 是剔 ST 后与东财官方涨停/跌停池对齐的口径。
+          禁止用「涨幅 >= 9.8%」一类阈值替代——创业板 20%、北交所 30%、低价股四舍五入后
+          主板可达 9.615%~12.000%，阈值法会双向失真。
+        """
+        from tools.fetcher.hithink_ds import HithinkDataSource
+
+        df = HithinkDataSource.get_spot_all()
+        names = {}
+        try:
+            from utils.cache.market_data_db import get_stock_name_map
+
+            names = get_stock_name_map()
+        except Exception:
+            pass
+        return self._build_market_snapshot(df, names) or {}
 
     # ── 新闻情感 ────────────────────────────────────────────
 

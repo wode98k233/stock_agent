@@ -337,3 +337,29 @@
 }
 
 
+
+/* ── 摘要卡（trace 存储瘦身产物，见 utils/agent_trace/payload.py）── */
+.tl-digest {
+  border: 1px solid var(--border, rgba(56,189,248,0.14));
+  border-left: 2px solid var(--warning, #fbbf24);
+  border-radius: 6px;
+  background: var(--surface2, rgba(21,29,46,0.9));
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.tl-digest-note { color: var(--text-dim, #94a3b8); font-size: 10px; line-height: 1.5; margin-bottom: 4px; }
+.tl-digest-sub { color: var(--warning, #fbbf24); font-size: 10px; font-weight: 600; margin: 6px 0 2px; letter-spacing: 0.4px; }
+.tl-digest-table { width: 100%; border-collapse: collapse; }
+.tl-digest-table td { padding: 2px 4px; vertical-align: top; border-bottom: 1px solid var(--border, rgba(56,189,248,0.14)); }
+.tl-digest-key { color: var(--accent, #38bdf8); white-space: nowrap; width: 1%; font-family: var(--font-mono, monospace); }
+.tl-digest-meta { color: var(--muted, #64748b); font-size: 10px; }
+.tl-digest-snippet {
+  color: var(--text-dim, #94a3b8);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 90px;
+  overflow: auto;
+  margin: 2px 0;
+}

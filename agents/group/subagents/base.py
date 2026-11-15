@@ -91,28 +91,48 @@ class SpecializedAgent:
         tools = merge_tools_for_skills(
             sr, self.assigned_skills,
             logger=logger or self._logger, log_tag="G",
+            for_binding=True,      # 这批工具要 bind 给子 Agent，full 档须全量（PRD-A11）
         )
         mx_tools = [t for t in tools if getattr(t, "name", "").startswith("mx_")]
         other_tools = [t for t in tools if not getattr(t, "name", "").startswith("mx_")]
         return mx_tools + other_tools
 
     def build_context(self, state: dict) -> list:
-        """从 GroupState 构建 context_messages"""
-        msgs = []
+        """上下文**头部** —— 与内层 agent 主链同形：`[REACT][history][guidance][user(原话)]`。
+
+        ⚠️ PRD-A11：原实现把**子 Agent 自己的角色提示**放 `messages[0]`、数据底版/约束/任务
+        夹在中间 → 与 agent 工具族**第 0 字节**就分叉，且技术/宏观/风险/传导链各写各的
+        messages[0] → 每个子 Agent 都从零冷启动（工具面已全量也救不了）。
+        现把角色提示与全部数据块**下沉到尾部**（见 :meth:`build_tail_system`），
+        头部只剩一条 user（用户原话）→ 子 Agent 之间、与跨 run 都能共享前缀。
+        """
+        return [("user", state["input"])]
+
+    def build_tail_system(self, state: dict) -> str:
+        """尾部：角色提示 + 数据底版 + 已收集/已解析数据 + 用户约束 + 数据需求 + 任务指令。
+
+        与 :meth:`build_context` 合起来覆盖原 `build_context` 的全部内容（只搬位置、不改文本），
+        由 `run_react_subgraph(tail_system=...)` 拼到 messages 末尾。
+        """
+        parts: list[str] = []
+
+        system_prompt = self.get_system_prompt()
+        if system_prompt:
+            parts.append(system_prompt)
 
         # 数据底版优先注入（DataCollector 自己不需要）
         data_doc = state.get("data_collection_doc", "")
         if data_doc and self.agent_type == "analysis":
-            msgs.append(("system", f"[数据底版] — 以下数据已由数据采集员统一收集，请直接使用:\n\n{data_doc}"))
+            parts.append(f"[数据底版] — 以下数据已由数据采集员统一收集，请直接使用:\n\n{data_doc}")
 
         if state.get("accumulated_data"):
-            msgs.append(("system", f"已收集的分析数据:\n{state['accumulated_data']}"))
+            parts.append(f"已收集的分析数据:\n{state['accumulated_data']}")
 
         if state.get("resolved_data"):
-            msgs.append(("system", f"已解析的依赖数据:\n{state['resolved_data']}"))
+            parts.append(f"已解析的依赖数据:\n{state['resolved_data']}")
 
         if state.get("constraints"):
-            msgs.append(("system", f"[用户约束] {state['constraints']}"))
+            parts.append(f"[用户约束] {state['constraints']}")
 
         # 数据需求提示
         template_id = state.get("template_id")
@@ -122,7 +142,7 @@ class SpecializedAgent:
                 template = load_template(template_id)
                 contract = template.get("data_contract", [])
                 if contract:
-                    parts = []
+                    lines = []
                     for item in contract:
                         desc = item.get("description", "")
                         fields = item.get("fields", [])
@@ -130,21 +150,17 @@ class SpecializedAgent:
                         line = f"  - {hard}: {desc}"
                         if fields:
                             line += f"（字段: {', '.join(fields)}）"
-                        parts.append(line)
-                    if parts:
-                        msgs.append(("system", "报告数据需求:\n" + "\n".join(parts)))
+                        lines.append(line)
+                    if lines:
+                        parts.append("报告数据需求:\n" + "\n".join(lines))
             except Exception:
                 pass
 
+        # 任务指令（用户问题已作头部 user，这里不重复）
         task_purpose = state.get("current_task_purpose", "")
-        msgs.append(("user", f"用户问题: {state['input']}\n\n请执行以下任务: {task_purpose}"))
+        parts.append(f"请执行以下任务: {task_purpose}")
 
-        # 系统提示
-        system_prompt = self.get_system_prompt()
-        if system_prompt:
-            msgs.insert(0, ("system", system_prompt))
-
-        return msgs
+        return "\n\n".join(parts)
 
     # ── 图节点接口 ──────────────────────────────────────────
 
@@ -230,6 +246,8 @@ class SpecializedAgent:
                 }
 
         context_msgs = self.build_context(state)
+        # PRD-A11：角色提示 + 数据底版 + 约束 + 任务指令全部下沉尾部（头部只留 user 原话）
+        tail_system = self.build_tail_system(state)
 
         # trace
         logger.phase(f"Agent[{step['step']}] {self.agent_name}")
@@ -246,12 +264,16 @@ class SpecializedAgent:
                     tools=self.load_tools(),
                     step_purpose=task_purpose,
                     context_messages=context_msgs,
+                    # 角色/数据/约束/任务一起放尾部（与 agent 主链 [REACT][history][guidance][user] 同形）
+                    tail_system=tail_system,
                     max_iterations=Config.PLAN_EXECUTOR_TOOL_CALLS,
                     budget=budget,
                     logger=logger,
                     metadata={"plan_context": "group_supervisor", "agent_name": self.agent_name},
                     template_id=state.get("template_id"),
                     rate_limiter=self._tool_rate_limiter,
+                    # guidance 用**用户原话**（与 planner / 其它子 Agent 同源）→ 两处逐字节相同
+                    guidance_input=state["input"],
                 ),
                 agent_name=self.agent_name,
                 logger=logger,

@@ -1002,3 +1002,55 @@ if __name__ == "__main__":
     print(f"结果: {passed} passed, {failed} failed out of {len(tests)}")
     if failed > 0:
         sys.exit(1)
+
+
+# ============================================================
+# build_llm_step_extra：调用方显式 label 优先（策略研发按轮次归因）
+# ============================================================
+
+def test_explicit_metadata_label_wins_over_purpose():
+    from utils.agent_trace.core import build_llm_step_extra
+
+    extra = build_llm_step_extra({}, {'purpose': 'strategy-generate',
+                                      'label': '第3轮-生成-重试1'})
+    assert extra['purpose'] == 'strategy-generate'
+    assert extra['label'] == '第3轮-生成-重试1'
+    assert extra['node'] == 'strategy-generate'
+
+
+def test_no_explicit_label_keeps_purpose_behaviour():
+    """不传 label 的既有调用方行为不变。"""
+    from utils.agent_trace.core import build_llm_step_extra
+
+    extra = build_llm_step_extra({}, {'purpose': 'strategy-generate'})
+    assert extra['label'] == 'strategy-generate'
+    assert '第' not in extra['label']
+
+
+def test_llm_end_writes_prefix_fingerprint_into_extra(tmp_path):
+    """prefix_sha256/prefix_bytes 从 llm_output 落到 steps.extra（缓存排查用）。"""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration
+    from utils.agent_trace.core import TraceRecorder
+
+    db = str(tmp_path / 'trace.db')
+    rec = TraceRecorder(db_path=db)
+    run_id = rec.start_run('test')
+    step_run_id = uuid.uuid4()
+    rec.on_llm_start({}, ['hi'], run_id=step_run_id, parent_run_id=run_id,
+                     metadata={'purpose': 'strategy-generate', 'label': '第2轮-生成'})
+    msg = AIMessage(content='ok')
+    resp = LLMResult(generations=[[ChatGeneration(message=msg)]],
+                     llm_output={'prefix_sha256': 'cafebabe0001', 'prefix_bytes': 4705})
+    rec.on_llm_end(resp, run_id=step_run_id)
+    rec.end_run(run_id)
+
+    import sqlite3
+    con = sqlite3.connect(db)
+    row = con.execute("SELECT extra FROM steps WHERE step_type='llm'").fetchone()
+    con.close()
+    assert row is not None
+    extra = json.loads(row[0])
+    assert extra['prefix_sha256'] == 'cafebabe0001'
+    assert extra['prefix_bytes'] == 4705
+    assert extra['label'] == '第2轮-生成'

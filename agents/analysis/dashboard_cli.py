@@ -1,4 +1,4 @@
-from agents.analysis.dashboard_schema import DashboardData
+from agents.analysis.dashboard_schema import DashboardData, DashboardEntry
 
 W = 56
 
@@ -71,6 +71,27 @@ _PRICE_COLS = [
 ]
 
 
+def _entry_text(entry: DashboardEntry) -> str:
+    """执行条件文案（与 Web 的 `_entryText` 同口径）。"""
+    if entry is None or entry.type == "none":
+        return "现价可执行"
+    if entry.type == "unverifiable":
+        return entry.note or "条件待人工确认"
+    lo, hi = entry.low, entry.high
+    if entry.type == "pullback":
+        if lo is not None and hi is not None:
+            return f"回踩 {lo}–{hi}"
+        if hi is not None:
+            return f"回踩 ≤{hi}"
+        return f"回踩 ≤{lo}"
+    return f"站稳 {lo if lo is not None else hi}"
+
+
+def _pct(confidence: float) -> str:
+    """置信度百分比（与 Web 的 Math.round 同口径：四舍五入，非银行家舍入）。"""
+    return f"{int(confidence * 100 + 0.5)}%"
+
+
 def format_dashboard_cli(data: DashboardData) -> str:
     lines: list[str] = []
     bg, badge_text, label, dc = _DECISION_META[data.decision_type]
@@ -95,6 +116,33 @@ def format_dashboard_cli(data: DashboardData) -> str:
         f"{_c('bold', '情绪')}: {_c(sent_color, str(data.sentiment_score))} {sent_label}"
     )
     lines.append("")
+
+    # 多实体方向决策（有 groups 时逐组列出；无则整段跳过）
+    if data.groups:
+        lines.append(f"  🧭 {_c('bold', '方向决策')}")
+        for g in data.groups:
+            _, _, label, dc = _DECISION_META.get(g.decision, _DECISION_META["hold"])
+            conf = f" {_pct(g.confidence)}" if g.confidence is not None else ""
+            bits = [f"{_c('bold', g.key)}"]
+            if g.horizon:
+                bits.append(g.horizon)
+            bits.append(_c(dc, f"{label}{conf}"))
+            if g.stance:
+                bits.append(g.stance)
+            lines.append("  " + " · ".join(bits))
+            extra = []
+            if g.signal_symbol:
+                extra.append(f"对象 {g.signal_symbol} {g.signal_name or ''}".strip())
+            if g.position:
+                extra.append(f"仓位 {g.position}")
+            extra.append(f"触发 {_entry_text(g.entry)}")
+            if g.invalidation:
+                extra.append(f"失效 {g.invalidation}")
+            if extra:
+                lines.append("     " + " · ".join(extra))
+            if g.note:
+                lines.append("     备注 " + g.note)
+        lines.append("")
 
     # 核心结论
     lines.append(f"  💬 {_c('bold', data.core_verdict)}")

@@ -72,6 +72,9 @@ async def test_clean_requires_confirm(cmd, monkeypatch):
     import utils.data_monitor as real_dbm
     fake = FakeDBM()
     monkeypatch.setattr(real_dbm, "cleanup_preview", fake.cleanup_preview)
+    # cleanup_run 必须一起 patch：它会走真实的 utils/data_monitor，
+    # small_logs 规则会对每个命中项 os.remove（会删掉真实 logs/ 下的文件）。
+    monkeypatch.setattr(real_dbm, "cleanup_run", fake.cleanup_run)
     res = await cmd.execute(None, ["clean"], {})
     assert res.ok
     assert res.requires_confirm is True

@@ -55,8 +55,10 @@ TABLES = [
         updated_at        TEXT NOT NULL,
         PRIMARY KEY (thesis_id, trade_date)
     )""",
-             indexes=["CREATE INDEX IF NOT EXISTS idx_thesis_snapshot_date"
-                      " ON thesis_snapshot(thesis_id, trade_date DESC)"]),
+             # 不需要 (thesis_id, trade_date) 的普通索引：主键就是这两列，
+             # `where thesis_id=? order by trade_date desc` 由 PK 反向扫描即可。
+             # 详见 utils/db_schema/tables/market_data.py::stock_daily 的说明。
+             indexes=[]),
 
     TableDef(name="thesis_alert", ddl="""CREATE TABLE IF NOT EXISTS thesis_alert (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,

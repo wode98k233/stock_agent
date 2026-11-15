@@ -32,23 +32,50 @@ async def classify_input(user_input: str, memory, llm, logger, budget=None, meta
     except Exception:
         title_request = None
 
+    # 精简输入：分类只需要 [背景信息]/[用户问题]/[市场状态]/## 用户画像，
+    # [相关记忆片段] 占本次输入 95%（实测 ≈2,929 token）却对「是否股票相关」无贡献——
+    # 分类的「上下文承接确认」判据（上一轮 AI 在提议服务）来自下面 *history，
+    # 与本块无关（见 agents/base.py::register_lean_input 的取舍登记）。
+    # 未登记（单测直调 / 未走 enrich）时 get_lean_input 原样返回 → 行为同改动前。
+    from agents.base import get_lean_input
+    shared_input = get_lean_input(user_input)
+
     system_prompt = CLASSIFIER_PROMPT
-    format_kwargs = {"input": user_input}
+    format_kwargs = {"input": shared_input}
     if title_request and (title_request.first_question or "").strip():
         system_prompt = CLASSIFIER_PROMPT + CLASSIFIER_TITLE_INSTRUCTION
         format_kwargs["first_question"] = title_request.first_question.strip()[:200]
 
+    # ── 前缀对齐（PRD-A11 同族口径）：共享块进 messages[0]，调用指令留在 human ──
+    # provider 的前缀缓存从 payload 第 0 字节开始连续比对（本调用无 tools → 即 messages[0]）。
+    # 这段「共享块」在同一 run 内与 clarify / PDOR planner 逐字节相同，挪到头部即可让后发的
+    # clarify 命中 classify 写热的前缀；改前指令压第 0 条、共享块被挡在 system 之后 → 恒 0%。
+    # **只搬位置不复制**：文本一字未改，消息条数/字符总数不变。
+    # ⚠️ 2026-10-18 起这份共享块是**精简块**（get_lean_input：去掉 [相关记忆片段]），三处同为
+    #    精简块 → 族内共享照旧；与 agent 主链 state["input"] 的同一性没了（那边要记忆）。
+    #    取舍与实测数字见 agents/base.py::register_lean_input 上方注释。
+    # ⚠️ 共享块必须仍走 {input} 变量：它是用户文本（问题/画像/JSON 可能含花括号），
+    #    写成 ("system", user_input) 字面量会被 LangChain 当模板占位符解析而报错。
+    # 语义缓存键防护（与上面的前缀对齐同因）：改后本调用**最后一条 human 是固定分类指令**，
+    # 而网关语义缓存（utils/llm/gateway.py::_last_user_text）取最后一条 human 当键的 query
+    # → 键里丢掉真实问题维度，同 scenario / inject_hash 下不同问题可能撞同一个键、把上一个
+    # 问题的分类 JSON（含标题）回放给新问题。改前 query 含逐分钟的 [背景信息] 时间、实际恒
+    # miss，所以这里显式关闭该调用的语义缓存**零损失**（前缀缓存不受影响，两者互不相干）。
+    # 透传链已核对：metadata → utils/llm_factory.py::_build_llm_config 的 config["metadata"]
+    # → utils/llm/gateway.py::_sr_context → cache_policy.build_key 判 sr_cacheable。
+    # ⚠️ 仅走网关（gateway.chat）的模型消费该键；本调用今天用 get_llm()，标记是给迁移后兜底。
+    call_metadata = {**(metadata or {}), "sr_cacheable": False}
     result = llm_json_with_retry(
         llm,
         ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", "{input}"),
             *history,
-            ("user", "{input}"),
+            ("user", system_prompt),
         ]).format_messages(**format_kwargs),
         logger,
         label="classifier",
         budget=budget,
-        metadata=metadata,
+        metadata=call_metadata,
         run_config=run_config,
         skip_cache_prefix=True,  # classify 调用太短，加前缀反而浪费
     )
@@ -71,6 +98,20 @@ async def classify_input(user_input: str, memory, llm, logger, budget=None, meta
         # 各自产生空对端消息（save_context 成对写入机制）污染上下文
         memory.append_turn(user_input, response)
         return {"response": response, "title": title}
+
+    # 策略会话兜底/注入位：走到这里说明执行封装没有拦下（异常路径 / Group 子图直调），
+    # 至少让模式图知道「这一轮属于一场会话」，并按设计文档 §5.10 约束写库类技能
+    try:
+        from utils.cache.backtest_db import get_open_strategy_session
+        _dlg = (metadata or {}).get('dialog_uuid') or ''
+        _sess = get_open_strategy_session(_dlg or 'local')
+        if _sess:
+            out_early = {'strategy_session': _sess}
+            if title:
+                out_early['title'] = title
+            return out_early
+    except Exception as e:
+        logger.debug(f'策略会话注入跳过（异常）: {e}')
 
     # 澄清反问（Web 优先）：classify 之后、正式执行之前；无需澄清/无通道时零开销。
     # AgentCancelled（用户停止）继承 BaseException，不会被这里的兜底吞掉。
@@ -98,6 +139,8 @@ async def classify_input(user_input: str, memory, llm, logger, budget=None, meta
         out["title"] = title
     if clarify.get("enriched_input"):
         out["clarified_input"] = clarify["enriched_input"]
+    if clarify.get("task_spec"):
+        out["task_spec"] = clarify["task_spec"]
     return out
 
 
@@ -114,7 +157,9 @@ async def generate_partial_summary(user_input: str, exec_state, llm, logger,
     )
     messages = []
     if history:
-        messages.extend(history)
+        # 与 prepare/select_skills 同口径：图表 UUID / 仪表盘 JSON 不进 prompt
+        from agents.react.utils import clean_history_messages
+        messages.extend(clean_history_messages(history, user_input))
     messages.append(("user", prompt))
 
     try:
@@ -181,6 +226,9 @@ async def run_report_post_processing(
     run_config=None,
     step_results: list = None,
     raw_result_is_seed: bool = False,
+    conversation=None,
+    conversation_tools=None,
+    fork_sink: dict | None = None,
 ) -> str | None:
     """统一执行报告分析引擎后处理，失败时返回 None 让调用方保留原文。
 
@@ -214,6 +262,9 @@ async def run_report_post_processing(
             run_config=run_config,
             step_results=step_results,
             raw_result_is_seed=raw_result_is_seed,
+            conversation=conversation,
+            conversation_tools=conversation_tools,
+            fork_sink=fork_sink,
         )
         if analysis.content and not analysis.fallback_used:
             return analysis.content

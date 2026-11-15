@@ -1,0 +1,508 @@
+/* ─────────────────────────────────────────────
+   选股雷达 Web — 策略会话结果卡（strategy-card）
+   ───────────────────────────────────────────── */
+
+/* 字段契约见 agents/shared/strategy_card.py::build_result_card / build_progress_card，
+   渲染见 server/static/js/chat-strategy-card.js。
+   注意：本文件只定义类名与结构，颜色一律走 variables.css 的变量（不写死色值）。 */
+
+.sc-card {
+  margin: 10px 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border-main);
+  border-left: 3px solid var(--brand);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 卡片变体（kind）：结果卡走品牌色，进度卡走强调色 */
+.sc-card.sc-result { border-left-color: var(--brand); }
+.sc-card.sc-progress { border-left-color: var(--accent); }
+
+/* ── 头部 ── */
+.sc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sc-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--brand-strong);
+}
+
+/* 成交口径/轮次说明：独占一行的小字 */
+.sc-sub {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.sc-card > .sc-sub { margin-top: 4px; }
+
+/* ── 体检徽章 ──
+   状态取值口径 = backtest/health.py 的常量集（ok / no_signal / insufficient_bars /
+   data_gap / bad_strategy / invalid_params / error）+ strategy_card.py 提到的 low_sample。
+   四档语义：通过=success，无信号/样本不足=warning，数据缺口=warn，策略或参数问题=error。 */
+.sc-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.sc-badge-ok {
+  border-color: var(--success);
+  background: var(--success-bg);
+  color: var(--success);
+}
+.sc-badge-no_signal,
+.sc-badge-low_sample,
+.sc-badge-insufficient_bars {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warn);
+}
+.sc-badge-data_gap {
+  border-color: var(--warn);
+  background: var(--warning-bg);
+  color: var(--warn);
+}
+.sc-badge-bad_strategy,
+.sc-badge-invalid_params,
+.sc-badge-error {
+  border-color: var(--error);
+  background: var(--danger-bg);
+  color: var(--error);
+}
+
+/* ── 指标区（OOS 优先且底色更实，IS 退为浅底，避免两个数字块互相抢） ── */
+.sc-metrics {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+}
+.sc-metrics.sc-oos { background: var(--brand-bg-light); }
+.sc-metrics.sc-is { background: var(--hover); }
+
+.sc-metrics-title {
+  margin-bottom: 4px;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sc-metric {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+.sc-metric-k { color: var(--text-secondary); }
+.sc-metric-v {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 结果卡：KPI 四卡 + IS/OOS 对照表（对齐原型 2026-10-11 v1）── */
+.sc-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+.sc-kpi {
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--detail-bg);
+}
+.sc-kpi-k { font-size: 11.5px; color: var(--text-secondary); }
+.sc-kpi-v {
+  margin-top: 2px;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.3;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.sc-kpi-v.pos { color: var(--up); }
+.sc-kpi-v.neg { color: var(--down); }
+.sc-kpi-s { margin-top: 1px; font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+
+.sc-isos-table {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.sc-isos-table th,
+.sc-isos-table td {
+  padding: 5px 8px;
+  border: 1px solid var(--border-light);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.sc-isos-table th {
+  background: var(--hover);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-family: inherit;
+}
+.sc-isos-table th:first-child,
+.sc-isos-table td:first-child {
+  text-align: left;
+  font-family: inherit;
+  color: var(--text-secondary);
+}
+.sc-isos-table .sc-isos-oos {
+  background: var(--brand-bg-light);
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .sc-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── 池子级研究报告卡 ── */
+.sc-pool { border-left-color: var(--brand); }
+.sc-pool-verdict {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--detail-bg);
+}
+.sc-pool-label {
+  display: inline-block;
+  padding: 1px 9px;
+  margin-bottom: 5px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.sc-pool-headline { font-size: 12.5px; line-height: 1.7; color: var(--text-secondary); }
+.sc-pool-works .sc-pool-label { background: var(--success-bg); color: var(--success); }
+.sc-pool-fails .sc-pool-label { background: var(--danger-bg); color: var(--error); }
+.sc-pool-conditional .sc-pool-label { background: var(--warning-bg); color: var(--warning); }
+.sc-pool-insufficient .sc-pool-label { background: var(--hover); color: var(--muted); }
+
+.sc-pool-table {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.sc-pool-table th,
+.sc-pool-table td {
+  padding: 4px 7px;
+  border: 1px solid var(--border-light);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.sc-pool-table th {
+  background: var(--hover);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-family: inherit;
+}
+.sc-pool-table th:first-child,
+.sc-pool-table td:first-child,
+.sc-pool-table th:nth-child(2),
+.sc-pool-table td:nth-child(2) {
+  text-align: left;
+  font-family: inherit;
+}
+.sc-pool-caveats {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius-sm);
+}
+
+.sc-peer-wrap { margin-top: 6px; }
+.sc-peer-result .sc-card { margin: 8px 0 0; border-left-color: var(--brand); }
+
+/* ── Wilson 置信区间 ── */
+.sc-ci {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ── 诚实性提示（样本不足 / 过拟合 / 体检未通过 / 成交口径） ── */
+.sc-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.sc-note {
+  position: relative;
+  padding-left: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.sc-note::before {
+  content: "•";
+  position: absolute;
+  left: 2px;
+  color: var(--warning);
+}
+
+/* ── 进度卡（kind=progress）──
+   注意：进度行的类名与卡片变体同名（都是 sc-progress），故行样式用后代选择器限定：
+   卡片自身不是自己的后代，不会被 .sc-card .sc-progress 命中。 */
+.sc-card .sc-progress {
+  color: var(--brand-strong);
+  font-weight: 600;
+}
+
+/* 实时进度条：对话内订阅 SSE 后由 JS 改 width。
+   不做 CSS 动画 —— 轮次间隔不固定，动画会给出「还在动」的错觉；宁可静止诚实。 */
+.sc-card .sc-progress-bar {
+  position: relative;
+  height: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border-color, rgba(0, 0, 0, 0.08));
+}
+.sc-card .sc-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width var(--transition-slow, 0.35s) ease;
+}
+.sc-card .sc-progress-now {
+  margin-top: 4px;
+}
+.sc-card .sc-progress-hint {
+  margin-top: 6px;
+  color: var(--text-tertiary, var(--text-secondary, #888));
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sc-card .sc-progress-go {
+  margin-top: 10px;
+}
+
+/* ── 动作按钮 ── */
+.sc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.sc-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--brand);
+  border-radius: var(--radius-sm);
+  background: var(--brand-light);
+  /* 变量库里没有「品牌色上的前景色」，用 --panel 的白（不硬编码色值） */
+  color: var(--brand-strong);
+  font-size: 12px;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+              color var(--transition-fast);
+}
+.sc-btn:hover {
+  border-color: var(--brand-hover);
+  background: var(--brand);
+  color: var(--panel);
+}
+.sc-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+/* ── 换标的对照卡 / 批量验证卡（Plan 3 §10）：颜色全走 variables.css ── */
+.sc-card.sc-compare,
+.sc-card.sc-batch-validation { border-left-color: var(--strategy-accent); }
+
+.sc-compare-table,
+.sc-batch-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 4px;
+  font-size: 12.5px;
+}
+.sc-compare-table th,
+.sc-batch-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+}
+.sc-compare-table td,
+.sc-batch-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text);
+}
+.sc-compare-table tbody tr:last-child td,
+.sc-batch-table tbody tr:last-child td { border-bottom: none; }
+.sc-batch-table td.sc-batch-bad { color: var(--warning); }
+
+/* 「换票验证」内嵌面板：找候选 → 换票重跑 → 结果回填都发生在这块里 */
+.sc-verify-panel {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--detail-bg);
+  font-size: 12.5px;
+}
+.sc-verify-status {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ── 进度卡：阶段条（原型 stepper 的对话内版本） ───────────────
+   只表达「进行到哪一段」；具体每轮做了什么看下面的轮次时间线。
+   类名 sc-phase-* / sc-round-* 全局唯一（2026-10-17 grep 确认无同名）。 */
+.sc-card .sc-phase {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+.sc-card .sc-phase-item {
+  padding: 2px 9px;
+  border: 1px solid var(--border-main);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--panel);
+  transition: all .18s ease;
+}
+
+.sc-card .sc-phase-item.done {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.sc-card .sc-phase-item.on {
+  border-color: var(--accent);
+  background: var(--brand-bg-light);
+  color: var(--brand-strong);
+  font-weight: 600;
+}
+
+.sc-card .sc-phase-item.bad {
+  border-color: var(--up);
+  background: rgba(231, 76, 60, .08);
+  color: var(--up);
+  font-weight: 600;
+}
+
+.sc-card .sc-phase-arw {
+  color: var(--border-main);
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ── 进度卡：轮次时间线 ─────────────────────────────── */
+.sc-card .sc-rounds {
+  margin: 10px 0 6px;
+  padding-left: 2px;
+}
+
+.sc-card .sc-rounds-more {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 0 4px;
+}
+
+.sc-card .sc-round {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border-light);
+}
+
+.sc-card .sc-round:last-child { border-bottom: 0; }
+
+.sc-card .sc-round.pending { opacity: .62; }
+
+.sc-card .sc-round-dot {
+  font-size: 9px;
+  color: var(--brand);
+  line-height: 1;
+  flex: none;
+}
+
+.sc-card .sc-round.pending .sc-round-dot { color: var(--muted); }
+
+.sc-card .sc-round-no {
+  flex: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  min-width: 46px;
+}
+
+.sc-card .sc-round-hyp {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-card .sc-round-meta {
+  flex: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sc-card .sc-round-verdict {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--border-light);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+
+.sc-card .sc-round-verdict.best {
+  background: var(--brand-bg-light);
+  color: var(--brand-strong);
+}
+
+.sc-card .sc-round-verdict.warn {
+  background: rgba(200, 138, 30, .12);
+  color: var(--warn, #c88a1e);
+}
+
+.sc-card .sc-round-verdict.bad {
+  background: rgba(231, 76, 60, .1);
+  color: var(--up);
+}
+
+/* 续跑按钮（2026-10-18）：中断任务的重入入口，用警示色与普通「看研发过程」区分 */
+.sc-resume-btn { border-color: var(--warn, #c88a1e); color: var(--warn, #c88a1e); }
+.sc-resume-btn:hover:not(:disabled) { background: rgba(200, 138, 30, .08); }
+.sc-resume-btn:disabled { opacity: .6; cursor: default; }

@@ -739,8 +739,15 @@ class TestBondOtherFactors:
         assert float(f["fx"]["value"]) == pytest.approx(6.75)
         assert f["redemption"]["manual"] is False
         assert "代理口径" in f["redemption"]["detail"]
+        # ⑥ 手工项：断言引擎读出的就是**定义文件里声明的那个值**，而不是把数值快照抄进测试。
+        # ⚠️ 这条曾写死 pytest.approx(17500)，而该字段按定义是「月度更新」的手工数据
+        #    （source_note 明说），于是每月按实更新一次定义就把测试打红 —— 红的是测试的
+        #    「快照」而不是接线。改成读定义：既保住原意（读数来自对应序列、manual 标记正确），
+        #    又不会因为数据更新误报。
+        from thesis.defs import load_def
+        declared = load_def("bond_fund")["manual"]["gov_supply"]["net_supply_yi"]
         assert f["gov_supply"]["manual"] is True
-        assert float(f["gov_supply"]["value"]) == pytest.approx(17500)
+        assert float(f["gov_supply"]["value"]) == pytest.approx(float(declared))
         # ⑦ 期限利差必须吃独立桩（0.41），不是 cn10 兜底的 1.6862
         assert float(f["term_spread"]["value"]) == pytest.approx(0.41)
         assert f["term_spread"]["score"] == 0

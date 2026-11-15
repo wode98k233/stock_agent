@@ -1,0 +1,130 @@
+{
+  "template_id": "deep_sector_finance",
+  "variant": "finance",
+  "name": "板块深度 · 金融",
+  "asset_type": "sector",
+  "total_words_target": [11000, 14000],
+  "charts_target": [25, 40],
+  "estimate_anchors": ["PB", "ROE"],
+  "note": "金融行业看 PB-ROE，不看 PE 分位；净息差与资产质量是核心。",
+  "slots": {
+    "verdict": {"desc": "方向 + 信号强度", "priority": 0},
+    "snapshot": {"desc": "点位/涨跌/成交/估值分位", "priority": 0},
+    "valuation": {"desc": "PB/ROE/股息率及十年分位", "priority": 0},
+    "capital_flow": {"desc": "主力净流入、北向、两融", "priority": 0},
+    "consensus_poll": {"desc": "近 90 天机构评级与目标价", "priority": 1, "tool_hint": "iwc_search(report)"},
+    "constituents": {"desc": "成分股涨跌与财务横截面", "priority": 0},
+    "industry_space": {"desc": "行业规模与增速（外部测算）", "priority": 2},
+    "share_cr": {"desc": "份额与集中度", "priority": 2, "tool_hint": "研报摘要"}
+  },
+  "sections": [
+    {
+      "id": "summary",
+      "title": "投资摘要",
+      "target_words": [600, 800],
+      "required": true,
+      "data_slots": ["snapshot"],
+      "charts": ["key_metrics_bar"],
+      "supply": ["own"],
+      "prompt": "先用一句话给出方向、时间框架与信号强度；再列 3–5 条「判断 + 数字」要点；最后一句写最大风险。"
+    },
+    {
+      "id": "catalog",
+      "title": "目录与图表目录",
+      "target_words": [0, 0],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": ["program"],
+      "prompt": "由程序生成，不要手写正文。"
+    },
+    {
+      "id": "consensus",
+      "title": "与市场不同之处",
+      "target_words": [800, 1000],
+      "required": true,
+      "data_slots": ["consensus_poll"],
+      "charts": ["consensus_table"],
+      "supply": ["report", "own"],
+      "prompt": "先写市场共识（必须带机构 + 日期），再写我们的反证（必须带自有数据），最后给验证条件。「某机构认为…」只允许出现在本章。"
+    },
+    {
+      "id": "overview",
+      "title": "板块概览与空间",
+      "target_words": [1200, 1500],
+      "required": true,
+      "data_slots": ["industry_space", "snapshot"],
+      "charts": ["size_growth_line"],
+      "supply": ["report", "own"],
+      "prompt": "规模、增速、驱动因素；外部测算必须写「（机构，年份）」，拿不到就写「外部测算缺失，仅作定性」。"
+    },
+    {
+      "id": "structure",
+      "title": "竞争格局与结构",
+      "target_words": [1200, 1500],
+      "required": true,
+      "data_slots": ["share_cr", "constituents"],
+      "charts": ["layer_bar"],
+      "supply": ["report", "own"],
+      "prompt": "分层拆解板块内部结构（大行/股份行/城商行），给出集中度与分化度，禁止用 PE 分位下结论。"
+    },
+    {
+      "id": "fundamentals",
+      "title": "景气度与基本面",
+      "target_words": [1500, 1800],
+      "required": true,
+      "data_slots": ["valuation", "capital_flow", "constituents"],
+      "charts": ["pb_roe_scatter", "valuation_band", "capital_flow_bar"],
+      "supply": ["own"],
+      "prompt": "估值用 PB-ROE 框架并给十年分位；资金面给主力净流入与两融；必须同时给盈利位置（增速方向）。"
+    },
+    {
+      "id": "opportunity",
+      "title": "结构性机会量化",
+      "target_words": [1000, 1200],
+      "required": false,
+      "data_slots": ["industry_space", "share_cr"],
+      "charts": ["opportunity_matrix"],
+      "supply": ["report"],
+      "prompt": "把机会写成可乘的数字（渗透率/集中度/价格带），缺数据就降级为表并标注缺口。"
+    },
+    {
+      "id": "targets",
+      "title": "标的",
+      "target_words": [2000, 2500],
+      "required": true,
+      "data_slots": ["constituents", "valuation"],
+      "charts": ["peer_table"],
+      "supply": ["own"],
+      "prompt": "先给一张横向对标表，再逐只 200–300 字，结构一致便于横向比较。"
+    },
+    {
+      "id": "advice",
+      "title": "投资建议与估值",
+      "target_words": [1200, 1500],
+      "required": true,
+      "data_slots": ["valuation"],
+      "charts": ["scenario_matrix"],
+      "supply": ["own"],
+      "prompt": "给方向 + 触发条件 + 失效条件；必须声明用了哪个估值锚及原因。"
+    },
+    {
+      "id": "risk",
+      "title": "风险提示",
+      "target_words": [400, 600],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": ["own"],
+      "prompt": "3–5 条，每条写成「风险名：传导机制 → 受损对象」，并与正文核心假设一一对应；测算类结论必须单列「测算与假设偏差风险」。"
+    }
+  ],
+  "qa_rules": [
+    "任何外部数字必须带（来源，日期）；无来源数字不得出现",
+    "禁止把「PE 分位低」写成「便宜」（金融行业看 PB-ROE）",
+    "数据缺失必须显式写「数据缺失：<字段>」，禁止用 0 或「约」代替",
+    "图表必须带 source 与 asof，无源图不得出现"
+  ]
+}
+
+

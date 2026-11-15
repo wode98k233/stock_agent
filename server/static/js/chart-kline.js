@@ -8,7 +8,7 @@ window.StockRadar = window.StockRadar || {};
 (function () {
   "use strict";
 
-  const ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js";
+  const ECHARTS_CDN = "/static/vendor/echarts.min.js";  // 本地 vendor 优先：jsdelivr 在部分网络（含本机）不可达，会让全站图表静默不渲染
 
   // 配色方案 - 与项目整体淡绿色风格一致
   const COLORS = {
@@ -39,34 +39,40 @@ window.StockRadar = window.StockRadar || {};
     volumeUp: "rgba(231, 76, 60, 0.5)",
     volumeDown: "rgba(23, 107, 91, 0.5)",
 
-    // MACD 颜色
-    macdDif: "#f59e0b",   // DIF - 琥珀色
-    macdDea: "#176b5b",   // DEA - 品牌绿色
+    // MACD 颜色：快线品牌绿 = 视线落点，慢线中灰；柱体保留红涨绿跌
+    macdDif: "#176b5b",   // DIF - 快线
+    macdDea: "#8f8e88",   // DEA - 慢线（中灰）
     macdHistUp: "rgba(231, 76, 60, 0.6)",
     macdHistDown: "rgba(23, 107, 91, 0.6)",
 
-    // KDJ 颜色
-    kdjK: "#f59e0b",      // K线 - 琥珀色
-    kdjD: "#176b5b",      // D线 - 品牌绿色
-    kdjJ: "#8b5cf6",      // J线 - 紫色
+    // KDJ 颜色：K 品牌绿 / D 中灰实线 / J 浅灰点线
+    // 第三通道是"线型"而不是"色相"——色觉异常或灰度打印时仍能分出三条线
+    kdjK: "#176b5b",      // K线 - 快线（主角）
+    kdjD: "#8f8e88",      // D线 - 慢线（中灰）
+    kdjJ: "#a9a8a1",      // J线 - 第三线（浅灰 + 点线）
 
-    // RSI 颜色
-    rsi6: "#f59e0b",
-    rsi12: "#176b5b",
-    rsi24: "#8b5cf6",
+    // RSI 颜色：6 快 / 12 中 / 24 浅，同一条明度梯
+    rsi6: "#176b5b",
+    rsi12: "#8f8e88",
+    rsi24: "#a9a8a1",
 
-    // DPO 颜色
-    dpo: "#f59e0b",      // DPO - 琥珀色
-    madpo: "#176b5b",    // MADPO - 品牌绿色
+    // DPO 颜色：快线品牌绿，慢线中灰
+    dpo: "#176b5b",      // DPO - 快线（主角）
+    madpo: "#8f8e88",    // MADPO - 慢线（中灰）
 
-    // 布林带颜色
-    bollUpper: "#e74c3c",
-    bollMid: "#f59e0b",
-    bollLower: "#176b5b",
+    // 布林带画在主图上，红绿会和蜡烛抢语义，改为中性灰 + 虚线轨
+    bollUpper: "#c2c1ba",
+    bollMid: "#8f8e88",
+    bollLower: "#c2c1ba",
 
     // 信号颜色
     signalBuy: "#e74c3c",
     signalSell: "#176b5b",
+
+    // 指标降权色 —— 均线等"背景信息"统一用它，身份交给末端数字
+    indicatorMuted: "#c2c1ba",
+    indicatorLabel: "#a9a8a1",
+    labelHalo: "#ffffff",
   };
 
   // 信号统一元表：每个指标用单独字母标识（M=MACD, K=KDJ, A=均线, B=布林, D=DPO），
@@ -99,6 +105,58 @@ window.StockRadar = window.StockRadar || {};
     square: "rect",
   };
 
+  // 信号布局（贴图 / 分道）：
+  //   pinned = 信号贴着 K 线（D1 的布局，默认，也是回退路径——不能有任何像素变化）
+  //   lanes  = 按指标族分五条轨道，画在价格区与成交量之间
+  const SIGNAL_LAYOUT_KEY = "kline_signal_layout";
+  const SIGNAL_LAYOUTS = ["pinned", "lanes"];
+
+  // 技术面图层（斐波那契三种 / 自动趋势线 / 支撑阻力带）
+  // ⚠️ 这些线是**算法生成的测量工具**，不是交易信号；默认关，跨会话记住选择。
+  // 全部由后端 tools/ta_annotations.py 算纯几何，前端只负责画。
+  const TA_KEY = "kline_ta_layer";
+  const TA_MODES = ["off", "retracement", "channel", "fan", "trend", "bands",
+                    "structure", "regression", "gaps", "all"];
+  const TA_LABELS = {
+    retracement: "斐波那契回撤",
+    channel: "斐波那契通道",
+    fan: "斐波那契扇形",
+    trend: "自动趋势线",
+    bands: "支撑阻力带",
+    structure: "波段结构",
+    regression: "回归通道",
+    gaps: "跳空缺口",
+    all: "全显示",
+  };
+  // 标注线一律走「发丝线」语法：1px 上下、不上色说方向，身份交给末端文字。
+  const TA_STYLE = {
+    retracement: { color: "#667085", type: "dashed", width: 1 },
+    channel: { color: "#176b5b", type: "solid", width: 1.2 },
+    fan: { color: "#8f8e88", type: "dashed", width: 1 },
+    trend: { color: "#1c2430", type: "solid", width: 1.2 },
+    support: "rgba(23, 107, 91, 0.10)",
+    resistance: "rgba(245, 158, 11, 0.12)",
+  };
+
+  function normalizeTaMode(value) {
+    return TA_MODES.indexOf(value) >= 0 ? value : "off";
+  }
+
+  // 分道行位：行 = 指标族（字母即族），y 取每条道的中心（0.5 .. 4.5）。
+  // 按指标族分道是零碰撞的——同一指标同一天不会既金叉又死叉，所以同一格里
+  // 永远不会出现两个信号，字母不用做横向避让。
+  const LANE_Y = { M: 0.5, K: 1.5, A: 2.5, B: 3.5, D: 4.5 };
+  const LANE_Y_FALLBACK = 2.5;  // 未知族回退到均线道
+  const LANE_LABELS = ["M", "K", "A", "B", "D"];  // 轨道左侧行标（自上而下）
+
+  function normalizeSignalLayout(value) {
+    return SIGNAL_LAYOUTS.indexOf(value) >= 0 ? value : "pinned";
+  }
+
+  function readSignalLayout() {
+    return normalizeSignalLayout(localStorage.getItem(SIGNAL_LAYOUT_KEY));
+  }
+
   function ensureECharts() {
     return new Promise((resolve, reject) => {
       if (window.echarts) {
@@ -126,6 +184,11 @@ window.StockRadar = window.StockRadar || {};
       this.data = null;
       this.overlay = null;  // {type:'scan'|'backtest', signals/trades/equityCurve/stats}
       this.currentIndicator = "macd";
+      // 信号布局：pinned（贴图，默认）/ lanes（按指标族分道），跨会话记住选择
+      this.signalLayout = readSignalLayout();
+      // 技术面图层：模式 + 后端返回的几何结果（off 时不拉数据）
+      this.taMode = "off";
+      this.taData = null;
       this.ready = this.init();
     }
 
@@ -256,6 +319,25 @@ window.StockRadar = window.StockRadar || {};
       if (this.data) this.render();
     }
 
+    // 切换信号布局（贴图 / 分道）。只重绘，不重新取数。
+    setSignalLayout(layout) {
+      this.signalLayout = normalizeSignalLayout(layout);
+      if (this.data) this.render();
+    }
+
+    // 切换技术面图层（off / 五种 / all）。只重绘，不重新取数。
+    setTaMode(mode) {
+      this.taMode = normalizeTaMode(mode);
+      if (this.data) this.render();
+    }
+
+    // 喂入后端算好的几何（tools/ta_annotations.py 的输出）。
+    // ok=false（本地日线不足/接口异常）时清空，图不画半截线。
+    setTaData(data) {
+      this.taData = data && data.ok ? data : null;
+      if (this.data && this.taMode !== "off") this.render();
+    }
+
     // 叠加策略信号/回测结果（scan 信号点 或 backtest 买卖点+净值曲线）
     setOverlay(overlay) {
       this.overlay = overlay || null;
@@ -284,6 +366,22 @@ window.StockRadar = window.StockRadar || {};
         && overlay.equityCurve && overlay.equityCurve.length > 0;
       const gridCount = hasEquity ? 4 : 3;
       const allGrids = Array.from({ length: gridCount }, (_, i) => i);
+
+      // 信号分道：轨道 grid 追加到数组末尾（grid 数组顺序与视觉位置无关，
+      // 位置只由 top/height 决定），靠 top 摆到价格区与成交量之间。这样不必改动
+      // 任何现有 series 的 xAxisIndex/yAxisIndex（成交量仍是 1、副图 2、净值 3）。
+      const lanes = this.signalLayout === "lanes";
+      const lanesIdx = lanes ? gridCount : null;   // 轨道拿到的新索引（数组末尾）
+      const lanesTop = hasEquity ? 47 : 54;        // 轨道顶边（%）
+      const lanesHeight = hasEquity ? 8.5 : 9.5;   // 轨道高度（%，五条道均分）
+      // 缩放必须带上轨道索引，否则拖动/滚轮时轨道不跟随
+      const zoomAxes = lanes ? allGrids.concat(lanesIdx) : allGrids;
+
+      // 技术面标注：索引按日期映射回图上的 bar（见 _buildTaSeries 注释）
+      const ta = this._buildTaSeries(dates);
+      // 标注线常常落在价格区间之外（平行轨、支撑带上沿），放任它们参与 Y 轴刻度
+      // 计算会把蜡烛压扁——主图刻度锁定在价格区间，超出的线自然裁掉。
+      const taRange = ta.series.length ? this._taAxisRange() : null;
 
       this.chart.setOption({
         animation: false,
@@ -346,48 +444,95 @@ window.StockRadar = window.StockRadar || {};
             borderRadius: 2,
           },
         },
-        // 网格布局 - 回测有净值时多一栏
-        grid: hasEquity
+        // 分道轨道行标（M/K/A/B/D）——只做只读标注，不做交互
+        // 技术面图层的角落说明跟分道行标共用 graphic（数组拼接，互不影响）
+        graphic: [
+          ...(lanes ? this._buildLaneLabels(lanesTop, lanesHeight) : []),
+          ...ta.graphic,
+        ],
+        // 网格布局 - 回测有净值时多一栏；分道时价格区按规格 §3.3 让出轨道
+        grid: lanes
+          ? (hasEquity
+              ? [
+                  { left: "8%", right: "6%", top: "12%", height: "34%" },    // K线主图
+                  { left: "8%", right: "6%", top: "57.5%", height: "7.5%" }, // 成交量
+                  { left: "8%", right: "6%", top: "67%", height: "10%" },    // 技术指标
+                  { left: "8%", right: "6%", top: "79%", height: "10%" },    // 净值曲线
+                  { left: "8%", right: "6%", top: `${lanesTop}%`, height: `${lanesHeight}%` },  // 信号轨道（末尾索引 = 4）
+                ]
+              : [
+                  { left: "8%", right: "6%", top: "12%", height: "41%" },   // K线主图
+                  { left: "8%", right: "6%", top: "65.5%", height: "9%" },  // 成交量
+                  { left: "8%", right: "6%", top: "77%", height: "13%" },   // 技术指标
+                  { left: "8%", right: "6%", top: `${lanesTop}%`, height: `${lanesHeight}%` },  // 信号轨道（末尾索引 = 3）
+                ])
+          : hasEquity
           ? [
-              { left: "8%", right: "3%", top: "12%", height: "42%" },  // K线主图
-              { left: "8%", right: "3%", top: "58%", height: "8%" },   // 成交量
-              { left: "8%", right: "3%", top: "70%", height: "12%" },  // 技术指标
-              { left: "8%", right: "3%", top: "86%", height: "10%" },  // 净值曲线
+              { left: "8%", right: "6%", top: "12%", height: "42%" },  // K线主图
+              { left: "8%", right: "6%", top: "58%", height: "8%" },   // 成交量
+              { left: "8%", right: "6%", top: "70%", height: "12%" },  // 技术指标
+              { left: "8%", right: "6%", top: "86%", height: "10%" },  // 净值曲线
             ]
           : [
-              { left: "8%", right: "3%", top: "12%", height: "50%" },  // K线主图
-              { left: "8%", right: "3%", top: "66%", height: "10%" },  // 成交量
-              { left: "8%", right: "3%", top: "80%", height: "14%" },  // 技术指标
+              { left: "8%", right: "6%", top: "12%", height: "50%" },  // K线主图
+              { left: "8%", right: "6%", top: "66%", height: "10%" },  // 成交量
+              { left: "8%", right: "6%", top: "80%", height: "14%" },  // 技术指标
             ],
-        // X轴 - 动态数量
-        xAxis: allGrids.map((gridIndex) => ({
-          type: "category",
-          data: dates,
-          gridIndex,
-          axisLine: { lineStyle: { color: COLORS.border } },
-          axisTick: { show: false },
-          axisLabel: {
-            color: COLORS.muted,
-            show: gridIndex === gridCount - 1,
-            rotate: 0,
-            fontSize: 10,
-            margin: 8,
-          },
-          splitLine: { show: false },
-        })),
+        // X轴 - 动态数量（分道时追加轨道的时间轴）
+        xAxis: [
+          ...allGrids.map((gridIndex) => ({
+            type: "category",
+            data: dates,
+            gridIndex,
+            axisLine: { lineStyle: { color: COLORS.border } },
+            axisTick: { show: false },
+            axisLabel: {
+              color: COLORS.muted,
+              show: gridIndex === gridCount - 1,
+              rotate: 0,
+              fontSize: 10,
+              margin: 8,
+            },
+            // 多 grid 联动时每个轴都会弹一枚 axisPointer 标签，右缘会叠出
+            // 三四个重复日期；只在主图那根轴上显示。
+            axisPointer: { label: { show: gridIndex === 0 } },
+            splitLine: { show: false },
+          })),
+          // 轨道时间轴：与其余 grid 共用同一份 category，只隐藏刻度文字
+          ...(lanes ? [{
+            type: "category",
+            data: dates,
+            gridIndex: lanesIdx,
+            axisLine: { lineStyle: { color: COLORS.border } },
+            axisTick: { show: false },
+            axisLabel: { show: false },
+            axisPointer: { label: { show: false } },
+            splitLine: { show: false },
+          }] : []),
+        ],
         // Y轴
         yAxis: [
-          this._axisConfig(0, true),
+          { ...this._axisConfig(0, true), ...(taRange || {}) },
           this._axisConfig(1, false, (value) => this._formatVolume(value)),
           this._axisConfig(2, true),
           ...(hasEquity ? [this._axisConfig(3, true)] : []),
+          // 分道轨道：0-5 的隐藏数值轴，每条道 y = 0.5 / 1.5 / … / 4.5。
+          // inverse 让 MACD(0.5) 排在最上面，行序与行标 M/K/A/B/D 一致。
+          ...(lanes ? [{
+            type: "value",
+            gridIndex: lanesIdx,
+            min: 0,
+            max: 5,
+            inverse: true,
+            show: false,
+          }] : []),
         ],
         // 缩放控件
         dataZoom: [
-          { type: "inside", xAxisIndex: allGrids, start: 0, end: 100 },
+          { type: "inside", xAxisIndex: zoomAxes, start: 0, end: 100 },
           {
             type: "slider",
-            xAxisIndex: allGrids,
+            xAxisIndex: zoomAxes,
             bottom: 4,
             height: 18,
             borderColor: "#dfe4ea",
@@ -401,7 +546,11 @@ window.StockRadar = window.StockRadar || {};
           // K线 - 根据 chartType 渲染不同样式
           ...this._buildMainSeries(kline, ohlc, dates, name, code),
           ...this._buildMASeries(indicators),
-          ...this._buildSignalSeries(signals, dates, kline),
+          // 技术面标注画在蜡烛/均线之上、信号之下（信号才是要抢视线的）
+          ...ta.series,
+          ...this._buildSignalSeries(signals, dates, kline, lanesIdx),
+          // 结构/缺口这类「点上带字」的标注必须排在信号之后，否则字母被信号盖住
+          ...ta.top,
           // 策略 overlay：scan 信号点 / 回测买卖点
           ...(overlay ? this._buildOverlaySeries(overlay, dates, kline) : []),
           // 持仓成本线（紫色虚线，避开红涨绿跌语义；symbol:none 不画端点）
@@ -430,6 +579,465 @@ window.StockRadar = window.StockRadar || {};
       }, true);
     }
 
+    // ========= 技术面标注 =========
+    // 后端给的索引是「它自己取的 N 根窗口」内的相对序号；这里先按日期映射回图上的 bar，
+    // 再画。窗口差一两根（增量同步 / 停牌）时直接复用 index 会让整层线横向漂移。
+    // 所有标注 series 名统一以 "TA·" 开头，tooltip 里据此过滤掉。
+    _buildTaSeries(dates) {
+      const empty = { series: [], top: [], graphic: [] };
+      const mode = this.taMode;
+      const payload = this.taData;
+      if (mode === "off" || !payload || !payload.layers) return empty;
+
+      const barCount = dates.length;
+      const taDates = Array.isArray(payload.dates) ? payload.dates : [];
+      const dateToBar = new Map(dates.map((d, i) => [String(d), i]));
+      const toBar = (taIdx) => {
+        const dt = taDates[taIdx];
+        if (dt != null && dateToBar.has(String(dt))) return dateToBar.get(String(dt));
+        return (taIdx >= 0 && taIdx < barCount) ? taIdx : null;
+      };
+      const fmtDate = (taIdx) => (taDates[taIdx] ? String(taDates[taIdx]).slice(5) : "?");
+
+      const num = (v) => (v == null ? null : Number(v));
+      const blank = () => new Array(barCount).fill(null);
+      const lastBar = barCount - 1;
+      const want = (key) => mode === "all" || mode === key;
+      const series = [];
+      // 点标注（结构字母/缺口文字）要画在信号字母之后：ECharts 的 series z 只管
+      // 图形，文字的层叠跟着数组顺序走，混在 series 里会被 K/M/A 压住。
+      const top = [];
+      const markLines = [];
+      const markAreas = [];
+      const span = this._taVisibleSpan();
+
+      const lineSeries = (name, data, style) => ({
+        name: `TA·${name}`,
+        type: "line",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        data,
+        symbol: "none",
+        smooth: false,
+        silent: true,
+        z: 2,
+        lineStyle: {
+          color: style.color,
+          width: style.width || 1,
+          type: style.type || "solid",
+          opacity: style.opacity == null ? 1 : style.opacity,
+        },
+      });
+
+      // 水平线走 markLine；price 相邻太近就只画线不标字，避免标签叠死。
+      // 阈值按"视窗价格跨度"算：9px 字高在 50% 高的价格区里约等于 5%~6% 的跨度，
+      // 取 6%——7 档回撤全标时（600519 只相距 12~15 元）会糊成一团。
+      let prevLabelPrice = null;
+      const pushLevel = (price, label, style) => {
+        const p = num(price);
+        if (p == null) return;
+        const dense = prevLabelPrice != null && span > 0
+          && Math.abs(p - prevLabelPrice) / span < 0.06;
+        if (!dense) prevLabelPrice = p;
+        markLines.push({
+          yAxis: p,
+          lineStyle: {
+            color: style.color,
+            width: style.width || 1,
+            type: style.type || "dashed",
+            opacity: style.opacity == null ? 0.85 : style.opacity,
+          },
+          label: {
+            show: !dense && !!label,
+            formatter: label || "",
+            color: style.color,
+            fontSize: 9,
+            // 标在左端：右端是均线末端数字和最新价标签的地盘，会叠字
+            position: "insideStartTop",
+            // 半年窗口里回撤位常常落在蜡烛上，加一层纸色底保证能读
+            backgroundColor: "rgba(255, 255, 255, 0.82)",
+            padding: [1, 3],
+            borderRadius: 2,
+          },
+        });
+      };
+
+      const fib = payload.layers.fib || {};
+
+      // ① 斐波那契水平回撤
+      if (want("retracement") && fib.retracement && Array.isArray(fib.retracement.levels)) {
+        const r = fib.retracement;
+        r.levels.forEach((lv) => {
+          const ratio = Number(lv.ratio);
+          // 只标比例不标价格：价格由线的纵向位置从 Y 轴读，标两遍只会叠字
+          pushLevel(lv.price, `${(ratio * 100).toFixed(1)}%`, TA_STYLE.retracement);
+        });
+      }
+
+      // ② 斐波那契通道：主段两端定基准线，平行轨按振幅比例外推
+      if (want("channel") && fib.channel && fib.channel.from && fib.channel.to) {
+        const ch = fib.channel;
+        const i1 = toBar(ch.from.i), i2 = toBar(ch.to.i);
+        const p1 = num(ch.from.price), p2 = num(ch.to.price);
+        if (i1 != null && i2 != null && i1 !== i2) {
+          const slope = (p2 - p1) / (i2 - i1);
+          const startBar = Math.min(i1, i2);
+          (ch.rails || []).forEach((rail) => {
+            const ratio = Number(rail.ratio);
+            const off = num(rail.offset) || 0;
+            const data = blank();
+            for (let x = startBar; x <= lastBar; x++) {
+              data[x] = p1 + slope * (x - i1) + off;
+            }
+            series.push(lineSeries(
+              `通道 ${(ratio * 100).toFixed(1)}%`,
+              data,
+              {
+                color: TA_STYLE.channel.color,
+                width: ratio === 0 ? 1.3 : 0.9,
+                type: (ratio === 0.382 || ratio === 0.618) ? "dashed" : "solid",
+                opacity: mode === "all" ? 0.7 : 1,
+              }
+            ));
+          });
+        }
+      }
+
+      // ③ 斐波那契扇形：从锚点按比例放射
+      if (want("fan") && fib.fan && fib.fan.anchor && fib.fan.target) {
+        const fan = fib.fan;
+        const xa = toBar(fan.anchor.i), xt = toBar(fan.target.i);
+        const pa = num(fan.anchor.price), pt = num(fan.target.price);
+        if (xa != null && xt != null && xt !== xa) {
+          (fan.rays || []).forEach((ray) => {
+            const ratio = Number(ray.ratio);
+            if (!(ratio > 0)) return;
+            const data = blank();
+            for (let x = xa; x <= lastBar; x++) {
+              data[x] = pa + (pt - pa) * ratio * (x - xa) / (xt - xa);
+            }
+            series.push(lineSeries(
+              `扇形 ${(ratio * 100).toFixed(1)}%`,
+              data,
+              {
+                color: TA_STYLE.fan.color,
+                width: ratio === 1 ? 1.1 : 0.8,
+                type: "dashed",
+                opacity: mode === "all" ? 0.55 : 0.9,
+              }
+            ));
+          });
+        }
+      }
+
+      // ④ 自动趋势线（最近窗口内被最多摆动点验证的那条），延伸到最新一根
+      const trend = payload.layers.trend || {};
+      const drawTrend = (line, label) => {
+        if (!line) return;
+        const x1 = toBar(line.x1), x2 = toBar(line.x2);
+        const k = num(line.k), y1 = num(line.y1);
+        if (x1 == null || k == null || y1 == null) return;
+        const data = blank();
+        const startBar = Math.min(x1, x2 == null ? x1 : x2);
+        for (let x = startBar; x <= lastBar; x++) data[x] = y1 + k * (x - x1);
+        series.push(lineSeries(label, data, {
+          color: TA_STYLE.trend.color,
+          width: 1.2,
+          type: "solid",
+          opacity: mode === "all" ? 0.6 : 0.9,
+        }));
+      };
+      if (want("trend")) {
+        drawTrend(trend.upper, `上轨 ${trend.upper ? trend.upper.hits : 0}次`);
+        drawTrend(trend.lower, `下轨 ${trend.lower ? trend.lower.hits : 0}次`);
+      }
+
+      // ⑤ 支撑阻力带：区间填充 + 中线标触碰次数
+      const bands = Array.isArray(payload.layers.bands) ? payload.layers.bands : [];
+      if (want("bands") && bands.length) {
+        const sorted = bands.slice().sort((a, b) => Number(b.touches) - Number(a.touches));
+        let prevBandPrice = null;
+        // 全显示时八层叠在一起，四条带的文字会互相压住——每侧只标触碰最多的那条，
+        // 其余的带保留区间底色和细中线，信息不丢、字不糊。
+        const labelBudget = { support: 1, resistance: 1 };
+        sorted.forEach((b) => {
+          const lo = num(b.lo), hi = num(b.hi), mid = num(b.mid);
+          if (lo == null || hi == null || mid == null) return;
+          const isSupport = b.kind === "support";
+          const tint = isSupport ? TA_STYLE.support : TA_STYLE.resistance;
+          const accent = isSupport ? "#176b5b" : "#b7791f";
+          markAreas.push([
+            { yAxis: lo, itemStyle: { color: tint } },
+            { yAxis: hi },
+          ]);
+          let dense = prevBandPrice != null && span > 0
+            && Math.abs(mid - prevBandPrice) / span < 0.05;
+          if (mode === "all") {
+            if (labelBudget[b.kind] > 0) labelBudget[b.kind] -= 1;
+            else dense = true;
+          }
+          if (!dense) prevBandPrice = mid;
+          markLines.push({
+            yAxis: mid,
+            lineStyle: { color: accent, width: 0.8, type: "dotted", opacity: 0.5 },
+            label: {
+              show: !dense,
+              formatter: `${isSupport ? "支撑" : "压力"} ${this._taFmt(lo)}–${this._taFmt(hi)} · ${b.touches}次`,
+              color: accent,
+              fontSize: 9,
+              position: "insideStartTop",
+              backgroundColor: "rgba(255, 255, 255, 0.82)",
+              padding: [1, 3],
+              borderRadius: 2,
+            },
+          });
+        });
+      }
+
+      // ⑥ 波段结构：HH/HL/LH/LL 标在摆动点上（道氏理论的结构，比数浪客观）
+      const structure = Array.isArray(payload.layers.structure) ? payload.layers.structure : [];
+      if (want("structure") && structure.length) {
+        const pts = [];
+        structure.forEach((s) => {
+          const x = toBar(s.i);
+          if (x == null) return;
+          pts.push({ value: [x, Number(s.price)], kind: s.kind });
+        });
+        if (pts.length) {
+          top.push({
+            name: "TA·波段结构",
+            type: "scatter",
+            xAxisIndex: 0,
+            yAxisIndex: 0,
+            data: pts,
+            symbolSize: 4,
+            silent: true,
+            // 信号散点 z=30，结构字母压在下面会被 K/M/A 盖住（实测 L/LL 直接看不见）
+            z: 32,
+            itemStyle: { color: "#1c2430", opacity: 0.75 },
+            label: {
+              show: true,
+              position: "top",
+              distance: 3,
+              formatter: (params) => (params.data && params.data.kind) || "",
+              color: "#1c2430",
+              fontSize: 9,
+              backgroundColor: "rgba(255, 255, 255, 0.82)",
+              padding: [1, 2],
+              borderRadius: 2,
+            },
+          });
+        }
+      }
+
+      // ⑦ 线性回归通道 ±2σ：斜率与带宽都由数据定，不依赖人工选点
+      const reg = payload.layers.regression;
+      if (want("regression") && reg && reg.from && reg.to) {
+        const i1 = toBar(reg.from.i), i2 = toBar(reg.to.i);
+        const p1 = num(reg.from.price), p2 = num(reg.to.price);
+        const sigma = num(reg.sigma) || 0;
+        if (i1 != null && i2 != null && i1 !== i2 && sigma > 0) {
+          const k = (p2 - p1) / (i2 - i1);
+          [[0, "中轨", 1.3, "solid", "#176b5b"],
+           [2, "+2σ", 0.9, "dashed", "#9ca3af"],
+           [-2, "-2σ", 0.9, "dashed", "#9ca3af"]].forEach(([mult, text, width, type, color]) => {
+            const data = blank();
+            const off = mult * sigma;
+            for (let x = i1; x <= lastBar; x++) data[x] = p1 + k * (x - i1) + off;
+            series.push(lineSeries(`回归${text}`, data, {
+              color, width, type, opacity: mode === "all" ? 0.6 : 0.95,
+            }));
+          });
+        }
+      }
+
+      // ⑧ 跳空缺口：标在缺口区间中点，未补的才写字（A 股"缺口必补"）
+      const gapList = Array.isArray(payload.layers.gaps) ? payload.layers.gaps : [];
+      if (want("gaps") && gapList.length) {
+        const pts = [];
+        gapList.forEach((g) => {
+          const x = toBar(g.i);
+          if (x == null) return;
+          pts.push({ value: [x, (Number(g.lo) + Number(g.hi)) / 2], gap: g });
+        });
+        if (pts.length) {
+          top.push({
+            name: "TA·缺口",
+            type: "scatter",
+            xAxisIndex: 0,
+            yAxisIndex: 0,
+            data: pts,
+            symbol: "diamond",
+            symbolSize: 7,
+            silent: true,
+            // 同结构点：缺口文字要能压住信号字母，否则"缺口 0.21%"只剩半截
+            z: 32,
+            itemStyle: {
+              color: (params) => {
+                const g = params.data && params.data.gap;
+                return g && g.kind === "up" ? COLORS.up : COLORS.down;
+              },
+              opacity: 0.85,
+            },
+            label: {
+              // 全显示时缺口标签会跟信号字母、支撑带标签叠在一起，只留菱形标记
+              show: mode !== "all",
+              position: "right",
+              distance: 4,
+              formatter: (params) => {
+                const g = params.data && params.data.gap;
+                if (!g) return "";
+                return g.filled ? `缺口 ${g.size_pct}%` : `未补 ${g.size_pct}%`;
+              },
+              color: COLORS.muted,
+              fontSize: 9,
+              backgroundColor: "rgba(255, 255, 255, 0.82)",
+              padding: [1, 2],
+              borderRadius: 2,
+            },
+          });
+        }
+      }
+
+      // 水平线/区间挂在一个空 line 系列上（与持仓成本线同一套写法）
+      if (markLines.length || markAreas.length) {
+        series.push({
+          name: "TA·标注",
+          type: "line",
+          xAxisIndex: 0,
+          yAxisIndex: 0,
+          data: [],
+          silent: true,
+          z: 2,
+          markLine: markLines.length
+            ? { silent: true, symbol: "none", animation: false, data: markLines }
+            : undefined,
+          markArea: markAreas.length
+            ? { silent: true, animation: false, data: markAreas }
+            : undefined,
+        });
+      }
+
+      return { series, top, graphic: [this._taNoteGraphic(mode, payload, fmtDate)] };
+    }
+
+    // 角落说明：用的哪种、依据哪几个摆动点——让人能判断这线值不值得信
+    _taNoteGraphic(mode, payload, fmtDate) {
+      const fib = (payload.layers && payload.layers.fib) || {};
+      const trend = (payload.layers && payload.layers.trend) || {};
+      const bands = payload.layers && payload.layers.bands;
+      const parts = [];
+      const label = TA_LABELS[mode] || mode;
+
+      if (mode === "retracement" && fib.retracement) {
+        const r = fib.retracement;
+        parts.push(`锚 ${fmtDate(r.from.i)}→${fmtDate(r.to.i)}（${r.up ? "上涨" : "下跌"}段）`);
+      } else if ((mode === "channel" || mode === "fan") && fib.channel) {
+        const c = fib.channel;
+        parts.push(`基线 ${fmtDate(c.from.i)}→${fmtDate(c.to.i)}`);
+        if (c.unit != null) parts.push(`轨距 ${this._fmtPrice(c.unit)}`);
+      } else if (mode === "trend") {
+        if (trend.upper) parts.push(`上轨 ${trend.upper.hits}次触碰`);
+        if (trend.lower) parts.push(`下轨 ${trend.lower.hits}次触碰`);
+        if (trend.wedge) {
+          const w = trend.wedge;
+          parts.push(`楔形${w.type === "converging" ? "收敛" : "发散"} ${w.gap_change_pct >= 0 ? "+" : ""}${w.gap_change_pct}%`);
+        } else {
+          parts.push("当前未识别出楔形");
+        }
+      } else if (mode === "bands" && Array.isArray(bands)) {
+        const sup = bands.filter((b) => b.kind === "support").length;
+        parts.push(`${bands.length} 条带（压力 ${bands.length - sup} / 支撑 ${sup}）`);
+      } else if (mode === "structure") {
+        const list = (payload.layers && payload.layers.structure) || [];
+        const head = list.slice(-4).map((s) => s.kind).join(" → ");
+        parts.push(`${list.length} 个结构点${head ? `（最近：${head}）` : ""}`);
+        parts.push("HH/HL = 上行结构，LH/LL = 下行结构");
+      } else if (mode === "regression") {
+        const reg = payload.layers && payload.layers.regression;
+        if (reg) {
+          parts.push(`${reg.window} 日拟合 · R² ${reg.r2}`);
+          parts.push(`带宽 ±2σ（σ=${this._taFmt(reg.sigma)}）`);
+        }
+      } else if (mode === "gaps") {
+        const list = (payload.layers && payload.layers.gaps) || [];
+        const unfilled = list.filter((g) => !g.filled).length;
+        parts.push(list.length ? `${list.length} 个跳空（未补 ${unfilled}）` : "当前窗口无跳空");
+      } else if (mode === "all") {
+        parts.push("八层叠加：回撤 + 通道 + 扇形 + 趋势线 + 支撑阻力带 + 结构 + 回归 + 缺口");
+      }
+      parts.push("算法生成，非交易信号");
+
+      return {
+        type: "text",
+        // 贴右边：左边是 Y 轴刻度，写在那会跟"最高/最低价"的轴标签叠字
+        right: 12,
+        top: 60,
+        silent: true,
+        // 信号散点的 z 是 30/35/36，说明文字必须压过它们，否则"K/M"字母会盖在字上
+        z: 50,
+        style: {
+          text: `技术面 · ${label}｜${parts.join("｜")}`,
+          fill: COLORS.muted,
+          fontSize: 10,
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+          // 文字压在 1,500 网格线/信号字母上会被"划掉"，垫一层纸色底
+          backgroundColor: "rgba(255, 255, 255, 0.92)",
+          padding: [2, 5],
+          borderRadius: 3,
+        },
+      };
+    }
+
+    // 标注用价格格式：≥10 元取 2 位小数（1290.50），低价 ETF 保留 3 位（0.697）
+    _taFmt(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "-";
+      return Math.abs(n) >= 10 ? n.toFixed(2) : n.toFixed(3);
+    }
+
+    // 主图 Y 轴锁定在价格区间。
+    // 不改的话，斐波那契平行轨/支撑带这类落在价格区外的线会把刻度拉大：
+    // 实测 600519 开「通道」时价格区从满高被压到 1/3，蜡烛挤成一条带。
+    // 上下界要取"整刻度"——直接给原始 hi/lo，ECharts 会把轴标签打成 1560.1917999999998。
+    _taAxisRange() {
+      const k = this.data && this.data.kline;
+      if (!k || !k.length) return null;
+      let hi = -Infinity, lo = Infinity;
+      for (let i = 0; i < k.length; i++) {
+        const b = k[i];
+        if (b.high != null) hi = Math.max(hi, Number(b.high));
+        if (b.low != null) lo = Math.min(lo, Number(b.low));
+      }
+      if (!(hi > lo)) return null;
+      const step = this._niceStep((hi - lo) / 8);
+      return {
+        min: Number((Math.floor(lo / step) * step).toFixed(4)),
+        max: Number((Math.ceil(hi / step) * step).toFixed(4)),
+      };
+    }
+
+    _niceStep(raw) {
+      if (!(raw > 0)) return 1;
+      const exp = Math.pow(10, Math.floor(Math.log10(raw)));
+      const f = raw / exp;
+      const nice = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+      return nice * exp;
+    }
+
+    // 当前视窗的价格跨度，用于判断两个标签是否挤在一起（纯启发式，不依赖渲染后坐标）
+    _taVisibleSpan() {
+      const k = this.data && this.data.kline;
+      if (!k || !k.length) return 0;
+      let hi = -Infinity, lo = Infinity;
+      for (let i = 0; i < k.length; i++) {
+        const b = k[i];
+        if (b.high != null) hi = Math.max(hi, Number(b.high));
+        if (b.low != null) lo = Math.min(lo, Number(b.low));
+      }
+      return hi > lo ? hi - lo : 0;
+    }
+
     // 坐标轴配置 - 东财风格
     _axisConfig(gridIndex, splitLine, formatter) {
       return {
@@ -450,29 +1058,65 @@ window.StockRadar = window.StockRadar || {};
       };
     }
 
-    // 均线 - 东财风格：平滑曲线
+    // 分道轨道左侧行标（M/K/A/B/D）：graphic + 百分比定位（相对整张画布），
+    // 容器缩放时自动跟随；纵向按"道中心 - 半字高"手工对中，不依赖文本对齐属性。
+    _buildLaneLabels(topPct, heightPct) {
+      const rowPct = heightPct / LANE_LABELS.length;
+      const chartHeight = (this.chart && this.chart.getHeight()) || 600;
+      const halfTextPct = (5 / chartHeight) * 100;   // 8px 字高约 10px，取一半
+      return LANE_LABELS.map((label, i) => ({
+        type: "text",
+        left: "6.6%",
+        top: `${(topPct + rowPct * (i + 0.5) - halfTextPct).toFixed(3)}%`,
+        silent: true,
+        z: 40,
+        style: {
+          text: label,
+          fill: COLORS.indicatorLabel,   // #a9a8a1
+          font: "8px ui-monospace, Consolas, monospace",
+        },
+      }));
+    }
+
+    // 均线 - 统一发丝灰，身份交给末端数字（颜色只留给涨跌与信号）
     _buildMASeries(indicators) {
       return [
-        ["ma5", "MA5", COLORS.ma5],
-        ["ma10", "MA10", COLORS.ma10],
-        ["ma20", "MA20", COLORS.ma20],
-        ["ma60", "MA60", COLORS.ma60],
-      ].map(([key, name, color]) => ({
+        ["ma5", "MA5", "5"],
+        ["ma10", "MA10", "10"],
+        ["ma20", "MA20", "20"],
+        ["ma60", "MA60", "60"],
+      ].map(([key, name, lab]) => ({
         name,
         type: "line",
         xAxisIndex: 0,
         yAxisIndex: 0,
         data: indicators[key] || [],
         smooth: true,
-        lineStyle: { width: 1.5, color },
+        lineStyle: { width: 0.9, color: COLORS.indicatorMuted },
+        // 只影响 tooltip / 图例的色点与行首色，线本身由 lineStyle 决定。
+        // 必须用 muted 而非 indicatorMuted：后者在白底上对比度约 1.6:1，tooltip 里会看不清。
+        itemStyle: { color: COLORS.muted },
         symbol: "none",
-        silent: true,
+        // 末端数字用 endLabel：逐点 label（data[].label）在 5.5 实测不渲染，
+        // endLabel 走 ignoreClip，不受网格右缘裁剪。
+        endLabel: {
+          show: true,
+          distance: 4,
+          formatter: lab,
+          color: COLORS.indicatorLabel,
+          fontSize: 8,
+          fontWeight: 400,
+          fontFamily: "ui-monospace, Consolas, monospace",
+        },
+        // 均线收敛时四条末端数字会叠在一起，让它自动上下错开
+        labelLayout: { moveOverlap: "shiftY" },
+        z: 2,
       }));
     }
 
     // 构建主图系列（K线/折线/面积）
     _buildMainSeries(kline, ohlc, dates, name, code) {
-      const chartType = this.chartType || "candle_solid";
+      const chartType = this.chartType || "candle_up_stroke";
 
       // 折线图
       if (chartType === "line") {
@@ -597,7 +1241,7 @@ window.StockRadar = window.StockRadar || {};
         return [
           this._lineSeries("K", indicators.kdj.k, COLORS.kdjK),
           this._lineSeries("D", indicators.kdj.d, COLORS.kdjD),
-          this._lineSeries("J", indicators.kdj.j, COLORS.kdjJ),
+          this._lineSeries("J", indicators.kdj.j, COLORS.kdjJ, "dotted"),
         ];
       }
       if (this.currentIndicator === "boll" && indicators.boll) {
@@ -643,7 +1287,7 @@ window.StockRadar = window.StockRadar || {};
     }
 
     // 副图线系列 - 平滑曲线
-    _lineSeries(name, data, color) {
+    _lineSeries(name, data, color, type) {
       return {
         name,
         type: "line",
@@ -651,7 +1295,8 @@ window.StockRadar = window.StockRadar || {};
         yAxisIndex: 2,
         data,
         smooth: true,
-        lineStyle: { width: 1.5, color },
+        lineStyle: { width: 1.1, color, type: type || "solid" },
+        itemStyle: { color: COLORS.muted },
         symbol: "none",
         silent: true,
       };
@@ -692,8 +1337,13 @@ window.StockRadar = window.StockRadar || {};
       };
     }
 
-    _buildSignalSeries(signals, dates, kline) {
+    _buildSignalSeries(signals, dates, kline, lanesIdx) {
       if (!signals || signals.length === 0) return [];
+
+      // 分道模式（lanesIdx != null）：仍是这一个 scatter 系列，只换两样东西——
+      // value 从"价格"换成"族道中心"，索引从主图换成轨道 grid；
+      // 字母 / 红绿 / 透明图标 / 白色光晕两种模式共用，不另建系列。
+      const lanes = lanesIdx != null;
 
       // 只显示最近 60 个交易日的信号，避免过于密集
       const recent = signals.filter(s => {
@@ -721,50 +1371,50 @@ window.StockRadar = window.StockRadar || {};
         const item = kline[idx];
         if (!item) continue;
 
-        const above = !meta.good;                 // 坏信号画在 K 线上方，好信号画在下方
-        const base = above ? item.high : item.low;
+        // 分道：行位由指标族决定，y 取道中心（0.5 / 1.5 / … / 4.5），跳过价格错层——
+        // 同一天同一族不会既金叉又死叉，分道后天然零重叠。
+        let value;
+        if (lanes) {
+          value = [s.date, LANE_Y[meta.letter] != null ? LANE_Y[meta.letter] : LANE_Y_FALLBACK];
+        } else {
+          const above = !meta.good;                 // 坏信号画在 K 线上方，好信号画在下方
+          const base = above ? item.high : item.low;
 
-        // 贪心找不与他人重叠的层（上限 30 层，足以覆盖极端密度；每层价格递增，必然能找到空位）
-        let price = base;
-        for (let level = 1; level <= 30; level++) {
-          price = base + (above ? 1 : -1) * base * STACK_STEP * level;
-          const collides = placed.some(p =>
-            p.above === above &&
-            Math.abs(p.idx - idx) <= X_NEAR &&
-            Math.abs(p.price - price) <= base * Y_NEAR
-          );
-          if (!collides) break;
+          // 贪心找不与他人重叠的层（上限 30 层，足以覆盖极端密度；每层价格递增，必然能找到空位）
+          let price = base;
+          for (let level = 1; level <= 30; level++) {
+            price = base + (above ? 1 : -1) * base * STACK_STEP * level;
+            const collides = placed.some(p =>
+              p.above === above &&
+              Math.abs(p.idx - idx) <= X_NEAR &&
+              Math.abs(p.price - price) <= base * Y_NEAR
+            );
+            if (!collides) break;
+          }
+
+          placed.push({ idx, price, above });
+          value = [s.date, price];
         }
 
-        placed.push({ idx, price, above });
-
         points.push({
-          value: [s.date, price],
+          value,
           symbol: SHAPE_SYMBOL[meta.shape] || "circle",
-          symbolSize: 20,
+          symbolSize: 20,                       // 尺寸不变，只把图标透明化
           itemStyle: {
-            color,
-            borderColor: "#ffffff",
-            borderWidth: 2,
-            shadowBlur: 5,
-            shadowColor: meta.good ? "rgba(231,76,60,0.5)" : "rgba(23,107,91,0.5)",
+            color: "transparent",               // 图标隐形，但命中区还在
+            borderWidth: 0,
           },
           label: {
             show: true,
-            formatter: meta.letter,   // 图上只显示指标字母（M/K/D/B/A），形状+颜色区分类型与好/坏，一眼可辨
+            formatter: meta.letter,
             position: "inside",
             align: "center",
             verticalAlign: "middle",
-            color: "#ffffff",
+            color,                              // 红=好 / 绿=坏，颜色回到字母本身
             fontSize: 10,
             fontWeight: "bold",
-            backgroundColor: "rgba(0,0,0,0.55)",   // 半透明背景徽章，把字母和图标线条分开层级，避免互相压线
-            borderColor: "#ffffff",
-            borderWidth: 1,
-            borderRadius: 3,
-            padding: [1, 3],
-            shadowBlur: 2,
-            shadowColor: "rgba(0,0,0,0.4)",
+            textBorderColor: COLORS.labelHalo,  // 白色光晕，压在任何底色上都可读
+            textBorderWidth: 2,
           },
           _sig: s,
         });
@@ -773,8 +1423,8 @@ window.StockRadar = window.StockRadar || {};
       return [{
         name: "交易信号",
         type: "scatter",
-        xAxisIndex: 0,
-        yAxisIndex: 0,
+        xAxisIndex: lanes ? lanesIdx : 0,
+        yAxisIndex: lanes ? lanesIdx : 0,
         z: 30,
         data: points,
         tooltip: {
@@ -823,6 +1473,8 @@ window.StockRadar = window.StockRadar || {};
       }
       params.forEach((param) => {
         // 交易信号是 scatter 系列，其 tooltip 在下方单独列出，避免这里把 [date, price] 数组输出成 "2026-06-17,619.563" 重复行
+        // 技术面标注（TA·）是几何测量线，不是当天的数据，悬停时不进明细
+        if (param.seriesName && param.seriesName.indexOf("TA·") === 0) return;
         if (param.seriesName && param.value != null && param.seriesType !== "candlestick" && param.seriesType !== "scatter") {
           const value = typeof param.value === "number" ? param.value.toFixed(2) : param.value;
           html += `<div><span style="color:${param.color}">${esc(param.seriesName)}</span>: ${esc(value)}</div>`;
@@ -844,11 +1496,34 @@ window.StockRadar = window.StockRadar || {};
         }
       }
 
+      // 策略扫描的买点/卖点是 overlay，不在 data.signals 里——
+      // 只画在图上、详情不列，就会出现「扫描完成 3 个买点，悬停却查无此项」。
+      const ov = this.overlay;
+      if (ov && ov.type === "scan" && Array.isArray(ov.signals)) {
+        const dayScan = ov.signals.filter(s => s.date === item.date);
+        if (dayScan.length > 0) {
+          html += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #eee">`;
+          dayScan.forEach(s => {
+            if (s.buy) {
+              html += `<div style="color:${COLORS.signalBuy};font-weight:bold">▲ 买点 · 策略扫描</div>`;
+            }
+            if (s.sell) {
+              html += `<div style="color:${COLORS.signalSell};font-weight:bold">▼ 卖点 · 策略扫描</div>`;
+            }
+          });
+          html += `</div>`;
+        }
+      }
+
       return html + "</div>";
     }
 
     _fmtPrice(value) {
-      return value == null ? "-" : Number(value).toFixed(2);
+      if (value == null) return "-";
+      const v = Number(value);
+      if (!Number.isFinite(v)) return "-";
+      // 最多 3 位小数并去掉尾随 0：1446.44 → 1446.44，0.697 → 0.697，3.5 → 3.5
+      return v.toFixed(3).replace(/\.?0+$/, "");
     }
 
     _fmtPct(value) {
@@ -1108,9 +1783,49 @@ window.StockRadar = window.StockRadar || {};
       this.sourceDropdown = document.getElementById("klineSourceDropdown");
       this.sourceTrigger = document.getElementById("klineSourceTrigger");
       this.sourceLabel = document.getElementById("klineSourceLabel");
-      this.daysButtons = Array.from(document.querySelectorAll(".kline-days-btn"));
-      this.indicatorButtons = Array.from(document.querySelectorAll(".kline-indicator-btn"));
+      // 只取带 data-days 的预设按钮：「缩短/拉长」复用了同款外观类（CSS 冻结），
+      // 但没有 data-days——带上它们会让 active 判定出现「点 120 柱两个按钮一起亮」。
+      this.daysButtons = Array.from(document.querySelectorAll(".kline-days-btn[data-days]"));
+      this.daysHintEl = document.getElementById("klineDaysHint");
+      this.shrinkBtn = document.getElementById("klineShrinkBtn");
+      this.stretchBtn = document.getElementById("klineStretchBtn");
+      this.rangeStartInput = document.getElementById("klineRangeStart");
+      this.rangeEndInput = document.getElementById("klineRangeEnd");
+      this.rangeApplyBtn = document.getElementById("klineRangeApply");
+      this.rangeClearBtn = document.getElementById("klineRangeClear");
+      // 只取副图那五个指标按钮：信号布局按钮复用了同款外观类（CSS 冻结），
+      // 必须在这里排除，否则点「贴图/分道」会被当成切换副图指标。
+      this.indicatorButtons = Array.from(
+        document.querySelectorAll(".kline-indicator-group .kline-indicator-btn:not(.kline-signal-layout-btn)")
+      );
       this.chart = new KlineChart(document.getElementById("klineChartContainer"));
+
+      // 技术面图层：下拉控件 + 一份按 code+days 缓存的几何结果（off 时不发请求）
+      this.taSelect = document.getElementById("klineTaSelect");
+      this.taMode = "off";
+      this.taCache = null;
+
+      // 导出图片：直接从 canvas 取图，白底 2 倍，文件名带标的与区间
+      const exportBtn = document.getElementById("klineExportBtn");
+      if (exportBtn) {
+        exportBtn.onclick = () => {
+          try {
+            const inst = this.chart && this.chart.chart;
+            if (!inst) return;
+            const url = inst.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
+            const code = (this.stockCodeEl && this.stockCodeEl.textContent || "").trim();
+            const label = (code && code !== "-") ? code : "K线";
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${label.replace(/[\\\\/:*?"<>|\s]+/g, "_")}_K线.png`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+          } catch (e) {
+            console.error("K线导出失败:", e);
+          }
+        };
+      }
 
       // 策略选择 + 扫描/回测控件
       this.strategySelect = document.getElementById("klineStrategySelect");
@@ -1138,6 +1853,13 @@ window.StockRadar = window.StockRadar || {};
       this.autoSync = localStorage.getItem("kline_auto_sync") === "true";
       this.currentDays = parseInt(localStorage.getItem("kline_default_days") || "120");
       this.selectedSource = localStorage.getItem("kline_source") || "auto";
+
+      // 自定义区间 {start_date, end_date}：给了日期就以日期为准，后端会忽略 days，
+      // 但 currentDays 仍保留——信号/技术面两个接口还只认天数，用它做近似窗口。
+      this.range = null;
+      // 「清除」要还原到应用区间之前的柱数：临时缩放不写 localStorage，
+      // 所以这里必须自己记住，不能指望预设按钮就是上一个状态。
+      this._daysBeforeRange = null;
 
       // 初始化 UI 状态
       if (this.autoSyncToggle) {
@@ -1175,6 +1897,19 @@ window.StockRadar = window.StockRadar || {};
 
     _bindEvents() {
       document.getElementById("klineCloseBtn").onclick = () => this.close();
+      // 资金面条：默认折叠，点标题展开
+      const fundsToggle = document.getElementById("klineFundsToggle");
+      if (fundsToggle) {
+        fundsToggle.addEventListener("click", () => {
+          const body = document.getElementById("klineFundsBody");
+          const section = document.getElementById("klineFundsSection");
+          if (!body) return;
+          const willOpen = body.hidden;
+          body.hidden = !willOpen;
+          fundsToggle.setAttribute("aria-expanded", String(willOpen));
+          if (section) section.classList.toggle("open", willOpen);
+        });
+      }
       this.overlayEl.onclick = () => this.close();
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && this.modalEl.classList.contains("open")) this.close();
@@ -1219,18 +1954,45 @@ window.StockRadar = window.StockRadar || {};
 
       this.daysButtons.forEach((button) => {
         button.addEventListener("click", () => {
-          this.daysButtons.forEach((item) => item.classList.remove("active"));
-          button.classList.add("active");
+          // 预设按钮是「天数模式」的入口：点它就等于离开自定义区间，
+          // 否则会出现「按钮亮着、图上却是别的日期段」的错位。
           this.currentDays = Number(button.dataset.days || 120);
+          this.range = null;
+          this._daysBeforeRange = null;
           localStorage.setItem("kline_default_days", String(this.currentDays));
+          this._updateDaysButtons();
           if (this.currentCode) this.load(this.currentCode);
+        });
+      });
+
+      // 连续缩放（东财式拉长/缩短）：只改当前视图，不写 localStorage ——
+      // 临时看一眼更长的历史，不该把用户的默认区间改掉。
+      if (this.shrinkBtn) this.shrinkBtn.addEventListener("click", () => this._zoomDays(0.7));
+      if (this.stretchBtn) this.stretchBtn.addEventListener("click", () => this._zoomDays(1.4));
+
+      // 自定义区间：只有「应用」才真正重取数。日期框的 input 事件不绑定，
+      // 否则用户每敲一段就在后台发一次请求（本地日线再快也扛不住这么点）。
+      if (this.rangeApplyBtn) this.rangeApplyBtn.addEventListener("click", () => this._applyRange());
+      if (this.rangeClearBtn) this.rangeClearBtn.addEventListener("click", () => this._clearRange());
+      // 日期框里按回车 = 应用，省一次鼠标挪动
+      [this.rangeStartInput, this.rangeEndInput].forEach((input) => {
+        if (!input) return;
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            this._applyRange();
+          }
         });
       });
 
       // K线样式切换
       this.chartTypeButtons = Array.from(document.querySelectorAll(".kline-chart-type-btn"));
-      this.chartType = localStorage.getItem("kline_chart_type") || "candle_solid";
+      this.chartType = localStorage.getItem("kline_chart_type") || "candle_up_stroke";
       this._updateChartTypeButtons();
+      // 把已存/默认画法真正喂给图表实例。历史上这里只设了按钮高亮，
+      // KlineChart 自己的 chartType 一直是 undefined，于是图永远走兜底值，
+      // localStorage 里的选择从未生效（默认值改成空心涨后这个错位才显形）。
+      this.chart.setChartType(this.chartType);
       this.chartTypeButtons.forEach((button) => {
         button.addEventListener("click", () => {
           this.chartTypeButtons.forEach((item) => item.classList.remove("active"));
@@ -1241,6 +2003,21 @@ window.StockRadar = window.StockRadar || {};
         });
       });
 
+      // 信号布局切换（贴图 / 分道）。只重绘，不重新取数。
+      this.signalLayoutButtons = Array.from(document.querySelectorAll(".kline-signal-layout-btn"));
+      this.signalLayout = readSignalLayout();
+      this._updateSignalLayoutButtons();
+      this.chart.setSignalLayout(this.signalLayout);
+      this.signalLayoutButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          this.signalLayoutButtons.forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          this.signalLayout = normalizeSignalLayout(button.dataset.layout);
+          localStorage.setItem(SIGNAL_LAYOUT_KEY, this.signalLayout);
+          this.chart.setSignalLayout(this.signalLayout);
+        });
+      });
+
       this.indicatorButtons.forEach((button) => {
         button.addEventListener("click", () => {
           this.indicatorButtons.forEach((item) => item.classList.remove("active"));
@@ -1248,6 +2025,19 @@ window.StockRadar = window.StockRadar || {};
           this.chart.setSubIndicator(button.dataset.indicator);
         });
       });
+
+      // 技术面图层（默认关）：切换只重绘；第一次开启才去后端算
+      this.taMode = normalizeTaMode(localStorage.getItem(TA_KEY));
+      if (this.taSelect) {
+        this.taSelect.value = this.taMode;
+        this.taSelect.addEventListener("change", () => {
+          this.taMode = normalizeTaMode(this.taSelect.value);
+          localStorage.setItem(TA_KEY, this.taMode);
+          this.chart.setTaMode(this.taMode);
+          if (this.taMode !== "off") this._loadTa();
+        });
+      }
+      this.chart.setTaMode(this.taMode);
       this.syncBtn.onclick = () => this.syncCurrent();
 
       // 策略选择 + 扫描买点 + 跑回测
@@ -1262,15 +2052,93 @@ window.StockRadar = window.StockRadar || {};
       if (this.backtestBtn) this.backtestBtn.onclick = () => this._runBacktest();
     }
 
+    // 预设按钮态。有 range 时预设**全不** active：
+    // 自定义区间跟预设不是一回事，亮着任何一档都是在谎报当前窗口。
     _updateDaysButtons() {
+      const inRange = !!this.range;
       this.daysButtons.forEach((button) => {
         const days = Number(button.dataset.days || 120);
-        if (days === this.currentDays) {
-          button.classList.add("active");
-        } else {
-          button.classList.remove("active");
-        }
+        button.classList.toggle("active", !inRange && days === this.currentDays);
       });
+      this._renderDaysHint();
+      // 柱数写进 title：工具栏已经排满，再放一个数字标签会把后面那组挤掉行
+      if (this.shrinkBtn) this.shrinkBtn.title = `缩短区间：当前 ${this.currentDays} 柱 ×0.7`;
+      if (this.stretchBtn) this.stretchBtn.title = `拉长区间：当前 ${this.currentDays} 柱 ×1.4`;
+    }
+
+    // 柱数提示。有实际返回条数时用真值：range 模式下 currentDays 只是按日历折算的
+    // 近似窗口（还得剔除停牌/节假日），拿它当柱数显示会跟图上的 bar 数量对不上。
+    _renderDaysHint(actualBars) {
+      if (!this.daysHintEl) return;
+      const bars = actualBars || this.currentDays;
+      const inRange = !!this.range;
+      this.daysHintEl.textContent = inRange ? `区间 ${bars}柱` : `${bars}柱`;
+      this.daysHintEl.classList.toggle("range", inRange);
+      this.daysHintEl.title = inRange
+        ? `${this.range.start_date} ~ ${this.range.end_date}，实际 ${bars} 柱`
+        : `当前 ${bars} 柱`;
+    }
+
+    // 连续缩放。clamp 到 [20, 1000]：后端 days 上限就是 1000，少于 20 根时
+    // 均线和 MACD 全是空窗，看着像「没数据」。
+    _zoomDays(factor) {
+      this.currentDays = Math.max(20, Math.min(1000, Math.round(this.currentDays * factor)));
+      // 缩放是在天数轴上做的，自定义区间必须一起清掉，否则改了柱数图没反应
+      this.range = null;
+      this._daysBeforeRange = null;
+      this._updateDaysButtons();
+      if (this.currentCode) this.load(this.currentCode);
+    }
+
+    // 应用自定义起止日期
+    _applyRange() {
+      const start = ((this.rangeStartInput && this.rangeStartInput.value) || "").trim();
+      const end = ((this.rangeEndInput && this.rangeEndInput.value) || "").trim();
+      if (!start || !end) {
+        this._setStatus("error", "起止日期都要选，单边日期交不出区间");
+        return;
+      }
+      const startMs = Date.parse(`${start}T00:00:00`);
+      const endMs = Date.parse(`${end}T00:00:00`);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        this._setStatus("error", "日期格式不对，需要 YYYY-MM-DD");
+        return;
+      }
+      if (startMs > endMs) {
+        this._setStatus("error", "起始日期不能晚于结束日期");
+        return;
+      }
+      const spanDays = Math.round((endMs - startMs) / 86400000) + 1;
+      if (spanDays > 3660) {
+        // 本地日线也就十来年，再长只会把一次请求拖成十几秒
+        this._setStatus("error", "区间跨度不能超过 10 年");
+        return;
+      }
+      // 只在第一次进区间模式时记：连续换两段日期后「清除」应该回到当初的柱数
+      if (!this.range) this._daysBeforeRange = this.currentDays;
+      this.range = { start_date: start, end_date: end };
+      // days 仍需给一个近似值：信号/技术面接口还没吃 range（TA 后端后续才支持），
+      // 按 A 股一年约 245 个交易日折算出窗口，别让信号点只算到区间的一半。
+      this.currentDays = Math.max(20, Math.min(1000, Math.round((spanDays * 245) / 365)));
+      this._updateDaysButtons();
+      this._setStatus("loading", `按 ${start} ~ ${end} 取数（约 ${this.currentDays} 个交易日）`);
+      if (this.currentCode) this.load(this.currentCode);
+    }
+
+    // 清除自定义区间：回到应用前的柱数（没经历过应用就保持现状），
+    // 日期框一起清空，否则界面上留着日期却按天数渲染，用户没法判断到底哪个生效。
+    _clearRange() {
+      const hadRange = !!this.range;
+      this.range = null;
+      if (this._daysBeforeRange != null) {
+        this.currentDays = this._daysBeforeRange;
+        this._daysBeforeRange = null;
+      }
+      if (this.rangeStartInput) this.rangeStartInput.value = "";
+      if (this.rangeEndInput) this.rangeEndInput.value = "";
+      this._updateDaysButtons();
+      // 本来就没区间时只是清输入框，别再白跑一次取数
+      if (hadRange && this.currentCode) this.load(this.currentCode);
     }
 
     _updateChartTypeButtons() {
@@ -1281,6 +2149,119 @@ window.StockRadar = window.StockRadar || {};
           button.classList.remove("active");
         }
       });
+    }
+
+    // 按钮的初始态以 localStorage 里的真实值为准（HTML 里的 active 只是兜底）
+    _updateSignalLayoutButtons() {
+      this.signalLayoutButtons.forEach((button) => {
+        if (button.dataset.layout === this.signalLayout) {
+          button.classList.add("active");
+        } else {
+          button.classList.remove("active");
+        }
+      });
+    }
+
+    // ── 资金面（北向持股 + 龙虎榜席位） ──────────────────────────────
+    async _loadFunds(code) {
+      const body = document.getElementById("klineFundsBody");
+      const summary = document.getElementById("klineFundsSummary");
+      if (!body || !summary) return;
+      this._fundsSeq = (this._fundsSeq || 0) + 1;
+      const seq = this._fundsSeq;
+      body.innerHTML = '<div class="kline-funds-empty">资金面加载中…</div>';
+      try {
+        const resp = await fetch(`/api/stock/funds?code=${encodeURIComponent(code)}`);
+        const payload = await resp.json();
+        if (seq !== this._fundsSeq) return;
+        this._renderFunds((payload && payload.data) || {}, body, summary);
+      } catch (err) {
+        if (seq === this._fundsSeq) {
+          body.innerHTML = '<div class="kline-funds-empty">资金面加载失败</div>';
+          summary.textContent = "";
+        }
+      }
+    }
+
+    _fmtYi(value) {
+      if (value == null || Number.isNaN(Number(value))) return "—";
+      const n = Number(value);
+      if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+      if (Math.abs(n) >= 1e4) return (n / 1e4).toFixed(1) + "万";
+      return n.toFixed(0);
+    }
+
+    _renderFunds(data, body, summary) {
+      const mg = data.margin || {};
+      const lhb = data.lhb || {};
+      const m = mg.metrics || {};
+      const parts = [];
+      if (mg.available) {
+        parts.push(`融资 ${this._fmtYi(m.fin_balance)}`);
+        if (m.change_5d_pct != null) {
+          parts.push(`5日 ${m.change_5d_pct >= 0 ? "+" : ""}${m.change_5d_pct}%`);
+        }
+        if (mg.risk === "high") parts.push("融资高位");
+      } else {
+        parts.push("无两融数据");
+      }
+      parts.push(lhb.available ? `龙虎榜 ${String(lhb.date || "").slice(5)}` : "近半年未上榜");
+      summary.textContent = parts.join(" · ");
+
+      let marginHtml = '<div class="kline-funds-empty">暂无融资融券数据（先跑 sync_margin_data.py）</div>';
+      if (mg.available) {
+        const riskCls = mg.risk === "high" ? "high" : mg.risk === "low" ? "low" : "mid";
+        const riskLabel = { high: "高位", mid: "中位", low: "低位" }[mg.risk] || "—";
+        const fmtPct = (v) => (v != null ? (v >= 0 ? "+" : "") + v + "%" : "—");
+        const cls = (v) => (v != null && v < 0 ? "down" : "up");
+        marginHtml = `<div class="kline-funds-kv">
+          <span>融资余额 <b>${this._fmtYi(m.fin_balance)}</b></span>
+          <span>环比 <b class="${cls(m.change_pct)}">${fmtPct(m.change_pct)}</b></span>
+          <span>5日 <b class="${cls(m.change_5d_pct)}">${fmtPct(m.change_5d_pct)}</b></span>
+          <span>20日 <b class="${cls(m.change_20d_pct)}">${fmtPct(m.change_20d_pct)}</b></span>
+          <span class="kline-funds-risk ${riskCls}">${riskLabel}${m.percentile != null ? " " + (m.percentile * 100).toFixed(0) + "%" : ""}</span>
+        </div>
+        ${mg.risk_note ? `<div class="kline-funds-note">${mg.risk_note}</div>` : ""}
+        ${this._renderFundSpark(mg.series || [])}`;
+      }
+
+      let lhbHtml = '<div class="kline-funds-empty">近半年未上龙虎榜</div>';
+      if (lhb.available) {
+        const rows = (lhb.seats || []).slice(0, 6).map((s) => {
+          const seat = String(s.seat || "");
+          const short = seat.length > 18 ? seat.slice(0, 18) + "…" : seat;
+          return `<tr><td>${short}</td>
+            <td>${s.buy != null ? this._fmtYi(s.buy) : "—"}</td>
+            <td>${s.sell != null ? this._fmtYi(s.sell) : "—"}</td>
+            <td>${s.net != null ? this._fmtYi(s.net) : "—"}</td></tr>`;
+        }).join("");
+        lhbHtml = `<table class="kline-funds-table">
+          <thead><tr><th>席位（${lhb.date}）</th><th>买入</th><th>卖出</th><th>净额</th></tr></thead>
+          <tbody>${rows}</tbody></table>`;
+      }
+
+      body.innerHTML = `
+        <div class="kline-funds-block">
+          <div class="kline-funds-block-title">融资融券</div>${marginHtml}
+        </div>
+        <div class="kline-funds-block">
+          <div class="kline-funds-block-title">龙虎榜席位</div>${lhbHtml}
+        </div>`;
+    }
+
+    _renderFundSpark(series) {
+      const points = (series || []).map((x) => x.fin_balance).filter((v) => v != null);
+      if (points.length < 2) return "";
+      const w = 220;
+      const h = 34;
+      const min = Math.min(...points);
+      const max = Math.max(...points);
+      const span = max - min || 1;
+      const step = w / (points.length - 1);
+      const path = points.map((v, i) =>
+        `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${(h - ((v - min) / span) * (h - 4) - 2).toFixed(1)}`
+      ).join(" ");
+      return `<svg class="kline-funds-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="#176b5b" stroke-width="1.5"/></svg>`;
     }
 
     async _loadDataSources() {
@@ -1339,11 +2320,14 @@ window.StockRadar = window.StockRadar || {};
       this.currentCode = code.trim();
       this.currentMarket = market || null;
       if (!this.currentCode) return;
+      this._loadFunds(this.currentCode);
       this.searchInput.value = this.currentCode;
       this._hideSearchResults();
       this._setStatus("loading", `正在读取 ${this.currentCode} 本地 K 线...`);
       this.syncBtn.disabled = true;
       this.chart.clearOverlay();
+      // 换股时先清掉上一只的标注，避免旧线挂在新蜡烛上
+      if (this.taMode !== "off") this.chart.setTaData(null);
       // 持仓成本线：open() 传入的 pending 值在此消费（换股/重查后失效）
       if (this._pendingCostLine !== undefined) {
         this.chart.setCostLine(this._pendingCostLine);
@@ -1352,9 +2336,10 @@ window.StockRadar = window.StockRadar || {};
       this._hideScanBadge();
       await this.chart.showLoading("读取本地 K 线数据...");
       try {
-        // 并行获取 K 线数据和信号数据
+        // 并行获取 K 线数据和信号数据。range 交给 K 线接口（有 start_date 时它忽略 days），
+        // 信号接口还只认天数——用 currentDays 这个近似窗口兜底，别让它退化成默认 120。
         const [data, signalsData] = await Promise.all([
-          window.StockRadar.api.getKline(this.currentCode, this.currentDays, this.currentMarket),
+          window.StockRadar.api.getKline(this.currentCode, this.currentDays, this.currentMarket, this.range),
           window.StockRadar.api.getSignals(this.currentCode, this.currentDays).catch(() => ({ signals: [] })),
         ]);
         data.signals = signalsData.signals || [];
@@ -1369,6 +2354,7 @@ window.StockRadar = window.StockRadar || {};
         }
         await this.chart.setData(data);
         this._setLoaded(data);
+        if (this.taMode !== "off") await this._loadTa();
       } catch (error) {
         // 如果开启自动同步且是无数据错误，自动同步
         if (this.autoSync && error.detail && error.detail.reason === "no_local_data") {
@@ -1376,6 +2362,35 @@ window.StockRadar = window.StockRadar || {};
           return;
         }
         this._handleLoadError(error);
+      }
+    }
+
+    // 技术面标注：按 code+days+区间缓存一份几何结果，同一只票来回切层不重复请求。
+    // 失败时清空而不是画半截线——宁可没有，也不能给出错位的测量线。
+    async _loadTa() {
+      const code = this.currentCode;
+      if (!code) return;
+      const range = this.range;
+      // 路由对 days 有 ge=60 的硬约束：缩短到 20 柱后直接传会被 422 打回，
+      // 而 TA 目前还只认天数 → 先夹到合法区间，缓存 key 也跟着用夹过的值。
+      const taDays = Math.max(60, Math.min(1000, this.currentDays || 250));
+      // range 必须进 key：只按 days 缓存的话，换一段日期（近似柱数撞上同一个值）会把
+      // 上一段的标注原样贴到新蜡烛上，看起来像算法算错了。
+      const rangeKey = range ? `${range.start_date}~${range.end_date}` : "";
+      const key = `${code}:${taDays}:${this.currentMarket || ""}:${rangeKey}`;
+      if (this.taCache && this.taCache.key === key) {
+        this.chart.setTaData(this.taCache.data);
+        return;
+      }
+      try {
+        const data = await window.StockRadar.api.getTaAnnotations(
+          code, taDays, this.currentMarket, range);
+        if (this.currentCode !== code) return;   // 期间换股了，丢弃这次结果
+        this.taCache = { key, data };
+        this.chart.setTaData(data);
+      } catch (error) {
+        this.chart.setTaData(null);
+        this._setStatus("error", `技术面标注读取失败：${error.message || "接口异常"}`);
       }
     }
 
@@ -1456,6 +2471,8 @@ window.StockRadar = window.StockRadar || {};
 
       this.syncBtn.disabled = false;
       this._updateStrategyButtons();
+      // 柱数提示以实际返回为准（range 模式下 currentDays 只是近似窗口）
+      this._renderDaysHint(data.kline.length);
       this._setStatus("ok", `本地 ${data.kline.length} 条，最新 ${last ? last.date : "-"}`);
     }
 
@@ -1516,7 +2533,11 @@ window.StockRadar = window.StockRadar || {};
     }
 
     _fmtPrice(value) {
-      return value == null ? "-" : Number(value).toFixed(2);
+      if (value == null) return "-";
+      const v = Number(value);
+      if (!Number.isFinite(v)) return "-";
+      // 最多 3 位小数并去掉尾随 0：1446.44 → 1446.44，0.697 → 0.697，3.5 → 3.5
+      return v.toFixed(3).replace(/\.?0+$/, "");
     }
 
     _fmtPct(value) {
@@ -1613,8 +2634,12 @@ window.StockRadar = window.StockRadar || {};
           signals: result.signals || [],
         });
         this._showScanBadge(result);
-        const buyCount = (result.signals || []).filter((s) => s.buy).length;
-        this._setStatus("ok", `扫描完成：${buyCount} 个买点信号，最新 ${result.latest_date || "-"}`);
+        const sigs = result.signals || [];
+        const buySignals = sigs.filter((s) => s.buy);
+        // "最新" 必须是最新**买点**的日期。原来写 result.latest_date（最新 K 线日），
+        // 会让人以为今天出了买点，悬停今天却什么都没有。
+        const lastBuyDate = buySignals.length ? buySignals[buySignals.length - 1].date : "-";
+        this._setStatus("ok", `扫描完成：${buySignals.length} 个买点信号，最新买点 ${lastBuyDate}`);
       } catch (e) {
         this._setStatus("error", e.message || "扫描失败");
         this._hideScanBadge();

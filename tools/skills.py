@@ -209,9 +209,15 @@ class SkillRegistry:
         return self._cache[skill_name]
 
     def get_all_tools(self) -> list:
+        """全量工具（按技能名排序，保证顺序确定）。
+
+        ⚠️ 排序不是洁癖：tools 数组是 prompt 前缀的位置 0，顺序一变前缀字节就变，
+        整条缓存作废。而 auto_discover 走 os.listdir，跨机器/新增技能后顺序不保证，
+        因此这里显式按 skill_name 排序，不依赖文件系统返回序。
+        """
         tools = []
         seen = set()
-        for name in self._register.get_all_skills().keys():
+        for name in sorted(self._register.get_all_skills().keys()):
             for t in self.get_tools(name):
                 if t.name not in seen:
                     seen.add(t.name)

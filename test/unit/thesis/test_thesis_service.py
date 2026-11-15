@@ -4,6 +4,24 @@ import pytest
 REAL_THESIS = "dividend_env"
 
 
+def _anchor_iso(offset_days: int = 0) -> str:
+    """窗口锚点日（最近一个已完成交易日）偏移 N 天——与 `list_alerts` 同口径。
+
+    不要写死日期：`list_alerts` 的 `days` 是**相对**窗口，硬编码的 trade_date
+    一旦滑出窗口，测试就会随日期腐烂（与 test_thesis_storage.py 同款事故：
+    原实现写死 2026-09-17，2026-10-19 实测 30 天窗口起点已到 09-19，
+    三个断言集体挂掉）。这里与生产代码共用锚点函数，日历怎么走都恒成立。
+    """
+    from datetime import timedelta
+
+    from thesis.storage import _effective_alert_anchor
+    return (_effective_alert_anchor() + timedelta(days=offset_days)).isoformat()
+
+
+D1 = _anchor_iso()          # 首次刷新的交易日
+D2 = _anchor_iso(1)         # 第二次（数据变化）
+
+
 @pytest.fixture
 def store(tmp_path):
     from thesis.storage import ThesisStorage
@@ -19,7 +37,7 @@ def _engine_result(**over) -> dict:
         "thesis_id": REAL_THESIS,
         "name": "红利环境因子包",
         "asset_label": "中证红利低波动",
-        "data_asof": "2026-09-17",
+        "data_asof": D1,
         "total": 4,
         "valid_count": 5,
         "factor_count": 5,
@@ -27,7 +45,7 @@ def _engine_result(**over) -> dict:
         "action": "可持有，回调分批介入",
         "factors": [
             {"key": "premium", "name": "① 股息率溢价", "value": 2.59, "unit": "pp",
-             "score": 0, "status": "中性", "asof": "2026-09-17", "stale": False},
+             "score": 0, "status": "中性", "asof": D1, "stale": False},
         ],
         "signals": {"buy": [], "warn": []},
         "invalidation": [{"text": "10Y 国债升破 2.10%", "current": "1.6862%", "hit": False}],
@@ -54,13 +72,13 @@ class TestRefresh:
     def test_persists_snapshot_and_definition(self, store):
         from server import thesis_service as svc
         eng = FakeEngine(_engine_result())
-        out = svc.refresh(REAL_THESIS, engine=eng, storage=store, trade_date="2026-09-17")
+        out = svc.refresh(REAL_THESIS, engine=eng, storage=store, trade_date=D1)
 
         assert eng.calls == [(REAL_THESIS, True)]      # 定义被读出来传给了引擎
         assert out["snapshot_created"] is True
         assert out["definition_changed"] is True
         assert out["snapshot"]["total"] == 4
-        assert out["snapshot"]["trade_date"] == "2026-09-17"
+        assert out["snapshot"]["trade_date"] == D1
         assert store.latest_snapshot(REAL_THESIS)["verdict"] == "中性偏有利"
         assert len(store.get_definition_history(REAL_THESIS)) == 1
 
@@ -83,15 +101,15 @@ class TestRefresh:
     def test_changes_produce_alerts(self, store):
         from server import thesis_service as svc
         svc.refresh(REAL_THESIS, engine=FakeEngine(_engine_result()),
-                    storage=store, trade_date="2026-09-17")
+                    storage=store, trade_date=D1)
         out = svc.refresh(REAL_THESIS, engine=FakeEngine(_engine_result(
-            data_asof="2026-09-18",
+            data_asof=D2,
             total=1, verdict="中性", action="观望",
             factors=[{"key": "premium", "name": "① 股息率溢价", "value": 1.2,
                       "unit": "pp", "score": -2, "status": "不利",
-                      "asof": "2026-09-18", "stale": False}],
+                      "asof": D2, "stale": False}],
             invalidation=[{"text": "10Y 国债升破 2.10%", "current": "2.20%", "hit": True}],
-        )), storage=store, trade_date="2026-09-18")
+        )), storage=store, trade_date=D2)
 
         types = {a["alert_type"] for a in out["alerts"]}
         assert {"invalidation_hit", "verdict_change", "factor_flip"} <= types
@@ -101,12 +119,12 @@ class TestRefresh:
     def test_rerun_does_not_duplicate_alerts(self, store):
         from server import thesis_service as svc
         svc.refresh(REAL_THESIS, engine=FakeEngine(_engine_result()),
-                    storage=store, trade_date="2026-09-17")
-        changed = _engine_result(data_asof="2026-09-18", verdict="中性")
+                    storage=store, trade_date=D1)
+        changed = _engine_result(data_asof=D2, verdict="中性")
         svc.refresh(REAL_THESIS, engine=FakeEngine(changed),
-                    storage=store, trade_date="2026-09-18")
+                    storage=store, trade_date=D2)
         out = svc.refresh(REAL_THESIS, engine=FakeEngine(changed),
-                          storage=store, trade_date="2026-09-18")
+                          storage=store, trade_date=D2)
         assert out["new_alert_count"] == 0            # 唯一索引去重
         assert len(store.list_alerts(REAL_THESIS, days=30)) == 1
 
@@ -161,11 +179,11 @@ class TestListTheses:
     def test_after_refresh_has_status(self, store):
         from server import thesis_service as svc
         svc.refresh(REAL_THESIS, engine=FakeEngine(_engine_result()),
-                    storage=store, trade_date="2026-09-17")
+                    storage=store, trade_date=D1)
         row = next(i for i in svc.list_theses(storage=store)
                    if i["thesis_id"] == REAL_THESIS)
         assert row["has_snapshot"] is True
-        assert row["trade_date"] == "2026-09-17"
+        assert row["trade_date"] == D1
         assert row["total"] == 4
         assert row["verdict"] == "中性偏有利"
         assert row["snapshot_count"] == 1
@@ -205,14 +223,14 @@ class TestDetailAndHistory:
     def test_history_and_alerts(self, store):
         from server import thesis_service as svc
         svc.refresh(REAL_THESIS, engine=FakeEngine(_engine_result()),
-                    storage=store, trade_date="2026-09-17")
+                    storage=store, trade_date=D1)
         svc.refresh(REAL_THESIS, engine=FakeEngine(
-            _engine_result(data_asof="2026-09-18", verdict="中性")),
-            storage=store, trade_date="2026-09-18")
+            _engine_result(data_asof=D2, verdict="中性")),
+            storage=store, trade_date=D2)
 
         h = svc.get_history(REAL_THESIS, days=90, storage=store)
         assert h["count"] == 2
-        assert [i["trade_date"] for i in h["items"]] == ["2026-09-17", "2026-09-18"]
+        assert [i["trade_date"] for i in h["items"]] == [D1, D2]
         assert h["items"][-1]["verdict"] == "中性"
 
         a = svc.get_alerts(REAL_THESIS, days=30, storage=store)

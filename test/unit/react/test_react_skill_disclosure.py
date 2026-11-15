@@ -5,6 +5,7 @@ import logging
 from langchain_core.messages import AIMessage
 
 from agents.react.nodes import PrepareNode, SelectSkillsNode
+import pytest
 
 
 class _Tool:
@@ -120,8 +121,11 @@ def test_prepare_injects_only_active_usage(monkeypatch):
     node.memory = memory_stub
     out = asyncio.run(node(state))
     system = out["messages"][0][1] if isinstance(out["messages"][0], tuple) else out["messages"][0].content
-    assert "只算技术指标" in system
-    assert "查行情" not in system
+    tail = out["messages"][-1][1] if isinstance(out["messages"][-1], tuple) else out["messages"][-1].content
+    # PRD-A11 FR-11：只注入 active 技能、且走**尾部**（仍在 system 中段会让前缀在 REACT 后分叉）
+    assert "只算技术指标" in tail
+    assert "查行情" not in tail
+    assert "只算技术指标" not in system
 
 
 def test_agent_node_rebuilds_tools_from_active_skill():
@@ -148,3 +152,8 @@ def test_agent_node_rebuilds_tools_from_active_skill():
         assert [t.name for t in bound] == ["calc_technical_indicators"]
 
     asyncio.run(run_case())
+
+@pytest.fixture(autouse=True)
+def _pin_strict_tool_surface(strict_surface):
+    """本文件锁的是 strict 档语义，pin 住形态使其不随全局默认漂移。"""
+    return strict_surface

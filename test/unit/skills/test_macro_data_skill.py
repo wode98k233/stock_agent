@@ -99,8 +99,16 @@ class TestGetMacroSeries:
         assert result["stale_days"] > 400
 
     def test_fresh_no_stale_flag(self, skill_db):
+        """月频指标最新报告期落在阈值（默认 45 天）内 → stale=False。
+
+        ⚠️ 必须用**相对当前时间**的日期：曾写死 "2026-08-31"，到 2026-10-17 就
+        超过 45 天阈值，测试随时间必然翻红（时间炸弹）。
+        """
+        from datetime import date, timedelta
+        recent = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+        prev = (date.today() - timedelta(days=40)).strftime("%Y-%m-%d")
         fetcher = MagicMock(return_value=pd.DataFrame({
-            "report_date": ["2026-07-31", "2026-08-31"], "value": [7.7, 7.6]}))
+            "report_date": [prev, recent], "value": [7.7, 7.6]}))
         skill = _make_skill(skill_db)
         with patch.object(skill, "_fetch_indicator", fetcher):
             result = _call(skill, "m2_yoy")

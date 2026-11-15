@@ -45,7 +45,9 @@ def test_pdor_graph_runs_with_mocked_llm_and_tool_results(mock_logger):
 
     def fake_llm_json_with_retry(llm, messages, logger, label=None, **kwargs):
         if label == "pdor-planner":
-            captured["planner_prompt"] = messages[0][1]
+            # 前缀对齐后 messages[0] 是共享块（state["input"]），规划指令落到最后一条 human
+            captured["planner_shared"] = messages[0][1]
+            captured["planner_prompt"] = messages[-1][1]
             return {
                 "steps": [
                     {
@@ -148,6 +150,8 @@ def test_pdor_graph_runs_with_mocked_llm_and_tool_results(mock_logger):
     assert final_state["tool_calls"][0]["tool_name"] == "mx_data_query"
     assert final_state["tool_calls"][1]["tool_name"] == "mx_data_query"
 
+    # 共享块在 messages[0]（前缀对齐），模板数据契约随固定指令落在末尾 human
+    assert captured["planner_shared"] == "绿色电力板块呢，这个可以建仓吗"
     assert "场景化数据契约" in captured["planner_prompt"]
     assert "sector_price_action" in captured["planner_prompt"]
     assert "交叉验证要求" not in captured["planner_prompt"] or "质量门禁" in captured["planner_prompt"]
@@ -156,17 +160,23 @@ def test_pdor_graph_runs_with_mocked_llm_and_tool_results(mock_logger):
     assert captured["post_processing"]["selected_skills"] == ["mx_data", "mx_search"]
     assert "绿色电力板块 BK0887" in captured["post_processing"]["raw_result"]
 
-    # 验证 skill-tool 对齐：executor 只加载 plan step 指定的 skill 的工具，不加载 selected_skills 的其他工具
+    # full 档下 executor 绑全量工具面（本 stub 只注册了 1 个工具，两条路径同为 [fake_tool]）
     assert captured["react_tools"] == [fake_tool], \
-        f"executor 应只加载 plan step 指定的 mx_data 的工具，实际加载了: {captured['react_tools']}"
+        f"executor 工具面应来自 full 档装载，实际加载了: {captured['react_tools']}"
 
 
-def test_pdor_executor_skill_tool_alignment(mock_logger):
-    """验证 PDOR executor 中 plan step 的 skill 与加载的 tool 严格对齐。
+def test_pdor_executor_binds_full_surface_tools(mock_logger):
+    """验证 PDOR executor 与 agent 家族绑**同一份全量工具**（PRD-A11 FR-10）。
 
     场景：plan 有两个 step，分别使用 mx_search 和 mx_data，
-    selected_skills 包含 mx_search / mx_data / mx_xuangu 三个技能，
-    但每个 step 执行时只应加载该 step 指定 skill 的工具。
+    selected_skills 包含 mx_search / mx_data / mx_xuangu 三个技能。
+
+    ⚠️ 2026-10-18 口径变更：full 档（`TOOL_SURFACE_MODE` 已固化为 full）下，
+    executor 必须与 agent 家族绑同一份全量工具 —— `tools` 是请求 payload 的**位置 0**，
+    按 step 挑子集会让该位置随 step 漂移，跨步/跨 run 前缀缓存恒不命中；
+    `merge_tools_for_skills` 的 docstring 明确把 pdor 列进这个口子（旧代码走
+    `merge_tools_for_step` 未传 `for_binding`，是漏改）。
+    「本步该用哪个技能的哪些工具」改由**尾部 skills 用法详情**承担，渐进披露语义不变。
     """
     from agents.pdor.graph import _build_pdor_graph
 
@@ -213,6 +223,7 @@ def test_pdor_executor_skill_tool_alignment(mock_logger):
         captured_steps.append({
             "purpose": kwargs["step_purpose"],
             "tools": [t.name for t in kwargs["tools"]],
+            "tail": kwargs.get("tail_system", ""),
         })
         return {
             "final_result": f"{kwargs['step_purpose']} 结果",
@@ -286,19 +297,15 @@ def test_pdor_executor_skill_tool_alignment(mock_logger):
 
     assert len(captured_steps) == 2, f"应执行 2 个 step，实际执行了 {len(captured_steps)} 个"
 
-    # Step 1: mx_search 只应加载 mx_search_news
+    # full 档：两步都绑**同一份全量工具**（位置 0 稳定才是前缀可命中的前提）
+    FULL = ["mx_search_news", "mx_data_query", "mx_xuangu_filter"]
     assert captured_steps[0]["purpose"] == "搜索绿色电力板块新闻"
-    assert captured_steps[0]["tools"] == ["mx_search_news"], \
-        f"Step 1 (mx_search) 应只加载 mx_search_news，实际加载了: {captured_steps[0]['tools']}"
-
-    # Step 2: mx_data 只应加载 mx_data_query
+    assert captured_steps[0]["tools"] == FULL, \
+        f"Step 1 应绑全量工具面，实际: {captured_steps[0]['tools']}"
     assert captured_steps[1]["purpose"] == "查询绿色电力板块行情"
-    assert captured_steps[1]["tools"] == ["mx_data_query"], \
-        f"Step 2 (mx_data) 应只加载 mx_data_query，实际加载了: {captured_steps[1]['tools']}"
+    assert captured_steps[1]["tools"] == FULL, \
+        f"Step 2 应绑全量工具面，实际: {captured_steps[1]['tools']}"
 
-    # 验证 mx_xuangu 的工具从未被加载（因为 plan 中没有使用 mx_xuangu 的 step）
-    all_loaded_tools = []
-    for step in captured_steps:
-        all_loaded_tools.extend(step["tools"])
-    assert "mx_xuangu_filter" not in all_loaded_tools, \
-        f"mx_xuangu_filter 不应被加载，但出现在了: {all_loaded_tools}"
+    # 渐进披露语义不变：本步技能的用法详情仍随**尾部**投递
+    assert "工具详情" in captured_steps[0]["tail"]
+    assert "工具详情" in captured_steps[1]["tail"]

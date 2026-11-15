@@ -87,6 +87,18 @@ class BaseToolNode:
         """工具执行前的子类钩子。返回结果表示跳过真实工具执行。"""
         return None
 
+    def _resolve_step_run_id(self, exec_state, tool_name: str, tool_args: dict):
+        """把一次工具调用映射到 trace step 的 event_run_id（== 该 ToolCall 的 tool_call_id）。
+
+        `on_tool_end` 落 step 时用的就是这个 id，因此回填 extra 必须按它去找。
+        匹配规则与既有压缩埋点一致：工具名 + 入参字符串反查最近一次调用。
+        """
+        tool_input_str = str(tool_args)
+        for call in reversed(exec_state.tool_calls):
+            if call.tool_name == tool_name and call.tool_input == tool_input_str:
+                return call.tool_call_id
+        return None
+
     async def _run_one(
         self,
         tool_call: dict,
@@ -115,6 +127,7 @@ class BaseToolNode:
         raw_output = None
         compress_stages = []
         compress_metrics = None
+        billed = None
         tool = tools_by_name.get(tool_name)
         if tool is None:
             content = f"执行失败: 未找到工具 {tool_name}"
@@ -132,21 +145,40 @@ class BaseToolNode:
                 except Exception:
                     pass
 
+                # ── 按次计费服务（DeepSeek Search/Fetch）：在**压缩/截断之前**解析计费声明 ──
+                #    必须在这里解析：后续规则压缩/trim/硬截断都可能把 payload 结构改坏，
+                #    那时再解析就会漏记成本（而钱已经花了）。
+                try:
+                    from tools.search.billing import billed_service_of
+                    billed = billed_service_of(tool_name, content)
+                except Exception:
+                    billed = None
+
                 # ── 图表萃取（Track 1 规则）：trim 前拦截完整 tables，非阻塞毫秒级。
                 #    失败仅静默跳过，绝不影响 agent 流程与工具输出。
                 #    提示不立即追加——压缩会替换 content 丢掉标记，改为流程末尾统一追加。
+                #    ⚠️ 白名单在 chart_extractor.CHART_TOOLS：历史上这里硬编码
+                #    `== "mx_data_query"`，数据源换成 iwc_query 后全站静默零图（2026-11-02）。
                 chart_hint = ""
                 try:
-                    if tool_name == "mx_data_query":
-                        from agents.analysis.chart_extractor import extract_from_tool_output
-                        chart_ids = extract_from_tool_output(tool_name, content)
+                    from agents.analysis.chart_extractor import (
+                        CHART_TOOLS, extract_from_tool_output,
+                    )
+                    if tool_name in CHART_TOOLS:
+                        chart_ids = extract_from_tool_output(
+                            tool_name, content, tool_args=tool_args)
                         if chart_ids:
                             # 紧凑提示（约 60 token）：带 @@CHART:uuid@@ 标记，
                             # 供 LLM 引用与 report_builder 追加到报告末尾
                             markers = " ".join(f"@@CHART:{cid}@@" for cid in chart_ids)
                             chart_hint = f"\n📊 已自动生成图表: {len(chart_ids)} 张 {markers}"
-                except Exception:
-                    pass
+                        elif self._logger:
+                            # 不再完全静默：命中白名单却没出图，至少要能在日志里查
+                            self._logger.debug(
+                                "R", f"图表萃取无产出: {tool_name} len={len(content)}")
+                except Exception as e:
+                    if self._logger:
+                        self._logger.warning("R", f"图表萃取失败（忽略）: {tool_name}: {e}")
 
                 # ── 规则压缩（Step 2）：off/shadow/on 三态，先于 trim。
                 #    shadow=只计算不采用（对比落盘），on=采用规则输出；异常静默回退原文。
@@ -237,20 +269,27 @@ class BaseToolNode:
             except Exception as e:
                 content = f"执行失败: {e}"
 
-        # ── 压缩埋点回填：tool step 的 event_run_id == exec_state 该 ToolCall 的 tool_call_id ──
-        if compress_metrics is not None:
+        # ── step extra 回填（压缩埋点 + 按次计费成本）：tool step 的 event_run_id == 该 ToolCall 的 tool_call_id ──
+        if compress_metrics is not None or billed is not None:
             try:
                 from utils.agent_trace.core import get_active_recorder
                 rec = get_active_recorder()
                 if rec is not None:
-                    tool_input_str = str(tool_args)
-                    run_id = None
-                    for call in reversed(exec_state.tool_calls):
-                        if call.tool_name == tool_name and call.tool_input == tool_input_str:
-                            run_id = call.tool_call_id
-                            break
+                    run_id = self._resolve_step_run_id(exec_state, tool_name, tool_args)
                     if run_id:
-                        rec.update_tool_step_metrics(run_id, compress_metrics)
+                        if compress_metrics is not None:
+                            rec.update_tool_step_metrics(run_id, compress_metrics)
+                        if billed is not None:
+                            # 记录时计价 + 价目快照：钱已经花了，价目日后调价不改写这笔账
+                            from utils.pricing import compute_service_cost, format_service_cost
+                            cost = compute_service_cost(billed["service"], billed.get("count", 1))
+                            if cost is not None:
+                                rec.update_tool_step_cost(run_id, cost.as_dict())
+                                self._logger.info(
+                                    "R",
+                                    f"[成本] {billed['service']} 按次计费 "
+                                    f"{cost.count} 次 = {format_service_cost(cost)}",
+                                )
             except Exception:
                 pass
 

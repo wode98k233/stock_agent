@@ -1,0 +1,231 @@
+{
+  "template_id": "deep_sector_cyclical",
+  "variant": "cyclical",
+  "name": "板块深度 · 周期资源",
+  "asset_type": "sector",
+  "total_words_target": [
+    10000,
+    13000
+  ],
+  "charts_target": [
+    8,
+    20
+  ],
+  "estimate_anchors": [
+    "商品价格",
+    "库存",
+    "PB",
+    "股息率"
+  ],
+  "note": "周期资源看商品价格与供需；价格用宏观/期货主连，成本曲线决定盈利弹性，估值看 PB/股息。",
+  "slots": {
+    "snapshot": {
+      "desc": "点位/价格、涨跌、成交、估值分位",
+      "priority": 0
+    },
+    "valuation": {
+      "desc": "PE/PB/股息率及历史分位",
+      "priority": 0
+    },
+    "series_history": {
+      "desc": "指数/个股历史序列",
+      "priority": 0
+    },
+    "macro": {
+      "desc": "利率、商品价格、行业宏观指标",
+      "priority": 0
+    },
+    "capital_flow": {
+      "desc": "主力净流入、北向、两融",
+      "priority": 0
+    },
+    "consensus_poll": {
+      "desc": "近 90 天机构观点与评级",
+      "priority": 1,
+      "tool_hint": "iwc_search(report)"
+    },
+    "constituents": {
+      "desc": "成分股/同业横截面",
+      "priority": 0
+    },
+    "financials": {
+      "desc": "营收/净利/毛利率/现金流",
+      "priority": 1
+    },
+    "news": {
+      "desc": "政策、价格、渠道相关新闻",
+      "priority": 2
+    },
+    "share_cr": {
+      "desc": "份额与集中度",
+      "priority": 2,
+      "tool_hint": "研报摘要"
+    }
+  },
+  "sections": [
+    {
+      "id": "summary",
+      "title": "投资摘要",
+      "target_words": [
+        600,
+        800
+      ],
+      "required": true,
+      "data_slots": [
+        "snapshot",
+        "valuation"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "一句话给周期位置（底部/上行/顶部）与信号强度；列 3–5 条「判断 + 数字」；最后写最大风险。"
+    },
+    {
+      "id": "catalog",
+      "title": "目录与图表目录",
+      "target_words": [
+        0,
+        0
+      ],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": [
+        "program"
+      ],
+      "prompt": "由程序生成，不要手写正文。"
+    },
+    {
+      "id": "consensus",
+      "title": "与市场不同之处",
+      "target_words": [
+        800,
+        1000
+      ],
+      "required": true,
+      "data_slots": [
+        "consensus_poll"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "先写市场共识（机构 + 日期），再写我们的反证（自有数据），最后给验证条件。"
+    },
+    {
+      "id": "commodity",
+      "title": "商品价格与库存",
+      "target_words": [
+        1400,
+        1800
+      ],
+      "required": true,
+      "data_slots": [
+        "macro",
+        "series_history"
+      ],
+      "charts": [],
+      "supply": [
+        "own",
+        "report"
+      ],
+      "prompt": "金/铜/钢/煤等价格序列与库存；价格必须带来源与日期，缺的写「数据缺失：<品种>」。"
+    },
+    {
+      "id": "supply",
+      "title": "供需与产能",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "share_cr",
+        "constituents"
+      ],
+      "charts": [],
+      "supply": [
+        "report",
+        "own"
+      ],
+      "prompt": "供给收缩/扩张、产能利用率、进口；数据注明口径。"
+    },
+    {
+      "id": "cost",
+      "title": "成本与盈利",
+      "target_words": [
+        1000,
+        1300
+      ],
+      "required": true,
+      "data_slots": [
+        "financials",
+        "macro"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "成本曲线、吨毛利、现金成本；同业对比同口径。"
+    },
+    {
+      "id": "valuation",
+      "title": "估值与股息",
+      "target_words": [
+        1200,
+        1500
+      ],
+      "required": true,
+      "data_slots": [
+        "valuation",
+        "macro"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "PB 分位、股息率与 10Y 利差；周期顶部/底部用不同估值口径需说明。"
+    },
+    {
+      "id": "targets",
+      "title": "标的：资源与加工",
+      "target_words": [
+        1800,
+        2200
+      ],
+      "required": true,
+      "data_slots": [
+        "constituents",
+        "financials"
+      ],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "分「资源端 / 加工端」两类；每个标的给一条可验证理由 + 一个关键数字。"
+    },
+    {
+      "id": "risk",
+      "title": "风险提示",
+      "target_words": [
+        400,
+        600
+      ],
+      "required": true,
+      "data_slots": [],
+      "charts": [],
+      "supply": [
+        "own"
+      ],
+      "prompt": "价格下跌、需求不及预期、政策/环保限产、汇率；每条对应前文判断。"
+    }
+  ],
+  "qa_rules": [
+    "任何外部数字必须带（来源，日期）；无来源数字不得出现",
+    "数据缺失必须显式写「数据缺失：<字段>」，禁止用 0 或「约」代替",
+    "图表必须带 source 与 asof，无源图不得出现",
+    "商品价格必须注明品种、单位与来源日期"
+  ]
+}

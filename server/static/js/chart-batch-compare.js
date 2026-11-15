@@ -19,6 +19,11 @@ window.StockRadar = window.StockRadar || {};
 window.StockRadar.BatchCompareChart = (() => {
   'use strict';
 
+  // 焦点 + 背景：只给三条主角上色，其余统一发丝灰。
+  // 十色循环在十条以上必然重复用色，图例和曲线对不上（2026-11 评审结论）。
+  const HERO_COLORS = { best: '#176b5b', worst: '#e74c3c', mid: '#1c1c1a' };
+  const CONTEXT_COLOR = '#c2c1ba';
+
   const COLORS = ['#176b5b', '#7c3aed', '#0369a1', '#b45309', '#dc2626', '#059669',
                   '#be185d', '#4338ca', '#0d9488', '#c2410c'];
 
@@ -130,12 +135,33 @@ window.StockRadar.BatchCompareChart = (() => {
     const curves = valid.map(it => _extractCurve(it));
     const dates = _unionDates(curves);
 
+    // 焦点 + 背景：按期末净值排名，只给"最好 / 最差 / 中位"三条上色，
+    // 其余降为发丝灰。十色循环在十条以上会复用到同一颜色，图例和曲线根本对不上。
+    const finalsOf = (arr) => {
+      const vals = (arr || []).filter(v => v != null);
+      return vals.length ? vals[vals.length - 1] : -Infinity;
+    };
+    const prelim = valid.map((it, i) => finalsOf(_alignCurve(curves[i], dates, _options.initialCash)));
+    const rank = prelim.map((_, i) => i).sort((a, b) => prelim[b] - prelim[a]);
+    const heroColorOf = new Map();
+    if (rank.length === 1) {
+      heroColorOf.set(rank[0], HERO_COLORS.best);
+    } else if (rank.length > 1) {
+      heroColorOf.set(rank[0], HERO_COLORS.best);
+      heroColorOf.set(rank[rank.length - 1], HERO_COLORS.worst);
+      if (rank.length >= 3) heroColorOf.set(rank[Math.floor(rank.length / 2)], HERO_COLORS.mid);
+    }
+
     // 构建每条 series
     const series = valid.map((it, idx) => {
       const curve = curves[idx];
       const data = _alignCurve(curve, dates, _options.initialCash);
       const name = _seriesName(it);
-      const color = COLORS[idx % COLORS.length];
+      const heroColor = heroColorOf.get(idx);
+      const color = heroColor || CONTEXT_COLOR;
+      const base = data.find(v => v != null);
+      const last = finalsOf(data);
+      const ret = (base > 0 && Number.isFinite(last)) ? ((last / base - 1) * 100) : null;
       const showBs = _bsEnabled();
       const trades = showBs ? _extractTrades(it) : [];
 
@@ -149,7 +175,7 @@ window.StockRadar.BatchCompareChart = (() => {
             coord: [t.date, di >= 0 ? data[di] : null],
             value: t.direction === 'buy' ? 'B' : 'S',
             symbolRotate: t.direction === 'buy' ? 0 : 180,
-            itemStyle: { color: t.direction === 'buy' ? '#ef232a' : '#14b143' },
+            itemStyle: { color: t.direction === 'buy' ? '#e74c3c' : '#176b5b' },
             label: {
               show: true,
               position: t.direction === 'buy' ? 'bottom' : 'top',
@@ -166,8 +192,22 @@ window.StockRadar.BatchCompareChart = (() => {
         data,
         smooth: true,
         symbol: 'none',
-        lineStyle: { color, width: 2 },
+        // 主角粗、背景细，靠线宽而不是色相分层（同一屏十几条线时色相早就不够用）
+        lineStyle: { color, width: heroColor ? 2.2 : 1, opacity: heroColor ? 1 : 0.55 },
         itemStyle: { color },
+        z: heroColor ? 5 : 2,
+        // 只在主角上标名字与收益：右端直接读，不用来回找图例
+        endLabel: heroColor ? {
+          show: true,
+          distance: 4,
+          formatter: () => (ret == null
+            ? it.code
+            : `${it.code} ${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%`),
+          color,
+          fontSize: 10,
+          fontWeight: 600,
+        } : undefined,
+        labelLayout: { moveOverlap: 'shiftY' },
         markPoint,
       };
     });
@@ -193,7 +233,8 @@ window.StockRadar.BatchCompareChart = (() => {
         data: aggData,
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: '#1a1a1a', width: 3, type: 'dashed' },
+        // 均值是参照物，不该比主角更重
+        lineStyle: { color: '#6b7280', width: 2, type: 'dashed' },
         z: 10,
       });
     }
@@ -224,7 +265,7 @@ window.StockRadar.BatchCompareChart = (() => {
         itemWidth: 14,
         itemHeight: 8,
       },
-      grid: { left: 50, right: 20, top: 40, bottom: 30 },
+      grid: { left: 50, right: 118, top: 40, bottom: 30 },
       xAxis: {
         type: 'category',
         data: dates,
@@ -269,7 +310,7 @@ window.StockRadar.BatchCompareChart = (() => {
         html += `<div style="display:flex;align-items:center;gap:6px;margin:1px 0">
           <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}"></span>
           <span style="flex:1;color:#4b5563">${p.seriesName}</span>
-          <span style="font-family:monospace;font-weight:600;color:${(p.data - 1) >= 0 ? '#ef232a' : '#14b143'}">${val}</span>
+          <span style="font-family:monospace;font-weight:600;color:${(p.data - 1) >= 0 ? '#e74c3c' : '#176b5b'}">${val}</span>
         </div>`;
       });
       return html;

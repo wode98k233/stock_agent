@@ -98,3 +98,45 @@ def test_legacy_table_migrated(tmp_path, monkeypatch):
         init_db()
     finally:
         conn2.close()
+
+
+# ── 分组/条件单/口径列（仪表盘多实体契约） ──
+
+_NEW_COLS = {
+    "group_key", "horizon", "horizon_days", "entry_type", "entry_low",
+    "entry_high", "invalidation", "conditional", "group_summary", "scope",
+}
+
+
+def test_signal_new_columns_added_to_legacy_db(tmp_path):
+    """旧库（多标的约束已存在）打开后由 diff 引擎补齐新列，且默认值正确。"""
+    import sqlite3
+    from signal_eval.db import init_db
+
+    db = tmp_path / "signal_eval.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE signal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dialog_uuid TEXT NOT NULL, message_uuid TEXT NOT NULL,
+            symbol_key TEXT, symbol_name TEXT,
+            decision TEXT NOT NULL CHECK (decision IN ('buy','sell','hold')),
+            confidence REAL, sentiment REAL, core_verdict TEXT,
+            signal_time TEXT NOT NULL,
+            is_market_wide INTEGER NOT NULL DEFAULT 0,
+            confidence_basis TEXT,
+            source TEXT DEFAULT 'llm', strategy_id TEXT DEFAULT '', ref_run_id TEXT DEFAULT '',
+            UNIQUE(message_uuid, symbol_key));
+        INSERT INTO signal (dialog_uuid,message_uuid,symbol_key,decision,signal_time)
+        VALUES ('d1','m1','sh600519','buy','2026-11-01T00:00:00');
+    """)
+    conn.commit()
+    conn.close()
+
+    init_db(str(db))
+
+    conn = sqlite3.connect(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(signal)")}
+    assert _NEW_COLS <= cols
+    assert conn.execute("SELECT conditional, scope FROM signal").fetchone() == (0, "symbol")
+    conn.close()

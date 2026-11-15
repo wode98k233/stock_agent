@@ -503,3 +503,29 @@
     min-height: 58px;
   }
 }
+
+/* ── 公司事件图层（2026-11-07） ─────────────────────────────── */
+.cal-events-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-right: 10px; user-select: none; }
+.cal-events-toggle input { accent-color: var(--brand); }
+.calendar-event-dots { display: flex; gap: 3px; align-items: center; min-height: 8px; margin: 2px 0 3px; }
+.ev-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.ev-dot.unlock { background: #b45309; }
+.ev-dot.dividend { background: #176b5b; }
+.ev-dot.disclosure { background: #64748b; }
+.ev-dot.meeting { background: #7c3aed; }
+.ev-dot.forecast { background: #b91c1c; }
+.ev-more { font-size: 9px; color: var(--muted); line-height: 1; }
+.calendar-event-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 12px; }
+.calendar-event-item { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; background: #fff; border: 1px solid var(--line); border-radius: 7px; }
+.ev-type { flex: 0 0 auto; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: #fff; line-height: 1.5; }
+.ev-type.unlock { background: #b45309; }
+.ev-type.dividend { background: #176b5b; }
+.ev-type.disclosure { background: #64748b; }
+.ev-type.meeting { background: #7c3aed; }
+.ev-type.forecast { background: #b91c1c; }
+.ev-main { min-width: 0; }
+.ev-title { font-size: 12px; color: var(--text); font-weight: 600; line-height: 1.4; }
+.ev-sub { font-size: 11px; color: var(--muted); line-height: 1.4; margin-top: 1px; }
+.cal-section-title { font-size: 11px; font-weight: 800; color: #94a3b8; letter-spacing: .04em; margin: 10px 0 6px; display: flex; align-items: center; gap: 6px; }
+.cal-section-title .cnt { color: var(--brand); }
+.calendar-legend-sep { width: 1px; height: 10px; background: var(--line); margin: 0 4px; }

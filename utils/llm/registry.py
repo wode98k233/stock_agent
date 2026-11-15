@@ -38,10 +38,11 @@ from config import Config
 
 # chat 用途 → (model 键, api_key 键, base_url 键)
 # 未列出的用途回退到 agent 的 OPENAI_*（与旧 get_*_llm 行为一致）。
+# COMPRESS 不再单列（2026-10-17）：旧 COMPRESS_LLM_* 兼容别名已删，
+# .env 从未配置过该组变量 → 实际一直回退 agent 主模型；删档后语义不变。
 _ENV_MAP = {
     Purpose.AGENT: ("OPENAI_MODEL_NAME", "OPENAI_API_KEY", "OPENAI_API_BASE"),
     Purpose.REPORT: ("REPORT_LLM_MODEL", "REPORT_LLM_API_KEY", "REPORT_LLM_API_BASE"),
-    Purpose.COMPRESS: ("COMPRESS_LLM_MODEL", "COMPRESS_LLM_API_KEY", "COMPRESS_LLM_API_BASE"),
     Purpose.JUDGE: ("JUDGE_LLM_MODEL", "JUDGE_LLM_API_KEY", "JUDGE_LLM_API_BASE"),
 }
 

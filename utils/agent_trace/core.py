@@ -25,11 +25,78 @@ from utils.agent_trace.models import (
     _pick_name,
     ensure_trace_schema,
 )
+from utils.agent_trace.blobstore import encode_text
+from utils.agent_trace.payload import (
+    digest_state,
+    summarize_llm_prompt,
+)
 
 # 全局 ContextVar：AgentRunContext 设置后，所有 LLM 调用自动 trace
 _active_recorder: ContextVar[Optional["TraceRecorder"]] = ContextVar(
     "active_trace_recorder", default=None
 )
+
+# 从 metadata 直接透传进 steps.extra 的字段（PRD-A11 FR-7 + A8）。
+# 抽成模块级常量 + 纯函数是为了让归因规则可单测：这段逻辑曾经埋在 _llm_start
+# 的 60 行方法里、和 SQL 写入缠在一起，测一次要起真库。
+_PASSTHROUGH_EXTRA_KEYS = (
+    # fork 埋点：回答「这次调用是不是 fork、共享了多少前缀、为什么没 fork」
+    "fork_kind", "fork_prefix_chars", "fork_prefix_msgs",
+    "fork_tools", "fork_source", "fork_skip_reason",
+    # 压缩触发原因（soft_limit / rounds / chars / error_retry）
+    "compress_reason",
+    # A8 计量字段（网关注入）
+    "cache_hit", "model_tier", "saved_tokens",
+)
+
+
+def build_llm_step_extra(params: dict, metadata: dict) -> dict:
+    """由调用参数 + metadata 拼出 ``steps.extra`` 的初始内容（纯函数）。
+
+    **归因双字段**（PRD-A11 FR-7 / PRD-A10 §2.5.4）：
+
+    - ``purpose`` = **细分用途**（``report-fast`` / ``report-select`` / ``dashboard`` /
+      ``agent`` …），由调用方经 ``utils.logger.with_trace_node`` 显式声明；
+    - ``node`` = **图节点名**（LangGraph 口径，如 ``report_enhance``），既有看板按它分组。
+
+    为什么必须拆开：LangGraph 注入的 ``metadata["node"]`` 里已经是图节点名，过去用
+    ``setdefault("node", purpose)`` 会把细分用途**静默丢弃**，trace 里
+    ``node=report_enhance`` 混了 sentiment-extract / report-select / 报告正文三类调用。
+
+    ``label`` 取 ``purpose``：无 LangGraph 场景下 ``purpose == node``，行为与改动前完全
+    一致；有 LangGraph 时才分化，而分化正是要解决的问题。
+
+    透传字段一律「有值才写」——绝大多数调用没有 fork 概念，塞空字段会把月库淹掉。
+    """
+    extra = {k: params[k] for k in ("model_name", "temperature", "max_tokens")
+             if k in params}
+
+    purpose = str(metadata.get("purpose") or "")
+    graph_node = str(metadata.get("node") or metadata.get("langgraph_node") or "")
+    if purpose:
+        extra["purpose"] = purpose
+        extra["label"] = _GRAPH_NODE_LABELS.get(purpose, purpose)
+    elif graph_node:
+        extra["label"] = _GRAPH_NODE_LABELS.get(graph_node, graph_node)
+    if graph_node:
+        extra["node"] = graph_node
+    elif purpose:
+        extra["node"] = purpose
+
+    # 调用方显式给的细分标签（如「第3轮-生成」「第3轮-生成-重试1」）优先于 purpose：
+    # 同一 purpose 下要按轮次归因时，只有这个字段能区分。没有就保持上面的取值。
+    explicit_label = str(metadata.get("label") or "")
+    if explicit_label:
+        extra["label"] = explicit_label
+
+    pdor_context = metadata.get("pdor_context", "")
+    if pdor_context:
+        extra["pdor_context"] = pdor_context
+
+    for _k in _PASSTHROUGH_EXTRA_KEYS:
+        if metadata.get(_k) not in (None, ""):
+            extra[_k] = metadata[_k]
+    return extra
 
 
 class TraceRecorder(BaseCallbackHandler):
@@ -42,6 +109,8 @@ class TraceRecorder(BaseCallbackHandler):
         self.agent_name = agent_name
         self._root: Optional[str] = None
         self._run_created: bool = False
+        # attach_run 绑定的「别人的 run」：不新建 runs 行、不负责 end_run
+        self._attached: bool = False
         self._sid: Dict[str, int] = {}
         self._t: Dict[str, float] = {}
         self._open_steps: set = set()   # 尚未 finish 的 step（exclude_elapsed 要平移其起点）
@@ -49,6 +118,9 @@ class TraceRecorder(BaseCallbackHandler):
         self._lock = threading.RLock()
         self._recent_llm_events: Dict[str, float] = {}
         self._dedup_window_ms = 100
+        # 每次 LLM 调用的**开始时刻**（wall clock）：成本要按调用时刻判峰谷，
+        # 而 _t 里存的是 perf_counter（只能算耗时，不能判峰谷）。
+        self._llm_wall: Dict[str, float] = {}
 
         # db_path=None → 当月月库（分库默认路由，run 从 start_run 起固定该库，跨月不漂移）。
         # 不能用裸相对路径做默认值：CWD 相对路径会在启动目录再生成一份 trace 库，
@@ -101,7 +173,8 @@ class TraceRecorder(BaseCallbackHandler):
                 "INSERT INTO steps(run_id,event_run_id,parent_run_id,"
                 "step_type,step_name,input,status,started_at,extra) "
                 "VALUES(?,?,?,?,?,?,'running',?,?)",
-                (self._root, rid, prid, step_type, step_name, _json(input_data),
+                (self._root, rid, prid, step_type, step_name,
+                 encode_text(c, _json(input_data)),
                  _now(), json.dumps(extra, ensure_ascii=False) if extra else None),
             )
             sid = cur.lastrowid
@@ -125,14 +198,15 @@ class TraceRecorder(BaseCallbackHandler):
                 c.execute(
                     "UPDATE steps SET error=?,output=?,status='error',"
                     "finished_at=?,duration_ms=? WHERE id=?",
-                    (str(error), _json(output) if output is not None else None,
+                    (str(error),
+                     encode_text(c, _json(output)) if output is not None else None,
                      _now(), ms, sid),
                 )
             else:
                 c.execute(
                     "UPDATE steps SET output=?,status='success',"
                     "finished_at=?,duration_ms=? WHERE id=?",
-                    (_json(output), _now(), ms, sid),
+                    (encode_text(c, _json(output)), _now(), ms, sid),
                 )
             c.commit()
 
@@ -166,6 +240,38 @@ class TraceRecorder(BaseCallbackHandler):
         except Exception:
             pass
 
+    def update_tool_step_cost(self, run_id, cost: dict) -> None:
+        """按次计费服务（DeepSeek Search/Fetch）的成本回填到 tool step 的 extra.cost。
+
+        机制与 `update_tool_step_metrics` 完全一致（都在工具执行结束后按 tool_call_id 回填）。
+
+        ⚠️ **step_type 保持 'tool' 不动**：成本聚合只从 `step_type='llm'` 读 token 与调用次数，
+        工具行的成本必须走独立口径（`extra.cost.kind='service'`）。把服务行伪装成 llm 行会污染
+        llm_calls、缓存命中率分母与 avg_cost_per_call —— 那是口径混合，明令禁止。
+        """
+        rid = str(run_id)
+        sid = self._sid.get(rid)
+        if not sid:
+            return
+        try:
+            with self._lock:
+                c = self._get_conn()
+                row = c.execute("SELECT extra FROM steps WHERE id=?", (sid,)).fetchone()
+                extra = {}
+                if row and row["extra"]:
+                    try:
+                        extra = json.loads(row["extra"])
+                    except Exception:
+                        extra = {}
+                extra["cost"] = dict(cost or {})
+                c.execute(
+                    "UPDATE steps SET extra=? WHERE id=?",
+                    (json.dumps(extra, ensure_ascii=False), sid),
+                )
+                c.commit()
+        except Exception:
+            pass
+
     def start_run(self, task_input="") -> str:
         self._root = str(uuid4())
         self._run_created = True
@@ -180,6 +286,22 @@ class TraceRecorder(BaseCallbackHandler):
                 (self._root, self.agent_name, _json(task_input), _now()),
             )
             c.commit()
+        return self._root
+
+    def attach_run(self, run_id: str) -> str:
+        """绑定到一个**已经存在**的 run（不新建 runs 行、不负责 end_run）。
+
+        用途：一次逻辑任务跨线程 / 跨上下文，但只该有一条执行记录。
+        _active_recorder 是 ContextVar，不跨线程 —— 后台线程（策略研发循环）
+        或复用同一 run 的后续轮次，需要自己挂一个 recorder 才能把 LLM / 迭代步骤
+        写进那条 run。此时**不能**用 start_run：那会多出一条 runs 记录，
+        月历把同一次任务算成两次，多出来的那条还会永远停在 running。
+
+        ⚠️ 收尾由建 run 的那一方负责（attach 方不调用 end_run）。
+        """
+        self._root = str(run_id or '')
+        self._run_created = False
+        self._attached = True
         return self._root
 
     def exclude_elapsed(self, seconds: float) -> None:
@@ -331,7 +453,9 @@ class TraceRecorder(BaseCallbackHandler):
         rid = run_id or self._root
         if not rid:
             return {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                    "cached_tokens": 0, "cache_hit_ratio": 0.0}
+                    "cached_tokens": 0, "cache_hit_ratio": 0.0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                    "cache_miss_input_tokens": 0}
         try:
             from utils.token_usage import normalize_token_usage_dict
             with self._lock:
@@ -345,6 +469,9 @@ class TraceRecorder(BaseCallbackHandler):
             output_tokens = 0
             total_tokens = 0
             cached_tokens = 0
+            cache_read = 0
+            cache_creation = 0
+            cache_miss = 0
             for row in rows:
                 extra_str = row["extra"] if hasattr(row, "__getitem__") else row[0]
                 if not extra_str:
@@ -360,6 +487,9 @@ class TraceRecorder(BaseCallbackHandler):
                     output_tokens += tu["output_tokens"]
                     total_tokens += tu["total_tokens"]
                     cached_tokens += tu.get("cached_tokens", 0)
+                    cache_read += tu.get("cache_read_input_tokens", 0)
+                    cache_creation += tu.get("cache_creation_input_tokens", 0)
+                    cache_miss += tu.get("cache_miss_input_tokens", 0)
                 except (json.JSONDecodeError, TypeError, KeyError):
                     continue
             hit_ratio = round(cached_tokens / input_tokens, 4) if input_tokens > 0 else 0.0
@@ -370,11 +500,16 @@ class TraceRecorder(BaseCallbackHandler):
                 "total_tokens": total_tokens,
                 "cached_tokens": cached_tokens,
                 "cache_hit_ratio": hit_ratio,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_miss_input_tokens": cache_miss,
             }
         except Exception as e:
             logger.warning("[TraceRecorder] get_run_totals error: %s", e)
             return {"llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                    "cached_tokens": 0, "cache_hit_ratio": 0.0}
+                    "cached_tokens": 0, "cache_hit_ratio": 0.0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                    "cache_miss_input_tokens": 0}
 
     def close(self):
         self._t.clear()
@@ -395,7 +530,9 @@ class TraceRecorder(BaseCallbackHandler):
         if self._root is None:
             self._root = str(run_id)
 
-        if parent_run_id is None and not self._run_created:
+        # attached（绑定别人的 run）时绝不能插 runs 行：链根回调会凭空造出一条
+        # 永远 running 的重复记录，月历 / 运行列表都会把同一次任务多算一次。
+        if parent_run_id is None and not self._run_created and not self._attached:
             with self._lock:
                 c = self._get_conn()
                 c.execute(
@@ -411,11 +548,13 @@ class TraceRecorder(BaseCallbackHandler):
         if is_noise:
             extra["_noise"] = True
 
-        self._create_step(run_id, parent_run_id, node_type, display_name, inputs, extra)
+        self._create_step(
+            run_id, parent_run_id, node_type, display_name, digest_state(inputs), extra
+        )
 
     @_guard
     def on_chain_end(self, outputs, *, run_id, **kw):
-        self._finish_step(run_id, output=outputs)
+        self._finish_step(run_id, output=digest_state(outputs))
 
     @_guard
     def on_chain_error(self, error, *, run_id, **kw):
@@ -441,31 +580,14 @@ class TraceRecorder(BaseCallbackHandler):
             }
 
         self._tick(rid)
+        self._llm_wall[rid] = time.time()
 
         if self._root is None:
             self._root = rid
 
         name = _pick_name(serialized)
         params = kw.get("invocation_params", {})
-        extra = {k: params[k] for k in ("model_name", "temperature", "max_tokens")
-                 if k in params}
-
-        metadata = kw.get("metadata", {})
-        node = metadata.get("node", "")
-        langgraph_node = metadata.get("langgraph_node", "")
-        effective_node = node or langgraph_node
-        if effective_node:
-            extra["label"] = _GRAPH_NODE_LABELS.get(effective_node, effective_node)
-            extra["node"] = effective_node
-        pdor_context = metadata.get("pdor_context", "")
-        if pdor_context:
-            extra["pdor_context"] = pdor_context
-
-        # A8 计量字段（网关在 metadata 注入 cache_hit/model_tier/saved_tokens），
-        # 只加字段不改 steps 结构
-        for _k in ("cache_hit", "model_tier", "saved_tokens"):
-            if _k in metadata:
-                extra[_k] = metadata[_k]
+        extra = build_llm_step_extra(params, kw.get("metadata", {}))
 
         with self._lock:
             c = self._get_conn()
@@ -473,7 +595,8 @@ class TraceRecorder(BaseCallbackHandler):
                 "INSERT INTO steps(run_id,event_run_id,parent_run_id,"
                 "step_type,step_name,input,status,started_at,extra) "
                 "VALUES(?,?,?,'llm',?,?,'running',?,?)",
-                (self._root, rid, prid, name, _json(raw_input),
+                (self._root, rid, prid, name,
+                 encode_text(c, _json(summarize_llm_prompt(raw_input))),
                  _now(), json.dumps(extra, ensure_ascii=False) if extra else None),
             )
             sid = cur.lastrowid
@@ -489,8 +612,11 @@ class TraceRecorder(BaseCallbackHandler):
                             "INSERT INTO messages"
                             "(step_id,seq,role,content,tool_calls,tool_call_id,reasoning) "
                             "VALUES(?,?,?,?,?,?,?)",
-                            (sid, seq, d["role"], d["content"],
-                             d["tool_calls"], d["tool_call_id"], d.get("reasoning")),
+                            (sid, seq, d["role"],
+                             encode_text(c, d["content"]),
+                             encode_text(c, d["tool_calls"]),
+                             d["tool_call_id"],
+                             encode_text(c, d.get("reasoning"))),
                         )
                         seq += 1
             c.commit()
@@ -558,6 +684,34 @@ class TraceRecorder(BaseCallbackHandler):
             except Exception:
                 pass
             existing_extra["token_usage"] = usage
+            # 成本与 token 同源、同时刻（同一份价目 + 调用开始时刻判峰谷）。
+            # 落库形态见设计文档 §6：`steps.extra.cost`（含当时的单价快照，
+            # 日后调价不改写历史账单）。
+            try:
+                from utils import pricing as _pricing
+                from utils.token_usage import extract_base_url as _extract_base_url
+                # base_url 取本次调用实际端点（响应回填），旁路模型
+                # （压缩/报告）的供应商与主端点不同，不能用全局默认端点反查
+                _cost = _pricing.compute_cost(
+                    usage,
+                    model=str(existing_extra.get("model_name") or ""),
+                    base_url=_extract_base_url(response) or _pricing.default_base_url(),
+                    ts=self._llm_wall.pop(rid, None),
+                )
+                if _cost is not None:
+                    existing_extra["cost"] = _cost.as_dict()
+            except Exception:
+                logger.debug("[TraceRecorder] 成本计算失败（忽略）", exc_info=True)
+            # prompt 前缀指纹（provider 侧算好后回填到 llm_output）：跨轮不变 = 前缀稳定，
+            # 变了就是「缓存为什么没命中」的第一手证据。拿不到就跳过。
+            try:
+                _llm_out = getattr(response, "llm_output", None)
+                if isinstance(_llm_out, dict):
+                    for _k in ("prefix_sha256", "prefix_bytes"):
+                        if _llm_out.get(_k) not in (None, ""):
+                            existing_extra[_k] = _llm_out[_k]
+            except Exception:
+                logger.debug("[TraceRecorder] 前缀指纹写入失败（忽略）", exc_info=True)
             extra = json.dumps(existing_extra, default=str)
 
             c.execute(

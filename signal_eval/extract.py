@@ -242,10 +242,114 @@ def _resolve_symbol_key(code, name: str, ctx: str) -> str | None:
     return extract_symbol(ctx)
 
 
+_ENTRY_TYPES = ("none", "pullback", "breakout", "unverifiable")
+
+
+def _horizon_days(horizon: str, explicit=None) -> int | None:
+    """周期文本 → 交易日窗口（回测/触发率用）；无法识别返回 None。"""
+    if isinstance(explicit, int) and explicit > 0:
+        return min(explicit, 250)
+    text = str(horizon or "")
+    if "年" in text:
+        return 250
+    if "月" in text:
+        return 20
+    # 区间取上沿（1-5天 → 5）：窗口要覆盖最长持有期，取 1 天会让触发率显著虚高
+    m = re.search(r"(\d+)\s*[-~～至]\s*(\d+)\s*天", text)
+    if m:
+        return min(int(m.group(2)), 250)
+    m = re.search(r"(\d+)\s*天", text)
+    if m:
+        return min(int(m.group(1)), 250)
+    return None
+
+
+def _group_summary(groups: list) -> str:
+    """同一条消息的聚合口径（只做上下文，不参与统计）。"""
+    votes = {"buy": 0, "hold": 0, "sell": 0}
+    best, best_conf, conditional, n = "", -1.0, 0, 0
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        n += 1
+        d = str(g.get("decision") or "hold").lower()
+        if d in votes:
+            votes[d] += 1
+        entry = g.get("entry") if isinstance(g.get("entry"), dict) else {}
+        if str(entry.get("type") or "none").lower() != "none":
+            conditional += 1
+        c = g.get("confidence")
+        if isinstance(c, (int, float)) and float(c) > best_conf:
+            best_conf, best = float(c), str(g.get("key") or "")
+    return json.dumps({"groups": n, **votes, "conditional": conditional, "best": best},
+                      ensure_ascii=False)
+
+
+def _group_items(dash: dict, ctx: str) -> list[dict]:
+    """groups → 每组一条信号；对象缺失/重复一律跳过，不猜测。"""
+    groups = dash.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return []
+    summary = _group_summary(groups)
+    items, seen = [], set()
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        key = str(g.get("key") or "").strip()
+        decision = str(g.get("decision") or "").lower()
+        if not key or decision not in _VALID_DECISIONS:
+            continue
+        sym = _code_to_symbol_key(g.get("signal_symbol"))
+        if not sym:
+            logger.info("[signal] skip group=%s reason=no_object", key)
+            continue
+        if sym in seen:
+            logger.info("[signal] skip group=%s reason=dup_symbol sym=%s", key, sym)
+            continue
+        seen.add(sym)
+        entry = g.get("entry") if isinstance(g.get("entry"), dict) else {}
+        etype = str(entry.get("type") or "none").lower()
+        if etype not in _ENTRY_TYPES:
+            etype = "unverifiable"
+        low, high = entry.get("low"), entry.get("high")
+        if etype != "none" and low is None and high is None:
+            etype = "unverifiable"
+        name = str(g.get("signal_name") or "").strip()
+        if not name:
+            for c in (g.get("candidates") or []):
+                if isinstance(c, dict) and _code_to_symbol_key(c.get("code")) == sym:
+                    name = str(c.get("name") or "").strip()
+                    break
+        if name:
+            _name_of[sym] = name
+        items.append({
+            "symbol_key": sym,
+            "symbol_name": name or None,
+            "decision": decision,
+            "confidence": (_parse_conf(g.get("confidence"))
+                           if g.get("confidence") is not None else _parse_confidence(dash)),
+            "sentiment": dash.get("sentiment_score"),
+            "verdict": str(g.get("stance") or g.get("note") or "").strip() or None,
+            "basis": _parse_confidence_basis(dash),
+            "market_wide": False,
+            "group_key": key,
+            "horizon": str(g.get("horizon") or ""),
+            "horizon_days": _horizon_days(g.get("horizon"), g.get("horizon_days")),
+            "entry_type": etype,
+            "entry_low": low,
+            "entry_high": high,
+            "invalidation": str(g.get("invalidation") or ""),
+            "conditional": 0 if etype == "none" else 1,
+            "group_summary": summary,
+        })
+    return items
+
+
 def _signals_items(dash: dict | None, ctx: str) -> list[dict]:
     """从 dashboard 生成待入库信号列表。
 
-    优先 `symbol_signals` 数组（组合仪表盘多标的）：逐项解析
+    优先 `groups` 数组（仪表盘多实体契约，见 `_group_items`）；其次
+    `symbol_signals` 数组（组合仪表盘多标的）：逐项解析
     code/name/decision/confidence/condition；回退旧逻辑（顶层 decision_type
     + extract_symbol(ctx) 单标的）。
 
@@ -263,6 +367,10 @@ def _signals_items(dash: dict | None, ctx: str) -> list[dict]:
     """
     if not dash:
         return []
+    # 仪表盘多实体契约：groups 非空 → 逐组提取（每组一条），顶层 decision_type 不落库
+    groups = dash.get("groups")
+    if isinstance(groups, list) and groups:
+        return _group_items(dash, ctx)
     top_decision = dash.get("decision_type")
     sub = dash.get("symbol_signals")
     if isinstance(sub, list) and sub:
@@ -340,11 +448,19 @@ def _insert_signal(sig_conn: sqlite3.Connection, row, it: dict) -> int:
     if it["symbol_key"]:
         cur = sig_conn.execute(
             "INSERT OR IGNORE INTO signal"
-            "(dialog_uuid,message_uuid,symbol_key,symbol_name,decision,confidence,sentiment,core_verdict,signal_time,confidence_basis) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "(dialog_uuid,message_uuid,symbol_key,symbol_name,decision,confidence,"
+            "sentiment,core_verdict,signal_time,confidence_basis,group_key,horizon,"
+            "horizon_days,entry_type,entry_low,entry_high,invalidation,conditional,"
+            "group_summary,scope) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["dialog_uuid"], msg_id, it["symbol_key"], it["symbol_name"],
              it["decision"], it["confidence"], it["sentiment"], it["verdict"],
-             row["created_at"], it["basis"]),
+             row["created_at"], it["basis"],
+             it.get("group_key") or "", it.get("horizon") or "",
+             it.get("horizon_days"), it.get("entry_type") or "",
+             it.get("entry_low"), it.get("entry_high"),
+             it.get("invalidation") or "", int(it.get("conditional") or 0),
+             it.get("group_summary") or "", "symbol"),
         )
         if cur.rowcount == 0 and (it["confidence"] is not None or it["basis"] is not None):
             # A2 存量回填：行已存在（旧数据 confidence/basis 为 NULL）时仅补两列，

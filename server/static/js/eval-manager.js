@@ -1281,7 +1281,7 @@
             </div>
             <div class="entry hot" data-go="existing">
               <div class="jump">→</div>
-              <div class="head"><span class="code">B</span><span class="title">存量回测 <span class="new-badge">NEW</span></span></div>
+              <div class="head"><span class="code">B</span><span class="title">历史对话复盘 <span class="new-badge">NEW</span></span></div>
               <div class="desc">不重跑 agent，直接用<b>历史 run</b>评测。换维度体系后可对同一批历史重新打分。</div>
               <div class="meta"><span class="chip existing">来源：历史存量</span><span class="chip reg">规则分</span><span class="chip diag">研判分</span></div>
               <div class="find">${count.run_count} 条历史 run 可直接评</div>
@@ -1481,7 +1481,7 @@
   }
 
   /* ════════════════════════════════════════════════════════
-   *  视图三：存量回测（原型 view-existing，入口 B §4）
+   *  视图三：历史对话复盘（原「存量回测」，原型 view-existing，入口 B §4）
    * ════════════════════════════════════════════════════════ */
   let _btEs = null;
   let btRunId = null;
@@ -1500,7 +1500,7 @@
       : '';
     el.innerHTML = `
       <div class="section">
-        <div class="section-title">存量回测<span class="tag">历史 run / 对话直接评测，不重跑 agent，只付 judge 成本</span>
+        <div class="section-title">历史对话复盘<span class="tag">历史 run / 对话直接评测，不重跑 agent，只付 judge 成本</span>
           <div class="right"><span class="chip existing">source = existing</span>
             ${existing.length ? `<select id="btRunSel" class="btn">${runOpts}</select>` : ''}
             <button class="btn primary" onclick="window.StockRadar?.evalManager?.triggerBacktest()">开始回测</button></div></div>

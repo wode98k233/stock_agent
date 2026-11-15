@@ -10,6 +10,7 @@ from utils.db_schema.tables import (
     baostock_cache,
     crowding,
     data_monitor,
+    deep_report,
     eval as eval_tables,
     fundamental,
     market_cache,
@@ -38,4 +39,5 @@ ALL_TABLE_GROUPS: dict[str, "list[TableDef]"] = {
     "eval": eval_tables.TABLES,
     "shortline": shortline.TABLES,
     "thesis": thesis.TABLES,
+    "deep_report": deep_report.TABLES,
 }

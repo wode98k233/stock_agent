@@ -51,7 +51,7 @@ MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 # 本地模型目录候选（按顺序取第一个可用者）：
 #   1) RERANKER_LOCAL_DIR
 #   2) STOCK_MEMORY_RERANKER_LOCAL_DIR
-#   3) ../../E:/Code/Lib/Model/bge-reranker-v2-m3（无法跨盘，仅同盘时命中）
+#   3) ../../<本地模型根>/bge-reranker-v2-m3（相对本文件的本地模型根；无法跨盘，仅同盘时命中，也可用 RERANKER_LOCAL_DIR 指定）
 #   4) ./model/bge-reranker-v2-m3（与 server.py 同目录）
 def _resolve_local_dir() -> str:
     _here = os.path.dirname(os.path.abspath(__file__))

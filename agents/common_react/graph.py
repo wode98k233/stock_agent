@@ -6,6 +6,7 @@
 from langgraph.graph import StateGraph, START, END
 
 from agents.common_react.state import ReactSubState
+from agents.prompts import REACT_SYSTEM_PROMPT
 from agents.common_react.nodes import (
     SubAgentNode,
     build_sub_tool_node,
@@ -32,7 +33,8 @@ class ReactSubGraph:
 
     def __init__(self, llm, max_iterations=None, logger=None,
                  budget=None, exec_state=None, tools=None, checkpointer=None,
-                 loop_threshold=2, template_id=None, rate_limiter=None):
+                 loop_threshold=2, template_id=None, rate_limiter=None,
+                 tail_system: str = ""):
         self.llm = llm
         self.max_iterations = max_iterations or Config.PLAN_EXECUTOR_TOOL_CALLS
         self.logger = ensure_radar(logger)
@@ -44,6 +46,7 @@ class ReactSubGraph:
         self.template_id = template_id
         self._user_goal = {"goal": ""}  # 可变容器，ainvoke 时更新
         self._rate_limiter = rate_limiter
+        self._tail_system = tail_system
         self._graph = self._build_graph()
 
     def _build_graph(self):
@@ -85,10 +88,14 @@ class ReactSubGraph:
         metadata: dict = None,
         config: dict = None,
         template_id: str | None = None,
+        guidance_input: str | None = None,
     ) -> dict:
         """执行子 ReAct 图，返回 {tool_results, final_result}
 
         step_purpose=None 时从 checkpoint 恢复（不传 initial_state）。
+
+        :param guidance_input: 计算模板 guidance 时用的 user_input；None → 用 ``step_purpose``。
+            unified 传 ``state["input"]``，与 planner 用同一个串 → 两处 guidance 逐字节相同。
         """
         if exec_state is None:
             exec_state = self.exec_state or ExecutionState()
@@ -139,28 +146,72 @@ class ReactSubGraph:
                 # （报告输出结构 + 质量门禁，实测占指引 72%）。
                 # 2026-10-01 事故：报告结构泄漏导致每个子 Agent 都写了一份完整 10 段报告。
                 _tid = template_id or self.template_id
+                # ⚠️ 2026-10-17 实测结论：guidance **必须留在 user 之前**，不能挪尾部。
+                # 曾尝试把它挪到尾部以便 planner 与之共享 `[REACT][history][user]`，
+                # 但那个可共享头只有 ~700 tok < provider 的 2048 分块 → 一个块都缓存不到；
+                # 而 guidance 留在头部时，planner 自己那段静态 prompt 才是天然可缓存头
+                # （跨 run 稳定）。A/B 实测：挪尾后 unified planner 命中 41%→2%、
+                # 整 run 67.8%→60.2%，净负。故保持原位。
                 if _tid and getattr(Config, "REPORT_ENABLE_ANALYSIS_ENGINE", True):
                     try:
                         from agents.analysis.template_store import load_template, build_guidance
                         template = load_template(_tid)
                         guidance = build_guidance(
-                            template, step_purpose or "", include_report_structure=False)
-                        if guidance:
-                            system_prompt += guidance
-                            system_prompt += (
-                                "\n\n## 你的输出边界（重要）\n"
-                                "你是子 Agent，只负责上述这一个维度。禁止输出完整报告结构；"
-                                "禁止编写「仓位与风险预算 / 交易纪律 / 五类投资者适配 / 行动方案 / "
-                                "小白版翻译」等报告级板块——这些由报告节点统一完成。"
-                                "只输出本维度的数据与判断。"
-                            )
+                            template,
+                            guidance_input if guidance_input is not None else (step_purpose or ""),
+                            include_report_structure=False)
+                        _boundary = (
+                            "\n\n## 你的输出边界（重要）\n"
+                            "你是子 Agent，只负责上述这一个维度。禁止输出完整报告结构；"
+                            "禁止编写「仓位与风险预算 / 交易纪律 / 五类投资者适配 / 行动方案 / "
+                            "小白版翻译」等报告级板块——这些由报告节点统一完成。"
+                            "只输出本维度的数据与判断。"
+                        )
+                        if guidance and self._tail_system:
+                            # guidance 留在 user **之前**（与 React 主链
+                            # [REACT][history][guidance][user] 同形）；
+                            # 「输出边界」属任务约束，随任务指令一起去尾部。
+                            _cm = list(context_messages or [])
+                            _tail_user = None
+                            if _cm and _cm[-1][0] == "user":
+                                _tail_user = _cm.pop()
+                            _cm.append(("system", guidance))
+                            if _tail_user is not None:
+                                _cm.append(_tail_user)
+                            context_messages = _cm
+                            self._tail_system = f"{self._tail_system}{_boundary}"
+                        elif guidance:
+                            system_prompt += guidance + _boundary
                     except Exception:
                         pass
 
-                exec_messages = [
-                    ("system", system_prompt),
-                    *(context_messages or []),
-                ]
+                # ── 前缀形态对齐主链（PRD-A11 FR-10/11）────────────────────
+                # 旧形态：[system: 执行以下任务…+规则+guidance+边界][history][user]
+                #         → 第一条消息是任务专属的，**与主链的 [REACT] 完全不同**，
+                #           于是内层 agent 只能命中 tools+cache_prefix（实测 37%）。
+                #
+                # 新形态：[REACT system][history][guidance'][user][尾部: 任务+规则+边界]
+                #         —— 与 React 主链的 prepare / select_skills 同形，前缀可共享；
+                #           任务指令移到尾部（模型照样能读到，位置不影响它被遵循）。
+                # 未传 tail_system 时（其它调用方）保持旧行为，零回归。
+                if self._tail_system:
+                    # 尾部 = 任务+执行规则（system_prompt） + guidance/边界/技能详情/约束。
+                    #
+                    # ⚠️ system_prompt 必须显式并入：旧写法 `("system", self._tail_system)`
+                    # 把 system_prompt 整段丢了 —— 内层子图拿不到「执行以下任务：{step_purpose}」，
+                    # 也拿不到「目标达成判定」等 5 条执行规则（2026-10-17 探针实测 payload 里
+                    # 两条都不存在），是 cdf5ae5 引入的回归。任务在尾部不影响模型遵循，
+                    # 但会破坏"目标达成即停"，导致过度调用工具。
+                    exec_messages = [
+                        ("system", REACT_SYSTEM_PROMPT),
+                        *(context_messages or []),
+                        ("system", f"{system_prompt}\n\n{self._tail_system}"),
+                    ]
+                else:
+                    exec_messages = [
+                        ("system", system_prompt),
+                        *(context_messages or []),
+                    ]
 
                 initial_state: ReactSubState = {
                     "messages": exec_messages,
@@ -203,6 +254,18 @@ class ReactSubGraph:
         return {
             "tool_results": tool_results,
             "final_result": final_result,
+            # PRD-A9 §14 fork：把内层对话与同一份工具数组交出去，供下游报告复用
+            # 已热前缀（unified_executor 只需透传即可，无需重建）。非对话类状态，
+            # 不进 LangGraph checkpoint 的可序列化路径。
+            # ⚠️ 必须用 exec_state.last_llm_messages（BaseAgentNode 在每次 LLM 调用前
+            # 记录「实际发出的消息」），不能用 final_state["messages"] —— 后者是未经
+            # _prepare_messages 处理的 state 原始版：上下文压缩器 _merge_leading_system
+            # 会把头部连续 system 合并为 1 条（7 条 → 1 条，JSON 骨架差 ~162B），
+            # 两者前缀指纹必然不同 → fork 整段前缀失效，report-fast 命中率跌到个位数
+            # （2026-10-15 实测：unified 7%、e2e 13.3%；react 主图同款 last_llm 机制 92%+）。
+            # 空值（LLM 未调用就退出）→ 下游回落证据注入路径，绝不拿未对齐前缀硬发。
+            "_fork_messages": list(getattr(exec_state, "last_llm_messages", None) or []),
+            "_fork_tools": list(getattr(exec_state, "last_llm_tools", None) or []),
         }
 
     def _build_callbacks(self, budget, exec_state, extra_callbacks=None):
@@ -223,6 +286,7 @@ async def run_react_subgraph(
     tools: list,
     step_purpose: str,
     context_messages: list,
+    tail_system: str = "",
     max_iterations: int = None,
     callbacks: list = None,
     budget=None,
@@ -234,6 +298,7 @@ async def run_react_subgraph(
     handle_budget_callback=None,
     template_id: str = None,
     rate_limiter=None,
+    guidance_input: str = None,
 ) -> dict:
     """执行 ReAct 子图（便捷函数）。
 
@@ -258,6 +323,7 @@ async def run_react_subgraph(
         checkpointer=checkpointer,
         template_id=template_id,
         rate_limiter=rate_limiter,
+        tail_system=tail_system,
     )
 
     config = {}
@@ -274,6 +340,7 @@ async def run_react_subgraph(
             callbacks=callbacks,
             metadata=metadata,
             config=config,
+            guidance_input=guidance_input,
         )
     except BudgetExceeded:
         # 子图内预算超限：尝试 checkpoint 恢复

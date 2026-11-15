@@ -111,11 +111,11 @@
       const el = document.getElementById('flowTreemap');
       if (!el) return;
 
-      // 动态加载 ECharts（复用 chart-kline.js 的 CDN）
+      // 动态加载 ECharts（本地 vendor 优先：jsdelivr 在部分网络不可达，图表会静默不渲染）
       if (!window.echarts) {
         await new Promise((resolve, reject) => {
           const s = document.createElement('script');
-          s.src = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
+          s.src = '/static/vendor/echarts.min.js';
           s.onload = () => resolve();
           s.onerror = () => reject(new Error('ECharts 加载失败'));
           document.head.appendChild(s);

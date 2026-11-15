@@ -90,6 +90,37 @@ class TestWriteEnvChanges:
         content = env_file.read_text()
         assert "FLAG=true" in content
 
+    def test_preserves_crlf_line_endings(self, cm, tmp_path):
+        """Windows 的 .env 常是 CRLF：改一行不能把其它行/新行写成 LF（混行尾）。"""
+        from utils.config_manager import ConfigManager
+
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(b"# comment\r\nKEY=old\r\nOTHER=x\r\n")
+        ConfigManager.write_env_changes({"KEY": "new", "ADDED": "1"}, str(env_file))
+
+        raw = env_file.read_bytes()
+        assert b"KEY=new\r\n" in raw
+        assert b"ADDED=1\r\n" in raw
+        assert b"\n" not in raw.replace(b"\r\n", b"")  # 没有裸 LF
+
+    def test_preserves_lf_line_endings(self, cm, tmp_path):
+        from utils.config_manager import ConfigManager
+
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(b"KEY=old\n")
+        ConfigManager.write_env_changes({"KEY": "new"}, str(env_file))
+        raw = env_file.read_bytes()
+        assert raw == b"KEY=new\n"
+
+    def test_roundtrip_safe_rejects_dotenv_hazards(self):
+        from utils.config_manager import env_roundtrip_safe
+
+        assert env_roundtrip_safe("sk-abc")
+        assert env_roundtrip_safe("ab#cd")
+        assert not env_roundtrip_safe("ab${HOME}cd")
+        assert not env_roundtrip_safe("ab #cd")
+        assert not env_roundtrip_safe("a\nb")
+
 
 # ── reload ───────────────────────────────────────────────────
 

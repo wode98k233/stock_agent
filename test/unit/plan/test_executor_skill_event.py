@@ -65,9 +65,12 @@ def test_plan_executor_injects_skill_usage(monkeypatch):
                  "purpose": "获取技术指标", "instruction": "计算贵州茅台 MACD"}
 
     result, _ = asyncio.run(ex._run_step_with_retry(
-        {}, step_info, [], object(), _Ctx(), None, None, MagicMock(), None,
+        {"input": "计算贵州茅台 MACD"}, step_info, [], object(), _Ctx(), None, None, MagicMock(), None,
     ))
 
     assert result["past_steps"]
+    # ⚠️ 前缀形态对齐（PRD-A11 FR-10/11）后，技能详情 / 步骤指令**随尾部投递**，
+    #    不再插在 history 与 user 之间；context 头部收尾为 `("user", 用户原话)`。
     context_msgs = captured["context_messages"]
-    assert context_msgs[0] == ("system", f"可用工具详情：\n{_FakeBuilder.marker}")
+    assert context_msgs[-1] == ("user", "计算贵州茅台 MACD")
+    assert _FakeBuilder.marker in captured["tail_system"]

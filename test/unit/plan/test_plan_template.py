@@ -647,25 +647,30 @@ class TestPlannerMessageOrder:
             mock_spb.build_catalog_prompt.return_value = "STATIC_CATALOG"
             asyncio.run(plan_step(state, ctx))
 
-        # 消息应为: [(system, stable), (human, history), (system, guidance), (human, input)]
-        system_msgs = [m for m in captured_messages if isinstance(m, type(captured_messages[0])) and hasattr(m, 'type') and m.type == "system"]
-        # 使用 content 判断
-        first_system_content = captured_messages[0].content
+        # 新形态（对齐 agent 家族）：[REACT][history][guidance][user][TAIL(规划指令+技能目录+输出格式)]
+        def _c(m):
+            return m[1] if isinstance(m, tuple) else getattr(m, "content", "")
 
-        assert "STATIC_CATALOG" in first_system_content
-        assert "DYNAMIC_GUIDANCE" not in first_system_content
+        def _r(m):
+            return m[0] if isinstance(m, tuple) else getattr(m, "type", "")
 
-        # HISTORY 在 guidance 之前
-        all_contents = [m.content for m in captured_messages]
+        all_contents = [_c(m) for m in captured_messages]
+        # messages[0] = REACT system（history 里第一条是 human，故 guidance 不会并进来）
+        assert all_contents[0].startswith("你是选股雷达的智能分析师")
+        assert "STATIC_CATALOG" not in all_contents[0]
+        assert "DYNAMIC_GUIDANCE" not in all_contents[0]
+
         history_idx = next(i for i, c in enumerate(all_contents) if "HISTORY_MARKER" in c)
         guidance_idx = next(i for i, c in enumerate(all_contents) if "DYNAMIC_GUIDANCE" in c)
         assert history_idx < guidance_idx
+        assert _r(captured_messages[guidance_idx]) == "system"
 
-        # guidance 是 system 角色
-        assert captured_messages[guidance_idx].type == "system"
-
-        # 用户输入在末尾
-        assert "分析股票" in all_contents[-1]
+        # 用户输入在 guidance 之后、尾部指令之前；技能目录 + 输出格式在尾部 system
+        user_idx = next(i for i in range(len(captured_messages)) if _r(captured_messages[i]) == "user")
+        assert "分析股票" in all_contents[user_idx]
+        assert guidance_idx < user_idx < len(all_contents) - 1
+        assert _r(captured_messages[-1]) == "system"
+        assert "STATIC_CATALOG" in all_contents[-1]
 
     def test_no_guidance_when_no_template(self):
         """无 template_id 时不产生 guidance 消息。"""
@@ -700,8 +705,15 @@ class TestPlannerMessageOrder:
             mock_spb.build_catalog_prompt.return_value = "STATIC_CATALOG"
             asyncio.run(plan_step(state, ctx))
 
-        system_count = sum(1 for m in captured_messages if hasattr(m, 'type') and m.type == "system")
-        assert system_count == 1
+        def _r(m):
+            return m[0] if isinstance(m, tuple) else getattr(m, "type", "")
+
+        def _c(m):
+            return m[1] if isinstance(m, tuple) else getattr(m, "content", "")
+
+        # 无模板 → 无 guidance；形态 = [REACT][user][TAIL(目录+输出格式)]
+        assert [_r(m) for m in captured_messages] == ["system", "user", "system"]
+        assert "STATIC_CATALOG" in _c(captured_messages[-1])
 
 
 # ── Replanner 契约测试 ────────────────────────────────────────

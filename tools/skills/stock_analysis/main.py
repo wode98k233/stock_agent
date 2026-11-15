@@ -55,9 +55,9 @@ def _fetch_benchmark_history(code: str, days: int, logger):
 
 
 # 通用网搜的装配 + 归一化已收敛到 tools/search/service.py（唯一装配点，走
-# SearchProviderFactory 的 8 源）。原先这里的 `_NEWS_FALLBACK_HINT` /
+# SearchProviderFactory 的 11 源）。原先这里的 `_NEWS_FALLBACK_HINT` /
 # `_search_failure_payload` / `_normalize_search_response` 三个私有实现是
-# 「两套实现各自漂移」的根源（本技能只认 MX/SerpAPI/Tavily，配置面板却暴露 8 源），
+# 「两套实现各自漂移」的根源（本技能只认 MX/SerpAPI/Tavily，配置面板却暴露全部源），
 # 2026-10-04 统一下沉，技能侧改为调用 `service.run_web_search()`。
 
 

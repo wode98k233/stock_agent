@@ -647,9 +647,15 @@ def test_default_summarizer_static_system_dynamic_user(mock_logger):
     assert len(captured_messages) == 2
 
 
-def test_default_summarizer_uses_compress_llm(mock_logger):
-    """上下文压缩走 COMPRESS_LLM_*，忽略调用方传入的 agent llm。"""
+def test_default_summarizer_uses_compress_llm_in_standalone_mode(mock_logger):
+    """standalone 档：上下文压缩走 COMPRESS_LLM_*，忽略调用方传入的 agent llm。
+
+    ⚠️ PRD-A11 FR-2：默认档已翻成 ``fork``（压缩与主模型同 provider 才共享前缀缓存），
+    所以本用例必须**显式钉住 standalone** 才成立。fork 档的行为由
+    ``test_context_summary_fork.py::test_fork_mode_uses_passed_llm_not_compress_model`` 覆盖。
+    """
     from agents.react.context import default_summarizer
+    from config import Config
     from unittest.mock import MagicMock, patch
 
     passed_llm = MagicMock(name="agent_llm")
@@ -660,7 +666,8 @@ def test_default_summarizer_uses_compress_llm(mock_logger):
         captured["llm"] = llm
         return {"summary_version": 1, "summarized_rounds": []}
 
-    with patch("utils.llm_factory.get_compress_llm", return_value=compress_llm), \
+    with patch.object(Config, "CONTEXT_SUMMARY_MODE", "standalone"), \
+         patch("utils.llm_factory.get_compress_llm", return_value=compress_llm), \
          patch("agents.react.context.llm_json_with_retry", side_effect=fake_json_with_retry):
         default_summarizer(
             previous_summary=None,
@@ -670,6 +677,38 @@ def test_default_summarizer_uses_compress_llm(mock_logger):
         )
 
     assert captured["llm"] is compress_llm
+
+
+def test_default_summarizer_fork_mode_uses_main_llm(mock_logger):
+    """fork 档（**当前默认**）：压缩必须用主模型。
+
+    跨 provider 的 prompt cache 不共享 —— 这一条若破，压缩命中率会静默归零，
+    且从代码与指标上都看不出来（症状只是"没提速"）。
+    """
+    from agents.react.context import default_summarizer
+    from config import Config
+    from unittest.mock import MagicMock, patch
+
+    agent_llm = MagicMock(name="agent_llm")
+    compress_llm = MagicMock(name="compress_llm")
+    captured = {}
+
+    def fake_json_with_retry(llm, messages, logger, **kwargs):
+        captured["llm"] = llm
+        return {"summary_version": 1, "summarized_rounds": []}
+
+    with patch.object(Config, "CONTEXT_SUMMARY_MODE", "fork"), \
+         patch("utils.llm_factory.get_compress_llm", return_value=compress_llm), \
+         patch("agents.react.context.llm_json_with_retry", side_effect=fake_json_with_retry):
+        default_summarizer(
+            previous_summary=None,
+            new_rounds_text="ROUNDS",
+            llm=agent_llm,
+            logger=mock_logger,
+        )
+
+    assert captured["llm"] is agent_llm
+    assert captured["llm"] is not compress_llm
 
 
 def test_default_summarizer_falls_back_when_compress_llm_unavailable(mock_logger):

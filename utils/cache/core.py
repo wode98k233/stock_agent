@@ -90,7 +90,7 @@ def _get(table: str, key: str):
     return json.loads(row['data'])
 
 
-def _set(table: str, key: str, data, expire_hours: int):
+def _set(table: str, key: str, data, expire_hours: float):
     ck = _cache_key(table, key)
     serialized = json.dumps(data, ensure_ascii=False, default=str)
     now = datetime.now()
@@ -107,6 +107,22 @@ def _delete(table: str, key: str):
     ck = _cache_key(table, key)
     with _get_cache_db() as conn:
         conn.execute('DELETE FROM cache_kv WHERE cache_key = ?', (ck,))
+
+
+def _delete_prefix(table: str, prefix: str) -> int:
+    """按 cache_key 前缀批量删除（返回删除行数）。
+
+    **必须用 GLOB，不能用 LIKE**：缓存 key 里的 `{table}:{prefix}` 会带下划线
+    （如 thesis_id `bond_fund`），而 LIKE 的 `_` 是「任意单字符」通配符，
+    `LIKE 'cache_thesis_chart:bond_fund:%'` 会把 `bondXfund` 一起误删。
+    GLOB 区分大小写，且只有 `*`/`?`/`[]` 有通配语义——调用方保证 prefix 是
+    业务 slug（不含这些字符）。
+    """
+    ck = _cache_key(table, prefix)
+    with _get_cache_db() as conn:
+        cur = conn.execute('DELETE FROM cache_kv WHERE cache_key GLOB ?',
+                           (ck + '*',))
+    return max(0, int(cur.rowcount or 0))
 
 
 # ── DataFrame 缓存 ──

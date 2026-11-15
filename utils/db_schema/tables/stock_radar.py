@@ -55,6 +55,7 @@ TABLES = [
         title TEXT NOT NULL,
         current_mode TEXT NOT NULL,
         title_auto INTEGER NOT NULL DEFAULT 0,
+        origin TEXT NOT NULL DEFAULT 'user',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
@@ -75,6 +76,7 @@ TABLES = [
         trace_run_id TEXT,
         error TEXT,
         extra TEXT,
+        attachments TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (dialog_uuid) REFERENCES web_dialogs(dialog_uuid)
@@ -159,6 +161,40 @@ TABLES = [
         market_status TEXT
     )""",
              migrate=_migrate_portfolio_account),
+
+    # ── 账户历史快照（ADR-008）──────────────────────────────────────────────
+    # 用户登录东财要输交易密码，无法自动同步，所以数据只能靠「打开持仓页 / 点同步」时
+    # 顺带落库。一天一行，同一天多次触发按 upsert 覆盖（越晚越接近日终）。
+    TableDef(name="portfolio_snapshot", ddl="""CREATE TABLE IF NOT EXISTS portfolio_snapshot (
+        snapshot_date TEXT PRIMARY KEY,
+        total_asset REAL,
+        avail_cash REAL,
+        positions_market_value REAL,
+        today_pnl REAL,
+        realized_pnl REAL,
+        position_count INTEGER,
+        recorded_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )"""),
+
+    TableDef(name="portfolio_snapshot_position", ddl="""CREATE TABLE IF NOT EXISTS portfolio_snapshot_position (
+        snapshot_date TEXT NOT NULL,
+        stock_code TEXT NOT NULL,
+        stock_name TEXT,
+        market TEXT NOT NULL DEFAULT 'cn',
+        qty REAL,
+        avg_cost REAL,
+        price REAL,
+        market_value REAL,
+        pnl REAL,
+        pnl_pct REAL,
+        etf_flag INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (snapshot_date, stock_code)
+    )""",
+             indexes=["CREATE INDEX IF NOT EXISTS idx_snap_pos_date"
+                      " ON portfolio_snapshot_position(snapshot_date)"]),
 
     TableDef(name="group_messages", ddl="""CREATE TABLE IF NOT EXISTS group_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

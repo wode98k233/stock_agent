@@ -682,7 +682,8 @@ def test_build_prompt_phase1_index_and_detail_request():
 
     msgs = _build_prompt("报告正文", {}, "问题",
                          tool_index="- get_positions | 长度:10", allow_detail_request=True)
-    assert "可下钻" in msgs[0][1]
+    # PRD-A9 §3.1：可下钻规则已从 system 下沉到 user[0]（system 三条调用共享）
+    assert "可下钻" in msgs[1][1]
     assert "工具结果索引" in msgs[1][1] and "need_tools" in msgs[1][1]
 
 
@@ -701,7 +702,7 @@ def test_generate_two_phase_drilldown():
 
     seen = []
 
-    async def fake_call(messages, budget, logger_obj, metadata=None, run_config=None):
+    async def fake_call(messages, budget, logger_obj, **kwargs):
         seen.append(messages[1][1])
         if len(seen) == 1:
             return {"need_tools": ["get_positions"], "reason": "缺持仓明细"}
@@ -726,7 +727,7 @@ def test_generate_single_phase_when_enough():
 
     calls = []
 
-    async def fake_call(messages, budget, logger_obj, metadata=None, run_config=None):
+    async def fake_call(messages, budget, logger_obj, **kwargs):
         calls.append(1)
         return {"scenario_tag": "决策仪表盘", "core_verdict": "x", "decision_type": "hold",
                 "confidence_level": 0.5, "sentiment_score": 50, "trend_prediction": "neutral",
@@ -863,6 +864,49 @@ def test_quick_dashboard_def_registered_and_minimal():
     cat = get_dashboard_category("quick_lookup", load_template("quick_lookup"))
     assert cat.dashboard_id == "quick"
     assert cat.scenario_tag == "速览仪表盘"
+
+
+# ---------------------------------------------------------------------------
+# 幂等剥离：报告里已有的仪表盘块必须在追加前清掉（2026-11-06 事故）
+#
+# 现场：report-fast 把上下文里上一份报告的尾巴（含 @@DASHBOARD@@ 块）原样续写进
+# 正文，dashboard 节点又追加了一个 → 一份回答两个块；前端只渲染第一个（旧 schema，
+# 字段缺失 → 卡片显示 undefined），第二个裸露成一坨 JSON。
+# ---------------------------------------------------------------------------
+
+class TestStripDashboardBlocks:
+    def _f(self):
+        from agents.analysis.dashboard_node import _strip_dashboard_blocks
+        return _strip_dashboard_blocks
+
+    def test_strips_single_block(self):
+        f = self._f()
+        text = '## 核心结论\n\n正文。\n\n@@DASHBOARD_START@@{"a":1}@@DASHBOARD_END@@'
+        out = f(text)
+        assert "@@DASHBOARD" not in out
+        assert out.rstrip().endswith("正文。")
+
+    def test_strips_all_blocks(self):
+        f = self._f()
+        text = ('A\n@@DASHBOARD_START@@{"a":1}@@DASHBOARD_END@@\n'
+                'B\n@@DASHBOARD_START@@{"b":2}@@DASHBOARD_END@@')
+        out = f(text)
+        assert "@@DASHBOARD_START@@" not in out
+        assert "A" in out and "B" in out
+
+    def test_no_block_returns_original(self):
+        f = self._f()
+        assert f("纯正文，没有仪表盘") == "纯正文，没有仪表盘"
+
+    def test_empty_inputs(self):
+        f = self._f()
+        assert f("") == ""
+        assert f(None) == ""
+
+    def test_multiline_json_block(self):
+        f = self._f()
+        text = 'X\n@@DASHBOARD_START@@{\n  "a": 1,\n  "b": [1,2]\n}@@DASHBOARD_END@@'
+        assert "@@DASHBOARD" not in f(text)
 
 
 if __name__ == "__main__":

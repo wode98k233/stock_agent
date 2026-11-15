@@ -193,8 +193,13 @@ def test_create_react_graph_has_no_runnable_config_type_warning(mock_logger):
     assert "config' parameter should be typed as 'RunnableConfig" not in warning_text
 
 
-def test_prepare_node_static_prefix_before_dynamic_guidance(mock_logger):
-    """PrepareNode: 稳定 system prompt 在前，动态 template guidance 独立放在历史之后。"""
+def test_prepare_node_static_prefix_before_dynamic_guidance(mock_logger, strict_surface):
+    """PrepareNode: 稳定 system prompt 在前，动态 template guidance 独立放在历史之后。
+
+    pin 在 strict 档：本用例拿工具名当「静态前缀」的标记，而 full 档已刻意
+    去掉 `## 可用工具`（与 tools 数组一字不差）。full 档的对应行为由
+    test_tool_surface_full_behavior.py::test_prepare_omits_tool_list_in_full_mode 覆盖。
+    """
 
     async def run_case():
         from agents.react.nodes import PrepareNode

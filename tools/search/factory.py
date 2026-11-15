@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from .base import BaseSearchProvider
 from .aggregator import SearchAggregator
+from .deepseek_provider import DeepSeekSearchProvider
 from .mx_provider import MXSearchProvider
 from .tavl_provider import TavilySearchProvider
 from .serp_provider import SerpAPISearchProvider
@@ -41,8 +42,22 @@ class SearchProviderFactory:
 
     @staticmethod
     def create_providers() -> List[BaseSearchProvider]:
-        """创建所有可用的搜索引擎"""
+        """创建所有可用的搜索引擎（顺序 = 聚合器的 first-good-wins 优先级）"""
         providers = []
+
+        # 0. DeepSeek 官方搜索（有 Key 即启用，**排在最前**）
+        #
+        # 为什么必须排在最前：聚合器是 first-good-wins —— 任一源一次返回 >= max_results 条就立即
+        # 返回。MX 是免 Key 且中文能出结果的默认源，只要它在前面，DeepSeek 几乎永远不会被调用
+        # （等于白集成）。本源是自带 rerank_score/authority、又给 600~800 字符长摘要的源，
+        # 质量与「给模型读」的适配度都最好，因此排首位；MX 退为免 Key 兜底。
+        # 成本：约 ¥0.005/次成功搜索（¥5/1000 次），聚合器另有 10 分钟缓存 + 同 query 去重。
+        # 不想要就 `DEEPSEEK_SEARCH_ENABLED=false`，或用 `SEARCH_PROVIDER_ORDER` 重排。
+        if os.getenv("DEEPSEEK_SEARCH_ENABLED", "true").strip().lower() not in ("false", "0", "no"):
+            deepseek_keys = SearchProviderFactory._parse_keys("DEEPSEEK_API_KEYS")
+            if deepseek_keys:
+                providers.append(DeepSeekSearchProvider(deepseek_keys))
+                logger.info(f"已配置 DeepSeek 官方搜索（排首位），共 {len(deepseek_keys)} 个 Key")
 
         # 1. MX 搜索（默认，无需 API Key）
         mx = MXSearchProvider()
@@ -117,10 +132,45 @@ class SearchProviderFactory:
             else:
                 logger.info("已启用 SearXNG 公共实例模式")
 
+        providers = SearchProviderFactory._apply_order(providers)
+
         if not providers:
             logger.warning("未配置任何搜索引擎，搜索功能将不可用")
 
         return providers
+
+    @staticmethod
+    def _apply_order(providers: List[BaseSearchProvider],
+                     order: str = None) -> List[BaseSearchProvider]:
+        """按 `SEARCH_PROVIDER_ORDER` 重排 / 裁剪搜索源（**白名单语义**）。
+
+        留空（默认）= 保持默认顺序、全量使用。一旦填了，就以「写了的才用、按写的顺序」为准：
+        这既能在 DeepSeek 额度耗尽或想省钱时一键切回免 Key 组合，也能把链路收敛到指定源。
+        未识别的名字会告警——避免拼写错误静默变成「某几个源不见了」这种最难查的故障。
+        """
+        raw = order if order is not None else os.getenv("SEARCH_PROVIDER_ORDER", "")
+        names = [n.strip() for n in (raw or "").split(",") if n.strip()]
+        if not names:
+            return providers
+
+        by_name = {p.name.lower(): p for p in providers}
+        ordered: List[BaseSearchProvider] = []
+        used = set()
+        for n in names:
+            p = by_name.get(n.lower())
+            if p is None:
+                logger.warning(f"SEARCH_PROVIDER_ORDER 里的「{n}」不是当前可用的搜索源，已忽略")
+                continue
+            if p.name.lower() in used:
+                continue
+            used.add(p.name.lower())
+            ordered.append(p)
+
+        dropped = [p.name for p in providers if p.name.lower() not in used]
+        if dropped:
+            logger.info(f"SEARCH_PROVIDER_ORDER 已生效：启用 {[p.name for p in ordered]}；"
+                        f"未列入的源本次不使用 {dropped}")
+        return ordered
 
     @staticmethod
     def create_aggregator() -> SearchAggregator:

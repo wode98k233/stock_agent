@@ -228,7 +228,6 @@ class TestSignalScannerScan:
         mock_df = _to_db_df(_crossover_df(n=60))
 
         with patch('backtest.signal_scanner._load_stock_daily', return_value=mock_df), \
-             patch('backtest.signal_scanner._apply_adjustment', return_value=mock_df), \
              patch('backtest.signal_scanner.get_strategy_class', return_value=cls):
             scanner = SignalScanner()
             result = scanner.scan(
@@ -257,7 +256,6 @@ class TestSignalScannerScan:
         mock_df = _to_db_df(_synthetic_df(n=30, seed=5))
 
         with patch('backtest.signal_scanner._load_stock_daily', return_value=mock_df), \
-             patch('backtest.signal_scanner._apply_adjustment', return_value=mock_df), \
              patch('backtest.signal_scanner.get_strategy_class', return_value=cls):
             scanner = SignalScanner()
             result = scanner.scan(
@@ -286,21 +284,10 @@ class TestSignalScannerScan:
         assert result['latest_is_buy'] is False
         assert result['latest_date'] == ''
 
-    def test_scan_no_adjust_when_none(self):
-        """adjust_type='none' 时不调用 _apply_adjustment"""
-        from backtest.signal_scanner import SignalScanner
+    def test_scanner_no_longer_imports_apply_adjustment(self):
+        """P0 §11.8.3：运行时复权停用——signal_scanner 不再持有 _apply_adjustment。
 
-        cls = compile_strategy(_dual_ma_json())
-        mock_df = _to_db_df(_synthetic_df(n=30, seed=3))
-
-        with patch('backtest.signal_scanner._load_stock_daily', return_value=mock_df), \
-             patch('backtest.signal_scanner._apply_adjustment') as mock_adj, \
-             patch('backtest.signal_scanner.get_strategy_class', return_value=cls):
-            scanner = SignalScanner()
-            scanner.scan(
-                code='600519', strategy_id='dual_ma_test',
-                start_date='2025-01-01', end_date='2025-12-31',
-                adjust_type='none',
-            )
-
-        mock_adj.assert_not_called()
+        结构性断言：模块级不再导入该函数（原先任何口径都经它复权；现为直通）。
+        """
+        import backtest.signal_scanner as ss
+        assert not hasattr(ss, '_apply_adjustment')

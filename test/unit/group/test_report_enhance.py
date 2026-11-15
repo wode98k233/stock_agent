@@ -168,6 +168,37 @@ class TestReportEnhanceNode:
         assert "报告内容" in result["response"]
 
     @pytest.mark.asyncio
+    async def test_task_spec_passed_to_dashboard(self):
+        """group 模式：state.task_spec 必须原样透传给 append_dashboard。
+
+        多实体仪表盘的实体对齐/提示词块全靠这一层透传，断了不会报错、只会静默
+        退化成「LLM 自由发挥 groups」。
+        """
+        from agents.group.nodes.report_enhance import report_enhance_node
+        spec = {"entities": [{"key": "科技"}, {"key": "消费"}]}
+        state = _make_state(accumulated_data="报告内容", task_spec=spec,
+                            template_id="sector_landscape")
+        ctx = _make_ctx()
+        captured = {}
+
+        async def fake_append(**kwargs):
+            captured.update(kwargs)
+            return kwargs["report"]
+
+        with patch("agents.group.nodes.report_enhance.Config") as mock_cfg, \
+             patch("agents.group.nodes.report_enhance.GroupMessageLogger") as mock_log_cls, \
+             patch("agents.analysis.dashboard_node.append_dashboard",
+                   side_effect=fake_append):
+            mock_cfg.REPORT_ENABLE_ANALYSIS_ENGINE = False
+            mock_cfg.DASHBOARD_ENABLED = True
+            mock_log_cls.from_state.return_value = MagicMock()
+
+            result = await report_enhance_node(state, ctx)
+
+        assert captured["task_spec"] == spec
+        assert result["response"] == "报告内容"
+
+    @pytest.mark.asyncio
     async def test_tool_calls_carry_evidence_items_for_group_mode(self):
         """agent_group 模式：报告后处理收到「可下钻条目」而非空列表
 

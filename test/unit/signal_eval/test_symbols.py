@@ -1,7 +1,12 @@
-"""ETF 标的识别测试（P4：别名词典 + 前缀规则）。"""
+"""ETF 标的识别测试（P4：库里的 ETF 简称 + 前缀规则）。"""
 import sqlite3
 
+import pytest
+
 from signal_eval.symbols import resolve_etf_alias, etf_symbol_key
+
+# ETF 简称在库里（kind='etf'，数据源 data/symbol_aliases.json）：用临时库，不读本机真库
+pytestmark = pytest.mark.usefixtures("symbol_alias_db")
 
 
 def _make_info_db(tmp_path, etfs):
@@ -23,8 +28,8 @@ def test_etf_symbol_key_prefix():
     assert etf_symbol_key("52") is None       # 短码
 
 
-def test_resolve_etf_alias_hardcoded():
-    """硬编码高频简称直接命中。"""
+def test_resolve_etf_alias_from_db():
+    """库里（symbol_alias kind='etf'）收录的高频简称直接命中。"""
     assert resolve_etf_alias("红利ETF") is not None
     assert resolve_etf_alias("消费ETF") is not None
     assert resolve_etf_alias("黄金ETF") is not None

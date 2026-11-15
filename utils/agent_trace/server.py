@@ -40,6 +40,8 @@ class TraceHandler(SimpleHTTPRequestHandler):
             sub = self.path.split("/api/runs/")[1].split("/")
             if len(sub) > 1 and sub[1] == "steps":
                 self._json_response(self._get_steps(rid))
+            elif len(sub) > 1 and sub[1] == "context":
+                self._json_response(_context_payload(rid))
             else:
                 self._json_response(self._get_run(rid))
         elif self.path == "/api/reviews" or self.path.startswith("/api/reviews?"):
@@ -60,6 +62,7 @@ class TraceHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/api/reviews":
+            self._drain_body()
             self.send_error(404)
             return
         # 跨域防护最薄一层：本服务无 do_OPTIONS，浏览器对带 JSON 的跨域请求会先发
@@ -67,6 +70,7 @@ class TraceHandler(SimpleHTTPRequestHandler):
         # LLM 调用；监听地址维持既有绑定行为，不在本次变更范围内。
         ctype = self.headers.get("Content-Type", "") or ""
         if ctype.split(";")[0].strip().lower() != "application/json":
+            self._drain_body()
             self._json_response({"error": "unsupported media type"})
             return
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -76,6 +80,25 @@ class TraceHandler(SimpleHTTPRequestHandler):
             self._json_response({"error": "invalid json"})
             return
         self._json_response(_create_review_payload(payload))
+
+    def _drain_body(self) -> None:
+        """回错误响应前把未读的请求体吃掉。
+
+        ⚠️ 不读直接关连接时，Windows 对带未读数据的 socket 会发 RST，客户端拿到的是
+        `WinError 10053 ConnectionAbortedError` 而不是我们回的 4xx（真机同样如此：
+        用 `text/plain` 打 `/api/reviews` 的客户端会看到"连接被中止"）。
+        并行跑单测时表现为 `test_reviews_api` 的两条错误路径用例偶发红。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if length <= 0:
+            return
+        try:
+            self.rfile.read(min(length, 1 << 20))  # 上限 1MB，避免被超大 body 拖住
+        except (OSError, ValueError):
+            pass
 
     @staticmethod
     def _get_runs():
@@ -130,6 +153,19 @@ def _reviews_payload(run_id: str) -> dict:
     from utils.agent_trace.store import store
     from eval.review import store as review_store
     return {"items": review_store.list_reviews(store.reviews_conn(), "run", run_id)}
+
+
+def _context_payload(run_id: str) -> dict:
+    """单 run 上下文快照（口径见 utils/agent_trace/context_stats.py 顶部）。"""
+    from utils.agent_trace import context_stats
+    if not run_id:
+        return {"error": "run_id required"}
+    snapshot = context_stats.build_run_context(run_id)
+    if snapshot is None:
+        return {"error": "run not found"}
+    # steps 只用于服务端计算，不回传给前端（大 run 可上百步、月库可达 170MB）
+    snapshot.pop("steps", None)
+    return snapshot
 
 
 def _create_review_payload(payload: dict) -> dict:

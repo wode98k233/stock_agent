@@ -102,23 +102,30 @@ def test_web_config_apply_writes_env_and_reloads_runtime_settings(tmp_path, monk
         with TestClient(app) as client:
             res = client.post(
                 "/api/config/apply",
-                json={"changes": {
-                    "DASHBOARD_ENABLED": False,
-                    "DASHBOARD_MAX_LLM_TOKENS": 777,
-                    "REACT_ENABLE_CONTEXT_COMPACTION": False,
-                    "REACT_CONTEXT_RECENT_ROUNDS": 4,
-                    "MX_APIKEY": "new-mx",
-                }},
+                json={
+                    "changes": {
+                        "DASHBOARD_ENABLED": False,
+                        "DASHBOARD_MAX_LLM_TOKENS": 777,
+                        "REACT_ENABLE_CONTEXT_COMPACTION": False,
+                        "REACT_CONTEXT_RECENT_ROUNDS": 4,
+                        # 敏感项从 changes 提交会被拦截（只写通道在 secrets）
+                        "MX_APIKEY": "should-be-blocked",
+                    },
+                    "secrets": {"MX_APIKEY": "new-mx"},
+                },
             )
 
         assert res.status_code == 200
         assert res.json()["success"] is True
+        assert res.json()["blocked"] == ["MX_APIKEY"]
+        assert res.json()["secrets_updated"] == ["MX_APIKEY"]
         content = env_path.read_text(encoding="utf-8")
         assert "DASHBOARD_ENABLED=false" in content
         assert "DASHBOARD_MAX_LLM_TOKENS=777" in content
         assert "REACT_ENABLE_CONTEXT_COMPACTION=false" in content
         assert "REACT_CONTEXT_RECENT_ROUNDS=4" in content
         assert "MX_APIKEY=new-mx" in content
+        assert "should-be-blocked" not in content
         assert Config.DASHBOARD_ENABLED is False
         assert Config.DASHBOARD_MAX_LLM_TOKENS == 777
         assert Config.REACT_ENABLE_CONTEXT_COMPACTION is False
